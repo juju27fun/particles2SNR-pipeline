@@ -1,0 +1,103 @@
+{
+  "scan_params": {
+    "base_folder": "P0/data/dataset_particles2SNR_clean/train",
+    "fs": 2000000.0,
+    "fmin": 7000.0,
+    "fmax": 80000.0,
+    "min_flat": 500,
+    "zero_threshold": 0.0001,
+    "method": "bandpass_derivative_flat_run"
+  },
+  "summary": {
+    "total_files": 1192,
+    "total_saturated_files": 4,
+    "total_intervals": 4,
+    "saturated_file_pct": 0.33557046979865773
+  },
+  "class_summary": [
+    {
+      "class": "2um",
+      "saturated": 0,
+      "total": 393,
+      "intervals": 0
+    },
+    {
+      "class": "4um",
+      "saturated": 0,
+      "total": 398,
+      "intervals": 0
+    },
+    {
+      "class": "10um",
+      "saturated": 4,
+      "total": 401,
+      "intervals": 4
+    }
+  ],
+  "intervals": [
+    {
+      "file": "HFocusing_5_10_10um_0_1059.npy22.npy",
+      "path": "P0/data/dataset_particles2SNR_clean/train/10um/HFocusing_5_10_10um_0_1059.npy22.npy",
+      "class": "10um",
+      "interval_idx": 0,
+      "start_sample": 1836,
+      "end_sample": 2500,
+      "duration_samples": 664,
+      "flat_derivative_count": 663,
+      "fs": 2000000.0,
+      "fmin": 7000.0,
+      "fmax": 80000.0,
+      "min_flat": 500,
+      "zero_threshold": 0.0001,
+      "method": "bandpass_derivative_flat_run"
+    },
+    {
+      "file": "HFocusing_5_10_10um_0_1142.npy55.npy",
+      "path": "P0/data/dataset_particles2SNR_clean/train/10um/HFocusing_5_10_10um_0_1142.npy55.npy",
+      "class": "10um",
+      "interval_idx": 0,
+      "start_sample": 1993,
+      "end_sample": 2500,
+      "duration_samples": 507,
+      "flat_derivative_count": 506,
+      "fs": 2000000.0,
+      "fmin": 7000.0,
+      "fmax": 80000.0,
+      "min_flat": 500,
+      "zero_threshold": 0.0001,
+      "method": "bandpass_derivative_flat_run"
+    },
+    {
+      "file": "HFocusing_5_10_10um_0_1730.npy270.npy",
+      "path": "P0/data/dataset_particles2SNR_clean/train/10um/HFocusing_5_10_10um_0_1730.npy270.npy",
+      "class": "10um",
+      "interval_idx": 0,
+      "start_sample": 1999,
+      "end_sample": 2500,
+      "duration_samples": 501,
+      "flat_derivative_count": 500,
+      "fs": 2000000.0,
+      "fmin": 7000.0,
+      "fmax": 80000.0,
+      "min_flat": 500,
+      "zero_threshold": 0.0001,
+      "method": "bandpass_derivative_flat_run"
+    },
+    {
+      "file": "HFocusing_5_10_10um_0_731.npy618.npy",
+      "path": "P0/data/dataset_particles2SNR_clean/train/10um/HFocusing_5_10_10um_0_731.npy618.npy",
+      "class": "10um",
+      "interval_idx": 0,
+      "start_sample": 1834,
+      "end_sample": 2500,
+      "duration_samples": 666,
+      "flat_derivative_count": 665,
+      "fs": 2000000.0,
+      "fmin": 7000.0,
+      "fmax": 80000.0,
+      "min_flat": 500,
+      "zero_threshold": 0.0001,
+      "method": "bandpass_derivative_flat_run"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+pipeline,class,doppler_band,candidate_noise_doppler_band_energy_pct,standalone_noise_doppler_band_energy_pct,delta_candidate_minus_standalone_pct,doppler_picks_in_band_pct,candidate_noise_dominant_band,doppler_picks_dominant_band,dominant_band_overlap,distribution_overlap_pct,candidate_noise_windows,standalone_noise_windows,doppler_picks
+old,2um,10-40 kHz,4.531861350070989,3.2506187639106643,1.281242586160325,61.844284925455554,0-1 kHz,10-40 kHz,False,12.069049542796163,103,7625,3622
+old,4um,10-40 kHz,11.161275787144021,3.225191703434922,7.936084083709099,74.22492401215806,0-1 kHz,10-40 kHz,False,23.298409756716673,52,3965,1645
+old,10um,10-40 kHz,0.4126964396860352,3.225191703434922,-2.812495263748887,61.05006105006105,0-1 kHz,10-40 kHz,False,1.1755076264056243,264,3965,1638
+new,2um,10-40 kHz,nan,3.2506187639106643,nan,97.53086419753086,,10-40 kHz,False,nan,0,7625,81
+new,4um,10-40 kHz,nan,3.225191703434922,nan,100.0,,10-40 kHz,False,nan,0,3965,107
+new,10um,10-40 kHz,nan,3.225191703434922,nan,97.6470588235294,,10-40 kHz,False,nan,0,3965,170

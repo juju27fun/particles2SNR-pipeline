@@ -1,0 +1,35 @@
+{
+  "input_root": "/home/intern/Documents/Internship_jlb_2026/P0/data/dataset",
+  "output_root": "/home/intern/Documents/Internship_jlb_2026/P0/data/dataset_particles2SNR_clean",
+  "particles2SNR_output": "/home/intern/Documents/Internship_jlb_2026/particles2SNR_pipeline/output/p0_dataset_particles2SNR",
+  "splits": [
+    "train",
+    "test"
+  ],
+  "classes": [
+    "2um",
+    "4um",
+    "10um"
+  ],
+  "zero_epsilon": 0.0,
+  "max_zero_run_after_clean": 2,
+  "fs": 2000000.0,
+  "split_summaries": [
+    {
+      "split": "train",
+      "source_files": 1192,
+      "manifest_rows": 1192,
+      "removed_samples": 0,
+      "cleaned_dataset_dir": "P0/data/dataset_particles2SNR_clean/train",
+      "artifact_dir": "particles2SNR_pipeline/output/p0_dataset_particles2SNR/train"
+    },
+    {
+      "split": "test",
+      "source_files": 301,
+      "manifest_rows": 301,
+      "removed_samples": 0,
+      "cleaned_dataset_dir": "P0/data/dataset_particles2SNR_clean/test",
+      "artifact_dir": "particles2SNR_pipeline/output/p0_dataset_particles2SNR/test"
+    }
+  ]
+}

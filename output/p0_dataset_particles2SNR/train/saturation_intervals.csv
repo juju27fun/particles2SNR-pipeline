@@ -1,0 +1,5 @@
+file,path,class,interval_idx,start_sample,end_sample,duration_samples,flat_derivative_count,fs,fmin,fmax,min_flat,zero_threshold,method
+HFocusing_5_10_10um_0_1059.npy22.npy,P0/data/dataset_particles2SNR_clean/train/10um/HFocusing_5_10_10um_0_1059.npy22.npy,10um,0,1836,2500,664,663,2000000.0,7000.0,80000.0,500,0.0001,bandpass_derivative_flat_run
+HFocusing_5_10_10um_0_1142.npy55.npy,P0/data/dataset_particles2SNR_clean/train/10um/HFocusing_5_10_10um_0_1142.npy55.npy,10um,0,1993,2500,507,506,2000000.0,7000.0,80000.0,500,0.0001,bandpass_derivative_flat_run
+HFocusing_5_10_10um_0_1730.npy270.npy,P0/data/dataset_particles2SNR_clean/train/10um/HFocusing_5_10_10um_0_1730.npy270.npy,10um,0,1999,2500,501,500,2000000.0,7000.0,80000.0,500,0.0001,bandpass_derivative_flat_run
+HFocusing_5_10_10um_0_731.npy618.npy,P0/data/dataset_particles2SNR_clean/train/10um/HFocusing_5_10_10um_0_731.npy618.npy,10um,0,1834,2500,666,665,2000000.0,7000.0,80000.0,500,0.0001,bandpass_derivative_flat_run

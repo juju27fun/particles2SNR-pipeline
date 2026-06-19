@@ -1,0 +1,470 @@
+{
+  "description": "Event-level accuracy-vs-SNR comparison across particles2SNR pipelines",
+  "sources": [
+    {
+      "label": "old particles2SNR event",
+      "path": "particles2SNR_pipeline/output/p0_c1_particles2SNR/test/event_conv1dgap_snr/event_predictions.csv",
+      "rows": 7800
+    },
+    {
+      "label": "Particles2SNR_F event",
+      "path": "particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/test/event_conv1dgap_snr_retrained/event_predictions.csv",
+      "rows": 895
+    }
+  ],
+  "classes": [
+    "2um",
+    "4um",
+    "10um"
+  ],
+  "bins": [
+    {
+      "bin_idx": 0,
+      "snr_left": -26.351515383015066,
+      "snr_right": -15.608600068476262,
+      "snr_center": -20.980057725745663
+    },
+    {
+      "bin_idx": 1,
+      "snr_left": -15.608600068476262,
+      "snr_right": -14.228537391668441,
+      "snr_center": -14.918568730072352
+    },
+    {
+      "bin_idx": 2,
+      "snr_left": -14.228537391668441,
+      "snr_right": -13.211495655642315,
+      "snr_center": -13.720016523655378
+    },
+    {
+      "bin_idx": 3,
+      "snr_left": -13.211495655642315,
+      "snr_right": -12.239679325250314,
+      "snr_center": -12.725587490446316
+    },
+    {
+      "bin_idx": 4,
+      "snr_left": -12.239679325250314,
+      "snr_right": -11.236429327810436,
+      "snr_center": -11.738054326530374
+    },
+    {
+      "bin_idx": 5,
+      "snr_left": -11.236429327810436,
+      "snr_right": -9.860537137793475,
+      "snr_center": -10.548483232801956
+    },
+    {
+      "bin_idx": 6,
+      "snr_left": -9.860537137793475,
+      "snr_right": -7.159408259063466,
+      "snr_center": -8.50997269842847
+    },
+    {
+      "bin_idx": 7,
+      "snr_left": -7.159408259063466,
+      "snr_right": -0.4985589293838532,
+      "snr_center": -3.8289835942236596
+    },
+    {
+      "bin_idx": 8,
+      "snr_left": -0.4985589293838532,
+      "snr_right": 4.36420978143665,
+      "snr_center": 1.9328254260263986
+    },
+    {
+      "bin_idx": 9,
+      "snr_left": 4.36420978143665,
+      "snr_right": 32.153210260683814,
+      "snr_center": 18.25871002106023
+    }
+  ],
+  "seed": 42,
+  "targets": [
+    0.85,
+    0.9,
+    0.95,
+    0.97
+  ],
+  "mode": "available",
+  "thresholds": {
+    "Particles2SNR_F event": {
+      "0.85": {
+        "target_accuracy": 0.85,
+        "threshold_db": -5.308859680981618
+      },
+      "0.90": {
+        "target_accuracy": 0.9,
+        "threshold_db": null
+      },
+      "0.95": {
+        "target_accuracy": 0.95,
+        "threshold_db": null
+      },
+      "0.97": {
+        "target_accuracy": 0.97,
+        "threshold_db": null
+      }
+    },
+    "old particles2SNR event": {
+      "0.85": {
+        "target_accuracy": 0.85,
+        "threshold_db": null
+      },
+      "0.90": {
+        "target_accuracy": 0.9,
+        "threshold_db": null
+      },
+      "0.95": {
+        "target_accuracy": 0.95,
+        "threshold_db": null
+      },
+      "0.97": {
+        "target_accuracy": 0.97,
+        "threshold_db": null
+      }
+    }
+  },
+  "rows": [
+    {
+      "dataset_label": "Particles2SNR_F event",
+      "mode": "available",
+      "bin_idx": 0,
+      "snr_left": -26.351515383015066,
+      "snr_right": -15.608600068476262,
+      "snr_center": -20.980057725745663,
+      "n": 12,
+      "n_by_class": "{\"10um\": 1, \"2um\": 7, \"4um\": 4}",
+      "sampled_n_by_class": "{\"10um\": 1, \"2um\": 7, \"4um\": 4}",
+      "skip_reason": null,
+      "accuracy": 0.9166666666666666,
+      "macro_f1": 0.6444444444444445,
+      "recall_2um": 1.0,
+      "recall_4um": 1.0,
+      "recall_10um": 0.0
+    },
+    {
+      "dataset_label": "Particles2SNR_F event",
+      "mode": "available",
+      "bin_idx": 1,
+      "snr_left": -15.608600068476262,
+      "snr_right": -14.228537391668441,
+      "snr_center": -14.918568730072352,
+      "n": 8,
+      "n_by_class": "{\"10um\": 2, \"2um\": 5, \"4um\": 1}",
+      "sampled_n_by_class": "{\"10um\": 2, \"2um\": 5, \"4um\": 1}",
+      "skip_reason": null,
+      "accuracy": 0.875,
+      "macro_f1": 0.8585858585858586,
+      "recall_2um": 1.0,
+      "recall_4um": 1.0,
+      "recall_10um": 0.5
+    },
+    {
+      "dataset_label": "Particles2SNR_F event",
+      "mode": "available",
+      "bin_idx": 2,
+      "snr_left": -14.228537391668441,
+      "snr_right": -13.211495655642315,
+      "snr_center": -13.720016523655378,
+      "n": 10,
+      "n_by_class": "{\"10um\": 4, \"2um\": 4, \"4um\": 2}",
+      "sampled_n_by_class": "{\"10um\": 4, \"2um\": 4, \"4um\": 2}",
+      "skip_reason": null,
+      "accuracy": 0.7,
+      "macro_f1": 0.5281385281385281,
+      "recall_2um": 1.0,
+      "recall_4um": 0.0,
+      "recall_10um": 0.75
+    },
+    {
+      "dataset_label": "Particles2SNR_F event",
+      "mode": "available",
+      "bin_idx": 3,
+      "snr_left": -13.211495655642315,
+      "snr_right": -12.239679325250314,
+      "snr_center": -12.725587490446316,
+      "n": 18,
+      "n_by_class": "{\"10um\": 7, \"2um\": 8, \"4um\": 3}",
+      "sampled_n_by_class": "{\"10um\": 7, \"2um\": 8, \"4um\": 3}",
+      "skip_reason": null,
+      "accuracy": 0.6666666666666666,
+      "macro_f1": 0.5873015873015873,
+      "recall_2um": 1.0,
+      "recall_4um": 0.3333333333333333,
+      "recall_10um": 0.42857142857142855
+    },
+    {
+      "dataset_label": "Particles2SNR_F event",
+      "mode": "available",
+      "bin_idx": 4,
+      "snr_left": -12.239679325250314,
+      "snr_right": -11.236429327810436,
+      "snr_center": -11.738054326530374,
+      "n": 20,
+      "n_by_class": "{\"10um\": 4, \"2um\": 14, \"4um\": 2}",
+      "sampled_n_by_class": "{\"10um\": 4, \"2um\": 14, \"4um\": 2}",
+      "skip_reason": null,
+      "accuracy": 0.65,
+      "macro_f1": 0.3952380952380952,
+      "recall_2um": 0.7857142857142857,
+      "recall_4um": 0.0,
+      "recall_10um": 0.5
+    },
+    {
+      "dataset_label": "Particles2SNR_F event",
+      "mode": "available",
+      "bin_idx": 5,
+      "snr_left": -11.236429327810436,
+      "snr_right": -9.860537137793475,
+      "snr_center": -10.548483232801956,
+      "n": 39,
+      "n_by_class": "{\"10um\": 9, \"2um\": 23, \"4um\": 7}",
+      "sampled_n_by_class": "{\"10um\": 9, \"2um\": 23, \"4um\": 7}",
+      "skip_reason": null,
+      "accuracy": 0.7948717948717948,
+      "macro_f1": 0.7344681462328521,
+      "recall_2um": 0.9565217391304348,
+      "recall_4um": 0.7142857142857143,
+      "recall_10um": 0.4444444444444444
+    },
+    {
+      "dataset_label": "Particles2SNR_F event",
+      "mode": "available",
+      "bin_idx": 6,
+      "snr_left": -9.860537137793475,
+      "snr_right": -7.159408259063466,
+      "snr_center": -8.50997269842847,
+      "n": 103,
+      "n_by_class": "{\"10um\": 31, \"2um\": 58, \"4um\": 14}",
+      "sampled_n_by_class": "{\"10um\": 31, \"2um\": 58, \"4um\": 14}",
+      "skip_reason": null,
+      "accuracy": 0.7378640776699029,
+      "macro_f1": 0.6557906430029191,
+      "recall_2um": 0.9310344827586207,
+      "recall_4um": 0.42857142857142855,
+      "recall_10um": 0.5161290322580645
+    },
+    {
+      "dataset_label": "Particles2SNR_F event",
+      "mode": "available",
+      "bin_idx": 7,
+      "snr_left": -7.159408259063466,
+      "snr_right": -0.4985589293838532,
+      "snr_center": -3.8289835942236596,
+      "n": 163,
+      "n_by_class": "{\"10um\": 22, \"2um\": 116, \"4um\": 25}",
+      "sampled_n_by_class": "{\"10um\": 22, \"2um\": 116, \"4um\": 25}",
+      "skip_reason": null,
+      "accuracy": 0.901840490797546,
+      "macro_f1": 0.8464301251107234,
+      "recall_2um": 0.9396551724137931,
+      "recall_4um": 0.92,
+      "recall_10um": 0.6818181818181818
+    },
+    {
+      "dataset_label": "Particles2SNR_F event",
+      "mode": "available",
+      "bin_idx": 8,
+      "snr_left": -0.4985589293838532,
+      "snr_right": 4.36420978143665,
+      "snr_center": 1.9328254260263986,
+      "n": 243,
+      "n_by_class": "{\"10um\": 85, \"2um\": 71, \"4um\": 87}",
+      "sampled_n_by_class": "{\"10um\": 85, \"2um\": 71, \"4um\": 87}",
+      "skip_reason": null,
+      "accuracy": 0.8847736625514403,
+      "macro_f1": 0.8828073522762061,
+      "recall_2um": 0.8732394366197183,
+      "recall_4um": 0.9195402298850575,
+      "recall_10um": 0.8588235294117647
+    },
+    {
+      "dataset_label": "Particles2SNR_F event",
+      "mode": "available",
+      "bin_idx": 9,
+      "snr_left": 4.36420978143665,
+      "snr_right": 32.153210260683814,
+      "snr_center": 18.25871002106023,
+      "n": 279,
+      "n_by_class": "{\"10um\": 93, \"2um\": 14, \"4um\": 172}",
+      "sampled_n_by_class": "{\"10um\": 93, \"2um\": 14, \"4um\": 172}",
+      "skip_reason": null,
+      "accuracy": 0.8781362007168458,
+      "macro_f1": 0.6620827336459446,
+      "recall_2um": 0.14285714285714285,
+      "recall_4um": 0.9593023255813954,
+      "recall_10um": 0.8387096774193549
+    },
+    {
+      "dataset_label": "old particles2SNR event",
+      "mode": "available",
+      "bin_idx": 0,
+      "snr_left": -26.351515383015066,
+      "snr_right": -15.608600068476262,
+      "snr_center": -20.980057725745663,
+      "n": 858,
+      "n_by_class": "{\"10um\": 144, \"2um\": 478, \"4um\": 236}",
+      "sampled_n_by_class": "{\"10um\": 144, \"2um\": 478, \"4um\": 236}",
+      "skip_reason": null,
+      "accuracy": 0.372960372960373,
+      "macro_f1": 0.3926560115000622,
+      "recall_2um": 0.2175732217573222,
+      "recall_4um": 0.3305084745762712,
+      "recall_10um": 0.9583333333333334
+    },
+    {
+      "dataset_label": "old particles2SNR event",
+      "mode": "available",
+      "bin_idx": 1,
+      "snr_left": -15.608600068476262,
+      "snr_right": -14.228537391668441,
+      "snr_center": -14.918568730072352,
+      "n": 861,
+      "n_by_class": "{\"10um\": 185, \"2um\": 502, \"4um\": 174}",
+      "sampled_n_by_class": "{\"10um\": 185, \"2um\": 502, \"4um\": 174}",
+      "skip_reason": null,
+      "accuracy": 0.40301974448315914,
+      "macro_f1": 0.41200466200466207,
+      "recall_2um": 0.22111553784860558,
+      "recall_4um": 0.3160919540229885,
+      "recall_10um": 0.9783783783783784
+    },
+    {
+      "dataset_label": "old particles2SNR event",
+      "mode": "available",
+      "bin_idx": 2,
+      "snr_left": -14.228537391668441,
+      "snr_right": -13.211495655642315,
+      "snr_center": -13.720016523655378,
+      "n": 860,
+      "n_by_class": "{\"10um\": 202, \"2um\": 495, \"4um\": 163}",
+      "sampled_n_by_class": "{\"10um\": 202, \"2um\": 495, \"4um\": 163}",
+      "skip_reason": null,
+      "accuracy": 0.4127906976744186,
+      "macro_f1": 0.4318440409353723,
+      "recall_2um": 0.20404040404040405,
+      "recall_4um": 0.36809815950920244,
+      "recall_10um": 0.9603960396039604
+    },
+    {
+      "dataset_label": "old particles2SNR event",
+      "mode": "available",
+      "bin_idx": 3,
+      "snr_left": -13.211495655642315,
+      "snr_right": -12.239679325250314,
+      "snr_center": -12.725587490446316,
+      "n": 851,
+      "n_by_class": "{\"10um\": 210, \"2um\": 477, \"4um\": 164}",
+      "sampled_n_by_class": "{\"10um\": 210, \"2um\": 477, \"4um\": 164}",
+      "skip_reason": null,
+      "accuracy": 0.43478260869565216,
+      "macro_f1": 0.4394813076116046,
+      "recall_2um": 0.22641509433962265,
+      "recall_4um": 0.32926829268292684,
+      "recall_10um": 0.9904761904761905
+    },
+    {
+      "dataset_label": "old particles2SNR event",
+      "mode": "available",
+      "bin_idx": 4,
+      "snr_left": -12.239679325250314,
+      "snr_right": -11.236429327810436,
+      "snr_center": -11.738054326530374,
+      "n": 849,
+      "n_by_class": "{\"10um\": 202, \"2um\": 484, \"4um\": 163}",
+      "sampled_n_by_class": "{\"10um\": 202, \"2um\": 484, \"4um\": 163}",
+      "skip_reason": null,
+      "accuracy": 0.42285041224970554,
+      "macro_f1": 0.4343351436490646,
+      "recall_2um": 0.21694214876033058,
+      "recall_4um": 0.3496932515337423,
+      "recall_10um": 0.9752475247524752
+    },
+    {
+      "dataset_label": "old particles2SNR event",
+      "mode": "available",
+      "bin_idx": 5,
+      "snr_left": -11.236429327810436,
+      "snr_right": -9.860537137793475,
+      "snr_center": -10.548483232801956,
+      "n": 831,
+      "n_by_class": "{\"10um\": 201, \"2um\": 499, \"4um\": 131}",
+      "sampled_n_by_class": "{\"10um\": 201, \"2um\": 499, \"4um\": 131}",
+      "skip_reason": null,
+      "accuracy": 0.40312876052948254,
+      "macro_f1": 0.4015849641679204,
+      "recall_2um": 0.20240480961923848,
+      "recall_4um": 0.2900763358778626,
+      "recall_10um": 0.9751243781094527
+    },
+    {
+      "dataset_label": "old particles2SNR event",
+      "mode": "available",
+      "bin_idx": 6,
+      "snr_left": -9.860537137793475,
+      "snr_right": -7.159408259063466,
+      "snr_center": -8.50997269842847,
+      "n": 766,
+      "n_by_class": "{\"10um\": 205, \"2um\": 430, \"4um\": 131}",
+      "sampled_n_by_class": "{\"10um\": 205, \"2um\": 430, \"4um\": 131}",
+      "skip_reason": null,
+      "accuracy": 0.40339425587467365,
+      "macro_f1": 0.3977633439052912,
+      "recall_2um": 0.15813953488372093,
+      "recall_4um": 0.29770992366412213,
+      "recall_10um": 0.9853658536585366
+    },
+    {
+      "dataset_label": "old particles2SNR event",
+      "mode": "available",
+      "bin_idx": 7,
+      "snr_left": -7.159408259063466,
+      "snr_right": -0.4985589293838532,
+      "snr_center": -3.8289835942236596,
+      "n": 707,
+      "n_by_class": "{\"10um\": 173, \"2um\": 363, \"4um\": 171}",
+      "sampled_n_by_class": "{\"10um\": 173, \"2um\": 363, \"4um\": 171}",
+      "skip_reason": null,
+      "accuracy": 0.42998585572843,
+      "macro_f1": 0.4457133979010961,
+      "recall_2um": 0.15426997245179064,
+      "recall_4um": 0.43859649122807015,
+      "recall_10um": 1.0
+    },
+    {
+      "dataset_label": "old particles2SNR event",
+      "mode": "available",
+      "bin_idx": 8,
+      "snr_left": -0.4985589293838532,
+      "snr_right": 4.36420978143665,
+      "snr_center": 1.9328254260263986,
+      "n": 626,
+      "n_by_class": "{\"10um\": 170, \"2um\": 175, \"4um\": 281}",
+      "sampled_n_by_class": "{\"10um\": 170, \"2um\": 175, \"4um\": 281}",
+      "skip_reason": null,
+      "accuracy": 0.5686900958466453,
+      "macro_f1": 0.49643548577484115,
+      "recall_2um": 0.10285714285714286,
+      "recall_4um": 0.597864768683274,
+      "recall_10um": 1.0
+    },
+    {
+      "dataset_label": "old particles2SNR event",
+      "mode": "available",
+      "bin_idx": 9,
+      "snr_left": 4.36420978143665,
+      "snr_right": 32.153210260683814,
+      "snr_center": 18.25871002106023,
+      "n": 591,
+      "n_by_class": "{\"10um\": 204, \"2um\": 39, \"4um\": 348}",
+      "sampled_n_by_class": "{\"10um\": 204, \"2um\": 39, \"4um\": 348}",
+      "skip_reason": null,
+      "accuracy": 0.6700507614213198,
+      "macro_f1": 0.4928435610155,
+      "recall_2um": 0.05128205128205128,
+      "recall_4um": 0.5517241379310345,
+      "recall_10um": 0.9901960784313726
+    }
+  ]
+}

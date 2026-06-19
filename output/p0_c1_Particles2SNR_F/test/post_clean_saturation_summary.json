@@ -1,0 +1,38 @@
+{
+  "scan_params": {
+    "base_folder": "P0/data/dataset_Particles2SNR_F_c1/test",
+    "fs": 2000000.0,
+    "fmin": 7000.0,
+    "fmax": 80000.0,
+    "min_flat": 500,
+    "zero_threshold": 0.0001,
+    "method": "bandpass_derivative_flat_run"
+  },
+  "summary": {
+    "total_files": 578,
+    "total_saturated_files": 0,
+    "total_intervals": 0,
+    "saturated_file_pct": 0.0
+  },
+  "class_summary": [
+    {
+      "class": "2um",
+      "saturated": 0,
+      "total": 240,
+      "intervals": 0
+    },
+    {
+      "class": "4um",
+      "saturated": 0,
+      "total": 149,
+      "intervals": 0
+    },
+    {
+      "class": "10um",
+      "saturated": 0,
+      "total": 189,
+      "intervals": 0
+    }
+  ],
+  "intervals": []
+}

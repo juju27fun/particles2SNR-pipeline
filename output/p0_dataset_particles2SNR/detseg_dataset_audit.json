@@ -1,0 +1,184 @@
+{
+  "dataset": "P0/data/dataset_particles2SNR_yolo",
+  "dataset_yaml": "P0/data/dataset_particles2SNR_yolo/dataset.yaml",
+  "strict": false,
+  "status": "warn",
+  "provenance": {
+    "generation_params": "generated",
+    "audit_results": "missing",
+    "counts": "declared_yaml_compared_to_measured_files"
+  },
+  "thresholds": {
+    "wide_label_threshold": 0.5,
+    "near_edge_threshold": 0.01,
+    "max_near_edge_frac": 1.0,
+    "min_tracking_pass_frac": 0.95
+  },
+  "splits": {
+    "train": {
+      "counts_yaml": {
+        "total": 1192
+      },
+      "counts_measured": {
+        "signals": 1192,
+        "labels": 1192,
+        "total": 1192,
+        "class_counts": {
+          "2um": 0,
+          "4um": 0,
+          "10um": 0,
+          "background": 1192
+        },
+        "event_rows": 1438,
+        "invalid_label_rows": 0,
+        "wide_labels": 1307,
+        "near_edge_labels": 332,
+        "label_quality_by_class": {
+          "2um": {
+            "total": 347,
+            "invalid": 0,
+            "wide": 325,
+            "near_edge": 133
+          },
+          "4um": {
+            "total": 436,
+            "invalid": 0,
+            "wide": 429,
+            "near_edge": 34
+          },
+          "10um": {
+            "total": 655,
+            "invalid": 0,
+            "wide": 553,
+            "near_edge": 165
+          },
+          "unknown": {
+            "total": 0,
+            "invalid": 0,
+            "wide": 0,
+            "near_edge": 0
+          }
+        },
+        "missing_label_files": 0,
+        "orphan_label_files": 0
+      },
+      "counts_match": true
+    },
+    "val": {
+      "counts_yaml": {
+        "total": 0
+      },
+      "counts_measured": {
+        "signals": 0,
+        "labels": 0,
+        "total": 0,
+        "class_counts": {
+          "2um": 0,
+          "4um": 0,
+          "10um": 0,
+          "background": 0
+        },
+        "event_rows": 0,
+        "invalid_label_rows": 0,
+        "wide_labels": 0,
+        "near_edge_labels": 0,
+        "label_quality_by_class": {
+          "2um": {
+            "total": 0,
+            "invalid": 0,
+            "wide": 0,
+            "near_edge": 0
+          },
+          "4um": {
+            "total": 0,
+            "invalid": 0,
+            "wide": 0,
+            "near_edge": 0
+          },
+          "10um": {
+            "total": 0,
+            "invalid": 0,
+            "wide": 0,
+            "near_edge": 0
+          },
+          "unknown": {
+            "total": 0,
+            "invalid": 0,
+            "wide": 0,
+            "near_edge": 0
+          }
+        },
+        "missing_label_files": 0,
+        "orphan_label_files": 0
+      },
+      "counts_match": true
+    },
+    "test": {
+      "counts_yaml": {
+        "total": 301
+      },
+      "counts_measured": {
+        "signals": 301,
+        "labels": 301,
+        "total": 301,
+        "class_counts": {
+          "2um": 0,
+          "4um": 0,
+          "10um": 0,
+          "background": 301
+        },
+        "event_rows": 358,
+        "invalid_label_rows": 0,
+        "wide_labels": 319,
+        "near_edge_labels": 90,
+        "label_quality_by_class": {
+          "2um": {
+            "total": 81,
+            "invalid": 0,
+            "wide": 80,
+            "near_edge": 32
+          },
+          "4um": {
+            "total": 107,
+            "invalid": 0,
+            "wide": 104,
+            "near_edge": 10
+          },
+          "10um": {
+            "total": 170,
+            "invalid": 0,
+            "wide": 135,
+            "near_edge": 48
+          },
+          "unknown": {
+            "total": 0,
+            "invalid": 0,
+            "wide": 0,
+            "near_edge": 0
+          }
+        },
+        "missing_label_files": 0,
+        "orphan_label_files": 0
+      },
+      "counts_match": true
+    }
+  },
+  "audit_quality": {},
+  "issues": [
+    {
+      "severity": "warn",
+      "code": "missing_audit_results",
+      "message": "dataset.yaml lacks audit_results"
+    },
+    {
+      "severity": "warn",
+      "code": "wide_labels",
+      "message": "train: 1307 labels have width >= 0.5"
+    },
+    {
+      "severity": "warn",
+      "code": "wide_labels",
+      "message": "test: 319 labels have width >= 0.5"
+    }
+  ]
+}

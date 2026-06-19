@@ -1,0 +1,194 @@
+{
+  "description": "Event-level classifier accuracy as a function of particles2SNR annotation SNR",
+  "data_json": [
+    "particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/test/data.json"
+  ],
+  "checkpoint": "/home/intern/Documents/Internship_jlb_2026/P0/results/Particles2SNR_F_c1_event_3class/Conv1DGAP-L-dataset_Particles2SNR_F_c1_events-conv1dgap_l_seed42/best_model.pth",
+  "model_name": "Conv1DGAP-L",
+  "class_names": [
+    "2um",
+    "4um",
+    "10um"
+  ],
+  "overall": {
+    "n": 895,
+    "accuracy": 0.8536312849162011,
+    "macro_f1": 0.8495406610746775,
+    "class_counts": {
+      "2um": 320,
+      "4um": 317,
+      "10um": 258
+    }
+  },
+  "thresholds": {
+    "target_accuracy": {
+      "0.85": {
+        "target_accuracy": 0.85,
+        "threshold_db": -5.362674322970052
+      },
+      "0.90": {
+        "target_accuracy": 0.9,
+        "threshold_db": -3.78443004283356
+      },
+      "0.95": {
+        "target_accuracy": 0.95,
+        "threshold_db": null
+      },
+      "0.97": {
+        "target_accuracy": 0.97,
+        "threshold_db": null
+      }
+    },
+    "derivative": {
+      "threshold_db": 2.424707693709636,
+      "method": "post_peak_derivative_slowdown",
+      "derivative_fraction": 0.2,
+      "derivatives": [
+        0.0034638357995577128,
+        0.01831724121909174,
+        0.01720223010383434,
+        0.00980808302427597,
+        -0.012139409463522531,
+        -0.004775727849163423,
+        0.00797512144981398,
+        -0.006840340706452364,
+        -0.0024807437523050872
+      ]
+    }
+  },
+  "bins": [
+    {
+      "bin_idx": 0,
+      "snr_left": -18.721917733056948,
+      "snr_right": -10.488195634218814,
+      "snr_center": -14.60505668363788,
+      "n": 90,
+      "accuracy": 0.7666666666666667,
+      "macro_f1": 0.7030619283250862,
+      "recall_10um": 0.5454545454545454,
+      "recall_2um": 0.9423076923076923,
+      "recall_4um": 0.5
+    },
+    {
+      "bin_idx": 1,
+      "snr_left": -10.488195634218814,
+      "snr_right": -8.029425599981138,
+      "snr_center": -9.258810617099975,
+      "n": 89,
+      "accuracy": 0.7191011235955056,
+      "macro_f1": 0.6418772996320589,
+      "recall_10um": 0.4666666666666667,
+      "recall_2um": 0.9375,
+      "recall_4um": 0.45454545454545453
+    },
+    {
+      "bin_idx": 2,
+      "snr_left": -8.029425599981138,
+      "snr_right": -4.449527801666178,
+      "snr_center": -6.2394767008236585,
+      "n": 90,
+      "accuracy": 0.8222222222222222,
+      "macro_f1": 0.7431827431827432,
+      "recall_10um": 0.5714285714285714,
+      "recall_2um": 0.9032258064516129,
+      "recall_4um": 0.7142857142857143
+    },
+    {
+      "bin_idx": 3,
+      "snr_left": -4.449527801666178,
+      "snr_right": -1.0622947952837227,
+      "snr_center": -2.7559112984749503,
+      "n": 89,
+      "accuracy": 0.9325842696629213,
+      "macro_f1": 0.8945689481122551,
+      "recall_10um": 0.7692307692307693,
+      "recall_2um": 0.953125,
+      "recall_4um": 1.0
+    },
+    {
+      "bin_idx": 4,
+      "snr_left": -1.0622947952837227,
+      "snr_right": 1.5923520552423387,
+      "snr_center": 0.265028629979308,
+      "n": 89,
+      "accuracy": 0.898876404494382,
+      "macro_f1": 0.8692701898878976,
+      "recall_10um": 0.7058823529411765,
+      "recall_2um": 0.9791666666666666,
+      "recall_4um": 0.875
+    },
+    {
+      "bin_idx": 5,
+      "snr_left": 1.5923520552423387,
+      "snr_right": 3.2570633321769336,
+      "snr_center": 2.424707693709636,
+      "n": 90,
+      "accuracy": 0.9111111111111111,
+      "macro_f1": 0.8975150045572581,
+      "recall_10um": 0.8648648648648649,
+      "recall_2um": 0.9411764705882353,
+      "recall_4um": 0.9444444444444444
+    },
+    {
+      "bin_idx": 6,
+      "snr_left": 3.2570633321769336,
+      "snr_right": 4.537610158018662,
+      "snr_center": 3.897336745097798,
+      "n": 89,
+      "accuracy": 0.8539325842696629,
+      "macro_f1": 0.7981156595191683,
+      "recall_10um": 0.8918918918918919,
+      "recall_2um": 0.5333333333333333,
+      "recall_4um": 0.9459459459459459
+    },
+    {
+      "bin_idx": 7,
+      "snr_left": 4.537610158018662,
+      "snr_right": 5.991325860450888,
+      "snr_center": 5.2644680092347755,
+      "n": 90,
+      "accuracy": 0.8777777777777778,
+      "macro_f1": 0.7240883410374935,
+      "recall_10um": 0.896551724137931,
+      "recall_2um": 0.2857142857142857,
+      "recall_4um": 0.9444444444444444
+    },
+    {
+      "bin_idx": 8,
+      "snr_left": 5.991325860450888,
+      "snr_right": 8.711035137484853,
+      "snr_center": 7.351180498967871,
+      "n": 89,
+      "accuracy": 0.9438202247191011,
+      "macro_f1": 0.6351311523725317,
+      "recall_10um": 0.9,
+      "recall_2um": 0.0,
+      "recall_4um": 1.0
+    },
+    {
+      "bin_idx": 9,
+      "snr_left": 8.711035137484853,
+      "snr_right": 23.907099871026176,
+      "snr_center": 16.309067504255516,
+      "n": 90,
+      "accuracy": 0.8111111111111111,
+      "macro_f1": 0.5434343434343434,
+      "recall_10um": 0.7241379310344828,
+      "recall_2um": 0.0,
+      "recall_4um": 0.9285714285714286
+    }
+  ],
+  "outputs": {
+    "predictions_csv": "particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/test/event_conv1dgap_snr_retrained/event_predictions.csv",
+    "accuracy_csv": "particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/test/event_conv1dgap_snr_retrained/event_accuracy_by_snr.csv",
+    "accuracy_pdf": "particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/test/event_conv1dgap_snr_retrained/event_accuracy_by_snr.pdf"
+  },
+  "preprocessing": {
+    "crop_native_length": 16384,
+    "input_length": 4096,
+    "preprocess": "adaptive-bandpass",
+    "bandpass_low_khz": 5.0,
+    "bandpass_high_khz": 100.0,
+    "sample_rate_mhz": 2.0
+  }
+}
