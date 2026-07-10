@@ -3,6 +3,7 @@ import csv
 import json
 import os
 import sys
+import tempfile
 import types
 import unittest
 from collections import Counter
@@ -18,6 +19,7 @@ P1_SCRIPT = os.path.join(ROOT, "P1", "generate_long_sequence_dataset.py")
 P1_AUDIT_SCRIPT = os.path.join(ROOT, "P1", "detseg", "audit_saturation_artifacts.py")
 PARTICLES2SNR_GENERATOR = os.path.join(ROOT, "particles2SNR_pipeline", "generate_particles2SNR_dataset.py")
 PARTICLES2SNR_YOLO_LIM10 = os.path.join(ROOT, "particles2SNR_pipeline", "create_particles2SNR_c1_yolo_4class_lim10.py")
+PARTICLES2SNR_LIM10 = os.path.join(ROOT, "particles2SNR_pipeline", "create_particles2SNR_4class_lim10.py")
 
 for path in (PARTICLES2SNR, ROOT):
     if path not in sys.path:
@@ -182,6 +184,60 @@ class Particles2SNRYoloLim10Tests(unittest.TestCase):
         self.assertAlmostEqual(right, 0.35)
 
 
+class Particles2SNRClassFolderLim10Tests(unittest.TestCase):
+    def test_parser_defaults_use_restructured_paths(self):
+        mod = load_module(PARTICLES2SNR_LIM10, "particles2SNR_lim10_defaults_test")
+        defaults = mod.build_parser().parse_args([])
+
+        self.assertTrue(defaults.artifact_root.endswith("particles2SNR_pipeline/data/derived/particles2SNR_4_class_lim10"))
+        self.assertTrue(defaults.figure_root.endswith("particles2SNR_pipeline/results/figures/particles2SNR_4_class_lim10"))
+        self.assertTrue(defaults.source_particles2SNR_output_root.endswith("particles2SNR_pipeline/results/runs/p0_c1_particles2SNR"))
+        self.assertEqual(defaults.output_root, "P0/data/processed/particles2SNR_4_class_lim10")
+
+    def test_generate_plots_writes_expected_files(self):
+        mod = load_module(PARTICLES2SNR_LIM10, "particles2SNR_lim10_plots_test")
+        rows = [
+            {"split": "train", "original_class": "2um", "assigned_class": "unclear", "median_snr_db": "-12.5"},
+            {"split": "train", "original_class": "4um", "assigned_class": "4um", "median_snr_db": "-7.0"},
+            {"split": "test", "original_class": "2um", "assigned_class": "2um", "median_snr_db": "-9.0"},
+            {"split": "test", "original_class": "10um", "assigned_class": "unclear", "median_snr_db": "-11.0"},
+        ]
+        summary = {
+            "classes": ["2um", "4um", "10um"],
+            "assigned_classes": ["2um", "4um", "10um", "unclear"],
+            "splits": ["train", "test"],
+            "snr_threshold_db": -10.0,
+            "split_summary": {
+                "train": {
+                    "assigned_class_counts": {"2um": 0, "4um": 1, "10um": 0, "unclear": 1},
+                    "original_class_counts": {"2um": 1, "4um": 1, "10um": 0},
+                    "unclear_by_original_class": {"2um": 1, "4um": 0, "10um": 0},
+                },
+                "test": {
+                    "assigned_class_counts": {"2um": 1, "4um": 0, "10um": 0, "unclear": 1},
+                    "original_class_counts": {"2um": 1, "4um": 0, "10um": 1},
+                    "unclear_by_original_class": {"2um": 0, "4um": 0, "10um": 1},
+                },
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = mod.generate_plots(rows, summary, Path(tmp))
+
+            self.assertEqual(
+                sorted(path.name for path in paths),
+                [
+                    "assigned_class_counts_by_split.png",
+                    "median_snr_by_assigned_class.png",
+                    "median_snr_by_original_class.png",
+                    "unclear_fraction_by_original_class.png",
+                ],
+            )
+            for path in paths:
+                self.assertTrue(path.is_file())
+                self.assertGreater(path.stat().st_size, 0)
+
+
 class SaturationCleaningTests(unittest.TestCase):
     def test_merge_and_expand_intervals_clip_and_merge(self):
         merged = merge_intervals([(-5, 5), (4, 10), (20, 30)], signal_len=25)
@@ -327,11 +383,12 @@ class Particles2SNRDatasetGeneratorTests(unittest.TestCase):
             bandpass_order=4,
         )
         noise_pool = mod.read_noise_pool(str(noise_dir), chunk_len=2048)
-        zero_rows, sat_rows = mod.clean_split(
+        zero_rows, sat_rows, peak_rows = mod.clean_split(
             tmp / "src" / "train", out, ("10um",), 0.0, 2, args,
             noise_pool, np.random.default_rng(0), "train",
         )
         self.assertEqual(len(zero_rows), 1)
+        self.assertEqual(peak_rows, [])
         self.assertTrue(any(row["action"] == "replaced_with_noise" for row in sat_rows))
         cleaned = np.load(out / "10um" / "sample.npy")
         self.assertEqual(cleaned.shape, signal.shape)
@@ -384,6 +441,74 @@ class Particles2SNRDatasetGeneratorTests(unittest.TestCase):
         self.assertEqual(len(row["dropped_annotations"]), 2)
         self.assertAlmostEqual(row["annotations"][0]["passage_time_ms"], 0.10)
         self.assertEqual(data["info"]["passage_time_filter"]["min_ms"], 0.07)
+
+    def test_export_yolo_json_dual_clean_peak_requires_clean_support(self):
+        mod = load_module(PARTICLES2SNR_GENERATOR, "particles2SNR_dataset_generator_dual_clean_peak_test")
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp_dir = Path(tmp_name)
+            filtered_dir = tmp_dir / "filtered" / "2um"
+            clean_dir = tmp_dir / "clean" / "2um"
+            filtered_dir.mkdir(parents=True)
+            clean_dir.mkdir(parents=True)
+            filtered_signal = np.zeros(1000, dtype=np.float32)
+            filtered_signal[500] = 10.0
+            clean_signal = np.zeros(1000, dtype=np.float32)
+            np.save(filtered_dir / "sample.npy", filtered_signal)
+            np.save(clean_dir / "sample.npy", clean_signal)
+            results_path = tmp_dir / "dataset_results.json"
+            with results_path.open("w") as f:
+                json.dump({
+                    "signals": [{
+                        "filename": "sample.npy",
+                        "path": str(filtered_dir / "sample.npy"),
+                        "class": "2um",
+                        "signal_length": 1000,
+                        "particles": [{
+                            "t0": 0.5,
+                            "tau": 0.05,
+                            "P0": 1.0,
+                            "frequency": 20000,
+                            "snr_db": 3.0,
+                        }],
+                    }]
+                }, f)
+
+            data = mod.export_yolo_json(
+                results_path,
+                tmp_dir / "data_no_clean_peak.json",
+                ("2um", "4um", "10um"),
+                fs=1000.0,
+                min_passage_time_ms=None,
+                max_passage_time_ms=None,
+                yolo_width_filter=False,
+                merge_overlaps=False,
+                resolve_boundary_crossings=False,
+                peak_evidence_signal_mode="dual_clean",
+                peak_evidence_clean_root=tmp_dir / "clean",
+            )
+            self.assertEqual(len(data["data"][0]["annotations"]), 0)
+            self.assertTrue(any(
+                drop["reason"] == "missing_clean_peak_support"
+                for drop in data["data"][0]["dropped_annotations"]
+            ))
+
+            clean_signal[500] = 10.0
+            np.save(clean_dir / "sample.npy", clean_signal)
+            data = mod.export_yolo_json(
+                results_path,
+                tmp_dir / "data_with_clean_peak.json",
+                ("2um", "4um", "10um"),
+                fs=1000.0,
+                min_passage_time_ms=None,
+                max_passage_time_ms=None,
+                yolo_width_filter=False,
+                merge_overlaps=False,
+                resolve_boundary_crossings=False,
+                peak_evidence_signal_mode="dual_clean",
+                peak_evidence_clean_root=tmp_dir / "clean",
+            )
+            self.assertEqual(len(data["data"][0]["annotations"]), 1)
+            self.assertTrue(data["data"][0]["annotations"][0]["clean_peak_support"])
 
 
     def test_merge_overlapping_particles_keeps_best_snr(self):

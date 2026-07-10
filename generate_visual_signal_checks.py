@@ -16,6 +16,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from repo_paths import RESULTS_FIGURES, RESULTS_RUNS
+
 
 REFERENCE_SELECTION = {
     ("p0_yolo_clean_filt_trainval", "train", "4um"): (
@@ -27,28 +29,28 @@ REFERENCE_SELECTION = {
 }
 
 
-DATASETS = {
+DEFAULT_DATASETS = {
     "p0_class_folder_clean_filt": {
-        "root": Path("P0/data/dataset_Particles2SNR_F_c1"),
+        "root": Path("P0/data/processed/dataset_Particles2SNR_F_c1"),
         "kind": "class_folder",
         "classes": ("2um", "4um", "10um"),
     },
     "p0_yolo_clean_filt_trainval": {
-        "root": Path("P0/data/dataset_Particles2SNR_F_c1_yolo_trainval"),
+        "root": Path("P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval"),
         "kind": "yolo",
         "classes": ("2um", "4um", "10um"),
     },
     "p1_yolo_clean_filt_4class_lim10": {
-        "root": Path("P1/yolo_dataset_Particles2SNR_F_c1_4class_lim10_trainval"),
+        "root": Path("P1/data/yolo/canonical/particles2snr_f_c1_4class_lim10_trainval"),
         "kind": "yolo",
         "classes": ("2um", "4um", "10um", "unclear"),
     },
 }
 
 
-PARTICLES2SNR_JSONS = {
-    "train": Path("particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/train/data.json"),
-    "test": Path("particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/test/data.json"),
+DEFAULT_PARTICLES2SNR_JSONS = {
+    "train": RESULTS_RUNS / "p0_c1_Particles2SNR_F" / "train" / "data.json",
+    "test": RESULTS_RUNS / "p0_c1_Particles2SNR_F" / "test" / "data.json",
 }
 LABEL_COLORS = [
     "#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#8c564b",
@@ -61,9 +63,9 @@ OVERLAP_STYLES = {
 }
 
 
-def load_particles2SNR_metadata() -> dict[str, dict]:
+def load_particles2SNR_metadata(particles2SNR_jsons: dict[str, Path]) -> dict[str, dict]:
     metadata = {}
-    for split, path in PARTICLES2SNR_JSONS.items():
+    for split, path in particles2SNR_jsons.items():
         if not path.exists():
             continue
         with path.open() as handle:
@@ -343,7 +345,13 @@ def plot_group(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output-dir", type=Path, default=Path("particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/visual_signal_checks"))
+    parser.add_argument("--output-dir", type=Path, default=RESULTS_FIGURES / "visual_signal_checks")
+    parser.add_argument("--p0-class-folder-root", type=Path, default=DEFAULT_DATASETS["p0_class_folder_clean_filt"]["root"])
+    parser.add_argument("--p0-yolo-root", type=Path, default=DEFAULT_DATASETS["p0_yolo_clean_filt_trainval"]["root"])
+    parser.add_argument("--p1-yolo-root", type=Path, default=DEFAULT_DATASETS["p1_yolo_clean_filt_4class_lim10"]["root"])
+    parser.add_argument("--particles2snr-run-root", type=Path, default=RESULTS_RUNS / "p0_c1_Particles2SNR_F")
+    parser.add_argument("--selection-manifest", type=Path, default=None,
+                        help="Existing visual_signal_checks_manifest.csv used to reuse the same sampled files.")
     parser.add_argument("--fs", type=float, default=2_000_000.0)
     parser.add_argument("--max-samples", type=int, default=4)
     parser.add_argument("--show-overlap-density", dest="show_overlap_density", action="store_true", default=True)
@@ -354,12 +362,30 @@ def main() -> None:
     parser.add_argument("--no-show-label-ids", dest="show_label_ids", action="store_false")
     args = parser.parse_args()
 
-    particles2SNR_metadata = load_particles2SNR_metadata()
+    datasets = {
+        "p0_class_folder_clean_filt": {
+            **DEFAULT_DATASETS["p0_class_folder_clean_filt"],
+            "root": args.p0_class_folder_root,
+        },
+        "p0_yolo_clean_filt_trainval": {
+            **DEFAULT_DATASETS["p0_yolo_clean_filt_trainval"],
+            "root": args.p0_yolo_root,
+        },
+        "p1_yolo_clean_filt_4class_lim10": {
+            **DEFAULT_DATASETS["p1_yolo_clean_filt_4class_lim10"],
+            "root": args.p1_yolo_root,
+        },
+    }
+    particles2SNR_jsons = {
+        "train": args.particles2snr_run_root / "train" / "data.json",
+        "test": args.particles2snr_run_root / "test" / "data.json",
+    }
+    particles2SNR_metadata = load_particles2SNR_metadata(particles2SNR_jsons)
     manifest_path = args.output_dir / "visual_signal_checks_manifest.csv"
-    previous_selection = load_previous_selection(manifest_path)
+    previous_selection = load_previous_selection(args.selection_manifest or manifest_path)
     rows = []
 
-    for dataset_name, config in DATASETS.items():
+    for dataset_name, config in datasets.items():
         dataset_dir = args.output_dir / dataset_name
         overview_samples = []
         for split in ("train", "val", "test"):

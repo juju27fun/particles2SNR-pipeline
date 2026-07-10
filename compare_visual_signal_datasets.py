@@ -15,6 +15,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from repo_paths import RESULTS_FIGURES, RESULTS_RUNS
+
 
 DATASET_C1 = "p0_c1_particles2SNR"
 DATASET_CLEAN = "p0_c1_clean_7_80khz"
@@ -22,25 +24,25 @@ DATASET_YOLO_V3 = "yolo_v3_source_named"
 
 DATASETS = {
     DATASET_C1: {
-        "root": Path("P0/data/dataset_particles2SNR_c1_yolo"),
+        "root": Path("P0/data/processed/dataset_particles2SNR_c1_yolo"),
         "classes": ("2um", "4um", "10um"),
         "particles2SNR_jsons": {
-            "train": Path("particles2SNR_pipeline/output/p0_c1_particles2SNR/train/data.json"),
-            "test": Path("particles2SNR_pipeline/output/p0_c1_particles2SNR/test/data.json"),
+            "train": RESULTS_RUNS / "p0_c1_particles2SNR" / "train" / "data.json",
+            "test": RESULTS_RUNS / "p0_c1_particles2SNR" / "test" / "data.json",
         },
         "display": "P0 C1 particles2SNR",
     },
     DATASET_CLEAN: {
-        "root": Path("P0/data/dataset_Particles2SNR_F_c1_yolo_trainval"),
+        "root": Path("P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval"),
         "classes": ("2um", "4um", "10um"),
         "particles2SNR_jsons": {
-            "train": Path("particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/train/data.json"),
-            "test": Path("particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/test/data.json"),
+            "train": RESULTS_RUNS / "p0_c1_Particles2SNR_F" / "train" / "data.json",
+            "test": RESULTS_RUNS / "p0_c1_Particles2SNR_F" / "test" / "data.json",
         },
         "display": "P0 C1 clean + 7-80 kHz",
     },
     DATASET_YOLO_V3: {
-        "root": Path("P1/yolo_dataset_v3_source_named"),
+        "root": Path("P1/data/yolo/canonical/yolo_dataset_v3_source_named"),
         "classes": ("2um", "4um", "10um"),
         "particles2SNR_jsons": {},
         "display": "YOLO v3 source-named",
@@ -507,17 +509,46 @@ def write_manifest(path: Path, rows: list[dict]) -> None:
         writer.writerows(build_manifest_rows(rows))
 
 
+def apply_dataset_overrides(args: argparse.Namespace) -> None:
+    if args.left_root is not None:
+        DATASETS[DATASET_C1]["root"] = args.left_root
+    if args.right_root is not None:
+        DATASETS[DATASET_CLEAN]["root"] = args.right_root
+    if args.left_label:
+        DATASETS[DATASET_C1]["display"] = args.left_label
+    if args.right_label:
+        DATASETS[DATASET_CLEAN]["display"] = args.right_label
+    if args.left_train_json is not None:
+        DATASETS[DATASET_C1]["particles2SNR_jsons"]["train"] = args.left_train_json
+    if args.left_test_json is not None:
+        DATASETS[DATASET_C1]["particles2SNR_jsons"]["test"] = args.left_test_json
+    if args.right_train_json is not None:
+        DATASETS[DATASET_CLEAN]["particles2SNR_jsons"]["train"] = args.right_train_json
+    if args.right_test_json is not None:
+        DATASETS[DATASET_CLEAN]["particles2SNR_jsons"]["test"] = args.right_test_json
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output-dir", type=Path, default=Path("particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/visual_signal_checks/dataset_comparison"))
-    parser.add_argument("--source-manifest", type=Path, default=Path("particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/visual_signal_checks/visual_signal_checks_manifest.csv"))
+    parser.add_argument("--output-dir", type=Path, default=RESULTS_FIGURES / "visual_signal_checks" / "dataset_comparison")
+    parser.add_argument("--source-manifest", type=Path, default=RESULTS_FIGURES / "visual_signal_checks" / "visual_signal_checks_manifest.csv")
     parser.add_argument("--fs", type=float, default=2_000_000.0)
     parser.add_argument("--max-samples", type=int, default=4)
     parser.add_argument("--splits", default="test")
     parser.add_argument("--classes", default="2um,4um,10um")
     parser.add_argument("--focused-4um-impact", action="store_true")
+    parser.add_argument("--left-root", type=Path)
+    parser.add_argument("--right-root", type=Path)
+    parser.add_argument("--left-label")
+    parser.add_argument("--right-label")
+    parser.add_argument("--left-train-json", type=Path)
+    parser.add_argument("--left-test-json", type=Path)
+    parser.add_argument("--right-train-json", type=Path)
+    parser.add_argument("--right-test-json", type=Path)
+    parser.add_argument("--skip-yolo-reference", action="store_true")
     args = parser.parse_args()
 
+    apply_dataset_overrides(args)
     splits = tuple(item.strip() for item in args.splits.split(",") if item.strip())
     classes = tuple(item.strip() for item in args.classes.split(",") if item.strip())
     previous_selection = load_previous_selection(args.source_manifest)
@@ -547,25 +578,26 @@ def main() -> None:
             if paired:
                 rows.extend(plot_aligned_comparison(
                     paired,
-                    f"P0 C1 vs P0 C1 clean | same source filename | {split} | {class_name}",
+                    f"{DATASETS[DATASET_C1]['display']} vs {DATASETS[DATASET_CLEAN]['display']} | same source filename | {split} | {class_name}",
                     args.output_dir / f"{split}_{class_name}_comparison.png",
                     args.fs,
                     metadata_by_dataset,
                 ))
                 overview_pairs.extend(paired[:1])
 
-            reference_samples = collect_by_class(DATASET_YOLO_V3, split).get(class_name, [])[: args.max_samples]
-            rows.extend(plot_reference(
-                reference_samples,
-                f"YOLO v3 source-named | source-preserved filenames | {split} | {class_name}",
-                args.output_dir / f"yolo_v3_reference_{split}_{class_name}.png",
-                args.fs,
-            ))
+            if not args.skip_yolo_reference:
+                reference_samples = collect_by_class(DATASET_YOLO_V3, split).get(class_name, [])[: args.max_samples]
+                rows.extend(plot_reference(
+                    reference_samples,
+                    f"YOLO v3 source-named | source-preserved filenames | {split} | {class_name}",
+                    args.output_dir / f"yolo_v3_reference_{split}_{class_name}.png",
+                    args.fs,
+                ))
 
     if overview_pairs:
         rows.extend(plot_aligned_comparison(
             overview_pairs[: args.max_samples],
-            "P0 C1 vs P0 C1 clean | overview | same source filenames",
+            f"{DATASETS[DATASET_C1]['display']} vs {DATASETS[DATASET_CLEAN]['display']} | overview | same source filenames",
             args.output_dir / "overview_comparison.png",
             args.fs,
             metadata_by_dataset,

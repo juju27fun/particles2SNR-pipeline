@@ -14,11 +14,24 @@ import shutil
 from collections import Counter, defaultdict
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
 import numpy as np
+
+from repo_paths import DATA_DERIVED, RESULTS_FIGURES, RESULTS_RUNS
 
 
 DEFAULT_CLASSES = ("2um", "4um", "10um")
 UNCLEAR_CLASS = "unclear"
+ASSIGNED_CLASS_COLORS = {
+    "2um": "#1f77b4",
+    "4um": "#d62728",
+    "10um": "#2ca02c",
+    UNCLEAR_CLASS: "#9467bd",
+}
 
 
 def parse_csv_arg(value: str) -> tuple[str, ...]:
@@ -258,15 +271,176 @@ def write_summary(path: Path, summary: dict) -> None:
         json.dump(summary, f, indent=2)
 
 
+def snr_values(rows: list[dict], group_field: str, group_name: str) -> list[float]:
+    values = []
+    for row in rows:
+        if row.get(group_field) != group_name:
+            continue
+        value = as_float(row.get("median_snr_db"))
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def save_assigned_class_counts(summary: dict, figure_root: Path) -> Path:
+    splits = list(summary["splits"])
+    classes = list(summary["assigned_classes"])
+    x = np.arange(len(splits))
+    bottom = np.zeros(len(splits))
+
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+    for class_name in classes:
+        counts = [
+            summary["split_summary"][split]["assigned_class_counts"].get(class_name, 0)
+            for split in splits
+        ]
+        ax.bar(
+            x,
+            counts,
+            bottom=bottom,
+            label=class_name,
+            color=ASSIGNED_CLASS_COLORS.get(class_name),
+        )
+        bottom += np.asarray(counts, dtype=float)
+
+    ax.set_title("Assigned class counts by split")
+    ax.set_ylabel("Files")
+    ax.set_xticks(x, splits)
+    ax.legend(frameon=False, ncols=min(4, len(classes)))
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+
+    output_path = figure_root / "assigned_class_counts_by_split.png"
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    return output_path
+
+
+def save_unclear_fraction(summary: dict, figure_root: Path) -> Path:
+    splits = list(summary["splits"])
+    classes = list(summary["classes"])
+    x = np.arange(len(classes))
+    width = 0.8 / max(1, len(splits))
+
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+    for idx, split in enumerate(splits):
+        values = []
+        split_info = summary["split_summary"][split]
+        for class_name in classes:
+            original = split_info["original_class_counts"].get(class_name, 0)
+            unclear = split_info["unclear_by_original_class"].get(class_name, 0)
+            values.append((unclear / original * 100.0) if original else 0.0)
+        offset = (idx - (len(splits) - 1) / 2) * width
+        ax.bar(x + offset, values, width=width, label=split)
+
+    ax.set_title("Unclear fraction by original class")
+    ax.set_ylabel("Files assigned unclear (%)")
+    ax.set_ylim(0, 100)
+    ax.set_xticks(x, classes)
+    ax.legend(frameon=False)
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+
+    output_path = figure_root / "unclear_fraction_by_original_class.png"
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    return output_path
+
+
+def save_snr_boxplot(
+    rows: list[dict],
+    figure_root: Path,
+    group_field: str,
+    classes: list[str],
+    threshold_db: float,
+    output_name: str,
+    title: str,
+) -> Path:
+    values = [snr_values(rows, group_field, class_name) for class_name in classes]
+    labels = [
+        f"{class_name}\n(n={len(class_values)})"
+        for class_name, class_values in zip(classes, values)
+    ]
+
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+    nonempty_positions = [idx + 1 for idx, class_values in enumerate(values) if class_values]
+    nonempty_values = [class_values for class_values in values if class_values]
+    if nonempty_values:
+        ax.boxplot(
+            nonempty_values,
+            positions=nonempty_positions,
+            widths=0.55,
+            showfliers=False,
+            patch_artist=True,
+            boxprops={"facecolor": "#d9e8f5", "edgecolor": "#4c6272"},
+            medianprops={"color": "#111111", "linewidth": 1.5},
+            whiskerprops={"color": "#4c6272"},
+            capprops={"color": "#4c6272"},
+        )
+    ax.axhline(threshold_db, color="#b03a2e", linestyle="--", linewidth=1.2, label="threshold")
+    ax.set_title(title)
+    ax.set_ylabel("Median SNR per file (dB)")
+    ax.set_xticks(np.arange(1, len(classes) + 1), labels)
+    ax.legend(frameon=False)
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+
+    output_path = figure_root / output_name
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    return output_path
+
+
+def generate_plots(rows: list[dict], summary: dict, figure_root: Path) -> list[Path]:
+    figure_root.mkdir(parents=True, exist_ok=True)
+    classes = list(summary["classes"])
+    assigned_classes = list(summary["assigned_classes"])
+    threshold_db = float(summary["snr_threshold_db"])
+
+    return [
+        save_assigned_class_counts(summary, figure_root),
+        save_unclear_fraction(summary, figure_root),
+        save_snr_boxplot(
+            rows,
+            figure_root,
+            "original_class",
+            classes,
+            threshold_db,
+            "median_snr_by_original_class.png",
+            "Median SNR by original class",
+        ),
+        save_snr_boxplot(
+            rows,
+            figure_root,
+            "assigned_class",
+            assigned_classes,
+            threshold_db,
+            "median_snr_by_assigned_class.png",
+            "Median SNR by assigned class",
+        ),
+    ]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create particles2SNR_4_class_lim10 by assigning low-SNR files to unclear."
     )
     parser.add_argument("--dataset-name", default="particles2SNR_4_class_lim10")
-    parser.add_argument("--input-root", default="P0/data/dataset_particles2SNR_c1")
-    parser.add_argument("--output-root", default="P0/data/particles2SNR_4_class_lim10")
-    parser.add_argument("--source-particles2SNR-output-root", default="particles2SNR_pipeline/output/p0_c1_particles2SNR")
-    parser.add_argument("--artifact-root", default="particles2SNR_pipeline/output/particles2SNR_4_class_lim10")
+    parser.add_argument("--input-root", default="P0/data/processed/dataset_particles2SNR_c1")
+    parser.add_argument("--output-root", default="P0/data/processed/particles2SNR_4_class_lim10")
+    parser.add_argument(
+        "--source-particles2SNR-output-root",
+        default=str(RESULTS_RUNS / "p0_c1_particles2SNR"),
+    )
+    parser.add_argument(
+        "--artifact-root",
+        default=str(DATA_DERIVED / "particles2SNR_4_class_lim10"),
+    )
+    parser.add_argument(
+        "--figure-root",
+        default=str(RESULTS_FIGURES / "particles2SNR_4_class_lim10"),
+    )
+    parser.add_argument("--no-plots", action="store_true")
     parser.add_argument("--splits", type=parse_csv_arg, default=("train", "test"))
     parser.add_argument("--classes", type=parse_csv_arg, default=DEFAULT_CLASSES)
     parser.add_argument("--snr-threshold-db", type=float, default=-10.0)
@@ -285,6 +459,7 @@ def main() -> None:
     output_root = Path(args.output_root)
     artifact_root = Path(args.artifact_root)
     source_particles2SNR_output_root = Path(args.source_particles2SNR_output_root)
+    figure_root = Path(args.figure_root)
 
     all_rows = []
     for split in args.splits:
@@ -313,6 +488,9 @@ def main() -> None:
 
     summary = summarize(all_rows, args)
     write_summary(artifact_root / "class_balance_summary.json", summary)
+    plot_paths = []
+    if not args.no_plots:
+        plot_paths = generate_plots(all_rows, summary, figure_root)
 
     print(f"Rows: {len(all_rows)}")
     print(f"Dry run: {args.dry_run}")
@@ -323,6 +501,8 @@ def main() -> None:
             f"({unclear_pct:.1f}%) assigned={info['assigned_class_counts']}"
         )
     print(f"Manifest root: {artifact_root}")
+    if plot_paths:
+        print(f"Figure root: {figure_root}")
     if not args.dry_run:
         print(f"Dataset root: {output_root}")
 

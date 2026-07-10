@@ -12,19 +12,19 @@ to a geometry that is usable for detection training.
 The accepted P0 YOLO clean dataset is:
 
 ```text
-P0/data/dataset_Particles2SNR_F_c1_yolo_trainval
+P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval
 ```
 
 The main particles2SNR artifact directory is:
 
 ```text
-particles2SNR_pipeline/output/p0_c1_Particles2SNR_F
+particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F
 ```
 
 The derived P1 4-class dataset with the SNR -10 dB unclear rule is:
 
 ```text
-P1/yolo_dataset_Particles2SNR_F_c1_4class_lim10_trainval
+P1/data/yolo/canonical/particles2snr_f_c1_4class_lim10_trainval
 ```
 
 ## Main Scripts
@@ -76,24 +76,24 @@ from the generated train rows when exporting the YOLO/detseg layout.
 The current P0 generation command is:
 
 ```bash
-P0/.venv/bin/python particles2SNR_pipeline/generate_particles2SNR_dataset.py \
+P0/venv/bin/python particles2SNR_pipeline/generate_particles2SNR_dataset.py \
   --class-source-dirs 2um=P0/C1_HF_5_10_2um_doublet2,4um=P0/C1_HF_5_10_4um_doublet,10um=P0/C1_HF_5_10_10um_doublet \
-  --output-root P0/data/dataset_Particles2SNR_F_c1 \
-  --particles2SNR-output particles2SNR_pipeline/output/p0_c1_Particles2SNR_F \
-  --detseg-output P0/data/dataset_Particles2SNR_F_c1_yolo_trainval \
+  --output-root P0/data/processed/dataset_Particles2SNR_F_c1 \
+  --particles2SNR-output particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F \
+  --detseg-output P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval \
   --device cpu
 ```
 
 The final P1 conversion command is:
 
 ```bash
-P0/.venv/bin/python particles2SNR_pipeline/create_particles2SNR_c1_yolo_4class_lim10.py
+P0/venv/bin/python particles2SNR_pipeline/create_particles2SNR_c1_yolo_4class_lim10.py
 ```
 
 The visual checks are regenerated with:
 
 ```bash
-P0/.venv/bin/python particles2SNR_pipeline/generate_visual_signal_checks.py
+P0/venv/bin/python particles2SNR_pipeline/generate_visual_signal_checks.py
 ```
 
 ## Signal Preprocessing
@@ -102,7 +102,7 @@ The source `.npy` files are not modified. The pipeline creates a derived signal
 tree:
 
 ```text
-P0/data/dataset_Particles2SNR_F_c1/{train,test}/{2um,4um,10um}
+P0/data/processed/dataset_Particles2SNR_F_c1/{train,test}/{2um,4um,10um}
 ```
 
 Preprocessing steps:
@@ -114,7 +114,7 @@ Preprocessing steps:
 4. Replace unsafe intervals with chunks from:
 
 ```text
-P0/data/Noise
+P0/data/processed/Noise
 ```
 
 5. Re-run the saturation audit after cleaning. The generation fails if
@@ -141,7 +141,7 @@ bandpass_order: 4
 For each split, particles2SNR writes artifacts under:
 
 ```text
-particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/{train,test}
+particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F/{train,test}
 ```
 
 Important files:
@@ -218,12 +218,17 @@ max_yolo_width_ms: 1.5
 
 The cleaned, bandpassed signal is loaded again from `signal.path`. The pipeline
 computes an absolute moving-average envelope and uses robust z-scores to group
-actual signal peaks.
+actual signal peaks. The accepted `_F` configuration now uses `dual_clean` peak
+evidence: a particle must be supported by a peak in the bandpassed signal and
+also by a peak in the cleaned, non-bandpassed signal saved under each split's
+`peak_evidence_clean_signals` artifact directory. This prevents accepting peaks
+that are only created by the 7-80 kHz bandpass.
 
 Current parameters:
 
 ```text
 peak_evidence_filter: true
+peak_evidence_signal_mode: dual_clean
 peak_envelope_window_ms: 0.08
 peak_min_z: 4.0
 peak_prominence_z: 2.0
@@ -236,6 +241,7 @@ peak_keep_high_snr_db: 4.0
 Effects:
 
 - particles2SNR particles without local peak support are dropped.
+- particles2SNR particles whose peak support exists only after bandpass are dropped.
 - Duplicate particles2SNR particles on the same envelope peak are collapsed.
 - Close doublets can be preserved when they map to distinct peak groups.
 - High-SNR particles can be kept even if peak support is imperfect.
@@ -324,7 +330,7 @@ boundary_adjusted
 The accepted 3-class P0 YOLO/detseg layout is:
 
 ```text
-P0/data/dataset_Particles2SNR_F_c1_yolo_trainval
+P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval
 ```
 
 Structure:
@@ -360,7 +366,7 @@ Class names:
 The P1 4-class dataset is derived from the final P0 YOLO clean dataset:
 
 ```text
-P1/yolo_dataset_Particles2SNR_F_c1_4class_lim10_trainval
+P1/data/yolo/canonical/particles2snr_f_c1_4class_lim10_trainval
 ```
 
 It uses the same signal files and intervals as P0, but rewrites labels using:
@@ -384,8 +390,8 @@ Class names:
 The converter reads these particles2SNR post-processed files:
 
 ```text
-particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/train/data.json
-particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/test/data.json
+particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F/train/data.json
+particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F/test/data.json
 ```
 
 The `val` split is resolved by matching the P0 YOLO split files against the
@@ -411,15 +417,15 @@ test: files=578, events=895
 Visual signal checks are written to:
 
 ```text
-particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/visual_signal_checks
+particles2SNR_pipeline/results/figures/visual_signal_checks
 ```
 
 The script uses:
 
 ```text
-P0/data/dataset_Particles2SNR_F_c1_yolo_trainval
-particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/train/data.json
-particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/test/data.json
+P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval
+particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F/train/data.json
+particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F/test/data.json
 ```
 
 The PNGs overlay:
@@ -432,7 +438,7 @@ The PNGs overlay:
 The manifest is:
 
 ```text
-particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/visual_signal_checks/visual_signal_checks_manifest.csv
+particles2SNR_pipeline/results/figures/visual_signal_checks/visual_signal_checks_manifest.csv
 ```
 
 ## Validation Checks
@@ -456,13 +462,13 @@ test boundary drops: 1
 P1 checks:
 
 ```bash
-env PYTHONPATH=P1 P0/.venv/bin/python -m detseg.audit_dataset \
-  --data-dir P1/yolo_dataset_Particles2SNR_F_c1_4class_lim10_trainval \
+env PYTHONPATH=P1 P0/venv/bin/python -m detseg.audit_dataset \
+  --data-dir P1/data/yolo/canonical/particles2snr_f_c1_4class_lim10_trainval \
   --strict \
   --json-out P1/detseg_output_Particles2SNR_F_c1_4class_lim10_dataset_audit.json
 
-env PYTHONPATH=P1 P0/.venv/bin/python -m detseg.preflight_data_gate \
-  --data-dir P1/yolo_dataset_Particles2SNR_F_c1_4class_lim10_trainval \
+env PYTHONPATH=P1 P0/venv/bin/python -m detseg.preflight_data_gate \
+  --data-dir P1/data/yolo/canonical/particles2snr_f_c1_4class_lim10_trainval \
   --mode strict \
   --json-out P1/detseg_output_Particles2SNR_F_c1_4class_lim10_preflight.json
 ```

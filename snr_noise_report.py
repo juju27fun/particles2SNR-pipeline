@@ -19,6 +19,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
 
+from repo_paths import RESULTS_REPORTS, RESULTS_RUNS
+
 
 DEFAULT_CLASSES = ("2um", "4um", "10um")
 
@@ -259,10 +261,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Build class-wise SNR/noise figures and statistical reports."
     )
-    parser.add_argument("--input-dir", default="output",
+    parser.add_argument("--input-dir", default=str(RESULTS_RUNS / "ad_hoc"),
                         help="Directory containing particles2SNR CSV exports")
-    parser.add_argument("--output-dir", default=None,
-                        help="Derived report directory (default: input-dir/snr_noise_report)")
+    parser.add_argument("--output-dir", default=str(RESULTS_REPORTS / "snr_noise_report"),
+                        help="Derived report directory")
     parser.add_argument("--classes", default=",".join(DEFAULT_CLASSES),
                         help="Comma-separated classes to compare")
     args = parser.parse_args()

@@ -12,6 +12,8 @@ from pathlib import Path
 
 import numpy as np
 
+from repo_paths import RESULTS_RUNS
+
 
 DEFAULT_CLASSES = ("2um", "4um", "10um")
 
@@ -138,20 +140,21 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create event-crop classification dataset from clean particles2SNR YOLO annotations.")
-    parser.add_argument("--yolo-root", type=Path, default=Path("P0/data/dataset_Particles2SNR_F_c1_yolo_trainval"))
-    parser.add_argument("--particles2SNR-json", type=Path, action="append",
-                        default=[
-                            Path("particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/train/data.json"),
-                            Path("particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/test/data.json"),
-                        ])
-    parser.add_argument("--output-root", type=Path, default=Path("P0/data/dataset_Particles2SNR_F_c1_events"))
-    parser.add_argument("--artifact-root", type=Path, default=Path("particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/event_classification_dataset"))
+    parser.add_argument("--yolo-root", type=Path, default=Path("P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval"))
+    parser.add_argument("--particles2SNR-json", type=Path, action="append", default=None)
+    parser.add_argument("--output-root", type=Path, default=Path("P0/data/processed/dataset_Particles2SNR_F_c1_events"))
+    parser.add_argument("--artifact-root", type=Path, default=RESULTS_RUNS / "p0_c1_Particles2SNR_F" / "event_classification_dataset")
     parser.add_argument("--splits", type=parse_csv_arg, default=("train", "val", "test"))
     parser.add_argument("--classes", type=parse_csv_arg, default=DEFAULT_CLASSES)
     parser.add_argument("--crop-length", type=int, default=16384)
     parser.add_argument("--fs", type=float, default=2_000_000.0)
     parser.add_argument("--keep-existing", action="store_true")
     args = parser.parse_args()
+    if args.particles2SNR_json is None:
+        args.particles2SNR_json = [
+            RESULTS_RUNS / "p0_c1_Particles2SNR_F" / "train" / "data.json",
+            RESULTS_RUNS / "p0_c1_Particles2SNR_F" / "test" / "data.json",
+        ]
 
     if args.output_root.exists() and not args.keep_existing:
         shutil.rmtree(args.output_root)

@@ -19,6 +19,8 @@ from typing import Iterable
 import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks
 
+from repo_paths import RESULTS_RUNS
+
 from detect_saturation import (
     scan_class_folder,
     write_intervals_csv,
@@ -231,12 +233,17 @@ def clean_split(input_split_dir: Path, output_split_dir: Path,
                 class_names: tuple[str, ...], zero_epsilon: float,
                 max_zero_run_after_clean: int, args: argparse.Namespace,
                 noise_pool: list[np.ndarray], rng: np.random.Generator,
-                split: str) -> tuple[list[dict], list[dict]]:
+                split: str, peak_evidence_clean_dir: Path | None = None) -> tuple[list[dict], list[dict], list[dict]]:
     zero_manifest_rows = []
     saturation_rows = []
+    peak_evidence_rows = []
     if output_split_dir.exists():
         shutil.rmtree(output_split_dir)
     output_split_dir.mkdir(parents=True, exist_ok=True)
+    if peak_evidence_clean_dir is not None:
+        if peak_evidence_clean_dir.exists():
+            shutil.rmtree(peak_evidence_clean_dir)
+        peak_evidence_clean_dir.mkdir(parents=True, exist_ok=True)
 
     for class_name, source_path in iter_class_files(input_split_dir, class_names):
         rel = source_path.relative_to(input_split_dir)
@@ -320,6 +327,20 @@ def clean_split(input_split_dir: Path, output_split_dir: Path,
 
         final_signal = sat_cleaned
         final_action = "saturation_cleaned"
+        peak_evidence_path = None
+        if peak_evidence_clean_dir is not None:
+            peak_evidence_path = peak_evidence_clean_dir / rel
+            peak_evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(peak_evidence_path, np.asarray(sat_cleaned, dtype=np.asarray(signal).dtype))
+            peak_evidence_rows.append({
+                "split": split,
+                "class": class_name,
+                "filename": source_path.name,
+                "source_path": str(source_path),
+                "filtered_output_path": str(output_path),
+                "peak_evidence_clean_path": str(peak_evidence_path),
+                "action": "saturation_cleaned_no_bandpass",
+            })
         if args.apply_bandpass_output:
             final_signal = butter_bandpass_filter(
                 final_signal,
@@ -354,7 +375,7 @@ def clean_split(input_split_dir: Path, output_split_dir: Path,
                 "max_consecutive_flat": sat_info.get("max_consecutive_flat", sat_info.get("max_consecutive_zero", 0)),
             })
 
-    return zero_manifest_rows, saturation_rows
+    return zero_manifest_rows, saturation_rows, peak_evidence_rows
 
 
 def scan_saturation_split(split_dir: Path, output_dir: Path,
@@ -691,6 +712,11 @@ def particle_to_annotation(particle: dict, signal_length: int, fs: float,
         "peak_z": particle.get("peak_z"),
         "peak_center_ms": particle.get("peak_center_ms"),
         "local_peak_z": particle.get("local_peak_z"),
+        "clean_peak_support": particle.get("clean_peak_support"),
+        "clean_peak_group_id": particle.get("clean_peak_group_id"),
+        "clean_peak_z": particle.get("clean_peak_z"),
+        "clean_peak_center_ms": particle.get("clean_peak_center_ms"),
+        "clean_local_peak_z": particle.get("clean_local_peak_z"),
         "source": "particles2SNR_pipeline",
     }
 
@@ -1075,6 +1101,76 @@ def resolve_annotation_boundary_crossings(
     return kept, dropped, edits
 
 
+def peak_evidence_reference_path(signal: dict, clean_root: Path | None) -> Path | None:
+    if clean_root is None:
+        return None
+    class_name = signal.get("class")
+    filename = signal.get("filename")
+    if not class_name or not filename:
+        return None
+    candidate = clean_root / str(class_name) / str(filename)
+    return candidate if candidate.exists() else None
+
+
+def annotate_clean_peak_support(
+    particles: list[dict],
+    signal_values: np.ndarray,
+    signal_length: int,
+    fs: float,
+    envelope_window_ms: float,
+    min_z: float,
+    prominence_z: float,
+    min_separation_ms: float,
+    valley_ratio: float,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    peak_groups, _envelope, z_values, _baseline, _scale = detect_peak_groups(
+        signal_values,
+        fs,
+        envelope_window_ms=envelope_window_ms,
+        min_z=min_z,
+        prominence_z=prominence_z,
+        min_separation_ms=min_separation_ms,
+        valley_ratio=valley_ratio,
+    )
+    kept = []
+    dropped = []
+    for particle in particles:
+        enriched = annotate_particle_peak_evidence(
+            particle,
+            signal_length,
+            fs,
+            peak_groups,
+            z_values,
+        )
+        if enriched.get("peak_support"):
+            out = dict(particle)
+            out["clean_peak_support"] = True
+            out["clean_peak_group_id"] = enriched.get("peak_group_id")
+            out["clean_peak_z"] = enriched.get("peak_z")
+            out["clean_peak_center_ms"] = enriched.get("peak_center_ms")
+            out["clean_local_peak_z"] = enriched.get("local_peak_z")
+            kept.append(out)
+            continue
+        dropped.append({
+            "reason": "missing_clean_peak_support",
+            "stage": "clean_peak_evidence",
+            "peak_support": False,
+            "peak_z": enriched.get("peak_z"),
+            "local_peak_z": enriched.get("local_peak_z"),
+            "snr_db": particle.get("snr_db"),
+            "frequency": particle.get("frequency"),
+            "passage_time_ms": particle_passage_time_ms(particle),
+        })
+    peak_summary = [{
+        "id": int(g["id"]),
+        "peak_center_ms": float(g["peak_sample"] / fs * 1000.0),
+        "peak_z": float(g["peak_z"]),
+        "num_peaks": int(len(g["peaks"])),
+        "source": "clean_no_bandpass",
+    } for g in peak_groups]
+    return kept, dropped, peak_summary
+
+
 def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
                      class_names: tuple[str, ...], fs: float,
                      min_passage_time_ms: float | None = None,
@@ -1101,7 +1197,13 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
                      min_yolo_width_ms: float | None = 0.08,
                      max_yolo_width_ms: float | None = 1.5,
                      resolve_boundary_crossings: bool = True,
-                     boundary_min_width_ms: float | None = None) -> dict:
+                     boundary_min_width_ms: float | None = None,
+                     peak_evidence_signal_mode: str = "filtered",
+                     peak_evidence_clean_root: Path | None = None) -> dict:
+    if peak_evidence_signal_mode not in {"filtered", "clean", "dual_clean"}:
+        raise ValueError(
+            "peak_evidence_signal_mode must be one of: filtered, clean, dual_clean"
+        )
     with dataset_results_path.open() as f:
         results = json.load(f)
 
@@ -1140,8 +1242,10 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
             dropped_annotations.extend(width_drops)
         if peak_evidence_filter:
             signal_path = signal.get("path")
-            if signal_path and Path(signal_path).exists():
-                signal_values = np.load(signal_path)
+            clean_path = peak_evidence_reference_path(signal, peak_evidence_clean_root)
+            primary_path = clean_path if peak_evidence_signal_mode == "clean" else Path(signal_path) if signal_path else None
+            if primary_path and primary_path.exists():
+                signal_values = np.load(primary_path)
                 filtered_particles, peak_drops, peak_summary = refine_particles_with_peak_evidence(
                     filtered_particles,
                     signal_values,
@@ -1156,11 +1260,37 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
                     keep_high_snr_db=peak_keep_high_snr_db,
                 )
                 dropped_annotations.extend(peak_drops)
+                if peak_evidence_signal_mode == "dual_clean":
+                    if clean_path and clean_path.exists():
+                        clean_values = np.load(clean_path)
+                        filtered_particles, clean_drops, clean_peak_summary = annotate_clean_peak_support(
+                            filtered_particles,
+                            clean_values,
+                            length,
+                            fs,
+                            envelope_window_ms=peak_envelope_window_ms,
+                            min_z=peak_min_z,
+                            prominence_z=peak_prominence_z,
+                            min_separation_ms=peak_min_separation_ms,
+                            valley_ratio=peak_group_valley_ratio,
+                        )
+                        dropped_annotations.extend(clean_drops)
+                        peak_summary = [
+                            {**row, "source": row.get("source", "filtered")}
+                            for row in peak_summary
+                        ]
+                        peak_summary.extend(clean_peak_summary)
+                    else:
+                        dropped_annotations.append({
+                            "reason": "missing_clean_signal_for_dual_peak_evidence",
+                            "stage": "clean_peak_evidence",
+                            "path": str(clean_path) if clean_path else None,
+                        })
             else:
                 dropped_annotations.append({
                     "reason": "missing_signal_for_peak_evidence",
                     "stage": "peak_evidence",
-                    "path": signal_path,
+                    "path": str(primary_path) if primary_path else signal_path,
                 })
         if merge_overlaps:
             filtered_particles, nms_drops = merge_overlapping_particles(
@@ -1242,6 +1372,8 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
             },
             "peak_evidence_filter": {
                 "enabled": bool(peak_evidence_filter),
+                "signal_mode": peak_evidence_signal_mode,
+                "clean_root": str(peak_evidence_clean_root) if peak_evidence_clean_root is not None else None,
                 "envelope_window_ms": peak_envelope_window_ms,
                 "min_z": peak_min_z,
                 "prominence_z": peak_prominence_z,
@@ -1384,6 +1516,8 @@ def write_detseg_dataset_yaml(root: Path, split_summaries: dict[str, dict],
         "  merge_ambiguous_frequency_hz: 8000",
         "  merge_snr_margin_db: 4.0",
         "  peak_evidence_filter: true",
+        "  peak_evidence_signal_mode: dual_clean",
+        "  peak_evidence_clean_root: particles2SNR split artifact / peak_evidence_clean_signals",
         "  peak_envelope_window_ms: 0.08",
         "  peak_min_z: 4.0",
         "  peak_prominence_z: 2.0",
@@ -1450,6 +1584,8 @@ def write_run_summary(path: Path, split_summaries: list[dict], args: argparse.Na
             "merge_ambiguous_frequency_hz": args.merge_ambiguous_frequency_hz,
             "merge_snr_margin_db": args.merge_snr_margin_db,
             "peak_evidence_filter": args.peak_evidence_filter,
+            "peak_evidence_signal_mode": args.peak_evidence_signal_mode,
+            "peak_evidence_clean_root": "per-split peak_evidence_clean_signals",
             "peak_envelope_window_ms": args.peak_envelope_window_ms,
             "peak_min_z": args.peak_min_z,
             "peak_prominence_z": args.peak_prominence_z,
@@ -1472,7 +1608,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build a zero-cleaned P0 dataset with particles2SNR ground truth."
     )
-    parser.add_argument("--input-root", default="P0/data/dataset")
+    parser.add_argument("--input-root", default="P0/data/processed/dataset")
     parser.add_argument("--class-source-dirs", type=parse_class_source_dirs, default=None,
                         help="Comma-separated class=dir sources; creates train/test splits before particles2SNR.")
     parser.add_argument("--staging-root", default=None,
@@ -1480,9 +1616,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-fraction", type=float, default=0.2)
     parser.add_argument("--val-fraction", type=float, default=0.2)
     parser.add_argument("--split-seed", type=int, default=42)
-    parser.add_argument("--output-root", default="P0/data/dataset_Particles2SNR_F_c1")
-    parser.add_argument("--particles2SNR-output", default="particles2SNR_pipeline/output/p0_c1_Particles2SNR_F")
-    parser.add_argument("--detseg-output", default="P0/data/dataset_Particles2SNR_F_c1_yolo_trainval",
+    parser.add_argument("--output-root", default="P0/data/processed/dataset_Particles2SNR_F_c1")
+    parser.add_argument("--particles2SNR-output", default=str(RESULTS_RUNS / "p0_c1_Particles2SNR_F"))
+    parser.add_argument("--detseg-output", default="P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval",
                         help="P1/detseg YOLO layout output root; use '' to disable.")
     parser.add_argument("--splits", type=parse_csv_arg, default=DEFAULT_SPLITS)
     parser.add_argument("--classes", type=parse_csv_arg, default=DEFAULT_CLASSES)
@@ -1501,7 +1637,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--saturation-guard-before", type=int, default=300)
     parser.add_argument("--saturation-guard-after", type=int, default=300)
     parser.add_argument("--saturation-mask-value", type=float, default=0.0)
-    parser.add_argument("--noise-dir", default="P0/data/Noise")
+    parser.add_argument("--noise-dir", default="P0/data/processed/Noise")
     parser.add_argument("--apply-bandpass-output", dest="apply_bandpass_output", action="store_true", default=True)
     parser.add_argument("--no-apply-bandpass-output", dest="apply_bandpass_output", action="store_false")
     parser.add_argument("--bandpass-fmin", type=float, default=DEFAULT_BANDPASS_FMIN)
@@ -1522,6 +1658,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--merge-snr-margin-db", type=float, default=4.0)
     parser.add_argument("--peak-evidence-filter", dest="peak_evidence_filter", action="store_true", default=True)
     parser.add_argument("--disable-peak-evidence-filter", dest="peak_evidence_filter", action="store_false")
+    parser.add_argument("--peak-evidence-signal-mode", choices=("filtered", "clean", "dual_clean"), default="dual_clean",
+                        help="Signal used for peak evidence. dual_clean keeps filtered evidence but also requires support in the cleaned non-bandpassed signal.")
     parser.add_argument("--peak-envelope-window-ms", type=float, default=0.08)
     parser.add_argument("--peak-min-z", type=float, default=4.0)
     parser.add_argument("--peak-prominence-z", type=float, default=2.0)
@@ -1584,7 +1722,12 @@ def main() -> None:
         if not input_split_dir.is_dir():
             raise FileNotFoundError(f"Missing split directory: {input_split_dir}")
 
-        manifest_rows, saturation_rows = clean_split(
+        peak_evidence_clean_dir = (
+            split_output_dir / "peak_evidence_clean_signals"
+            if args.peak_evidence_signal_mode in {"clean", "dual_clean"}
+            else None
+        )
+        manifest_rows, saturation_rows, peak_evidence_rows = clean_split(
             input_split_dir,
             output_split_dir,
             args.classes,
@@ -1594,6 +1737,7 @@ def main() -> None:
             noise_pool,
             rng,
             split,
+            peak_evidence_clean_dir,
         )
         write_csv(
             split_output_dir / "zero_cleaning_manifest.csv",
@@ -1615,6 +1759,14 @@ def main() -> None:
                 "duration_samples", "action", "dropped_events", "fs", "fmin",
                 "fmax", "min_flat", "zero_threshold", "guard_before",
                 "guard_after", "max_consecutive_flat",
+            ],
+        )
+        write_csv(
+            split_output_dir / "peak_evidence_signal_manifest.csv",
+            peak_evidence_rows,
+            [
+                "split", "class", "filename", "source_path",
+                "filtered_output_path", "peak_evidence_clean_path", "action",
             ],
         )
         post_sat = scan_saturation_split(
@@ -1667,6 +1819,8 @@ def main() -> None:
                 args.max_yolo_width_ms,
                 args.resolve_boundary_crossings,
                 args.boundary_min_width_ms,
+                args.peak_evidence_signal_mode,
+                peak_evidence_clean_dir,
             )
             if args.detseg_output:
                 if split == "train" and args.val_fraction > 0:

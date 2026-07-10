@@ -19,6 +19,8 @@ from pathlib import Path
 
 import yaml
 
+from repo_paths import RESULTS_RUNS
+
 
 CLASS_NAMES = ("2um", "4um", "10um", "unclear")
 UNCLEAR_CLASS_ID = 3
@@ -216,21 +218,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source-root",
-        default="P0/data/dataset_Particles2SNR_F_c1_yolo_trainval",
+        default="P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval",
         help="Existing 3-class particles2SNR C1 YOLO train/val/test dataset.",
     )
     parser.add_argument(
         "--output-root",
-        default="P1/yolo_dataset_Particles2SNR_F_c1_4class_lim10_trainval",
+        default="P1/data/yolo/canonical/particles2snr_f_c1_4class_lim10_trainval",
         help="Output 4-class YOLO dataset.",
     )
     parser.add_argument(
         "--particles2SNR-train-json",
-        default="particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/train/data.json",
+        default=str(RESULTS_RUNS / "p0_c1_Particles2SNR_F" / "train" / "data.json"),
     )
     parser.add_argument(
         "--particles2SNR-test-json",
-        default="particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/test/data.json",
+        default=str(RESULTS_RUNS / "p0_c1_Particles2SNR_F" / "test" / "data.json"),
     )
     parser.add_argument("--threshold-db", type=float, default=-10.0)
     return parser.parse_args()

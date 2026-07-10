@@ -8,12 +8,23 @@ For the current accepted C1 clean YOLO generation pipeline, including the
 particles2SNR files used and the post-processing stages, see
 [`P0_C1_Particles2SNR_F_PIPELINE.md`](P0_C1_Particles2SNR_F_PIPELINE.md).
 
+## Repository Layout
+
+- `data/derived/`: repo-local generated dataset manifests and staging artifacts.
+- `results/runs/`: detector and model-evaluation run outputs.
+- `results/reports/`: comparison reports, summary CSV/JSON files, and PDFs.
+- `results/figures/`: quick-look plots and visual signal checks.
+
+Large signal datasets live outside this package under `P0/data/processed/` or
+`P1/data/yolo/canonical/`; this repo stores the metadata, reports, and figures
+needed to reproduce or inspect those datasets.
+
 ## Dataset Analysis
 
 Run the particles2SNR detector over the class folders:
 
 ```bash
-python3 run_dataset.py --dataset-dir ../particle_detector/test --output-dir output --device cpu
+python3 run_dataset.py --dataset-dir ../particle_detector/test --output-dir results/runs/ad_hoc --device cpu
 ```
 
 Outputs:
@@ -38,7 +49,9 @@ while leaving the `16384`-sample particle-detector domain unchanged.
 After `run_dataset.py`, build reproducible figures and statistical tests:
 
 ```bash
-python3 snr_noise_report.py --input-dir output --output-dir output/snr_noise_report
+python3 snr_noise_report.py \
+  --input-dir results/runs/ad_hoc \
+  --output-dir results/reports/snr_noise_report
 ```
 
 Outputs:
@@ -70,11 +83,11 @@ Compare particle SNR distributions for the original particles2SNR dataset, the C
 particles2SNR dataset, and the accepted C1 clean filtered dataset:
 
 ```bash
-P0/.venv/bin/python particles2SNR_pipeline/compare_snr_by_class.py \
-  --dataset "P0 original particles2SNR=particles2SNR_pipeline/output/p0_dataset_particles2SNR/test/snr_particles.csv" \
-  --dataset "P0 C1 particles2SNR=particles2SNR_pipeline/output/p0_c1_particles2SNR/test/snr_particles.csv" \
-  --dataset "P0 C1 clean + 7-80 kHz=particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/test/snr_particles.csv" \
-  --output-dir particles2SNR_pipeline/output/snr_comparison \
+P0/venv/bin/python particles2SNR_pipeline/compare_snr_by_class.py \
+  --dataset "P0 original particles2SNR=particles2SNR_pipeline/results/runs/p0_dataset_particles2SNR/test/snr_particles.csv" \
+  --dataset "P0 C1 particles2SNR=particles2SNR_pipeline/results/runs/p0_c1_particles2SNR/test/snr_particles.csv" \
+  --dataset "P0 C1 clean + 7-80 kHz=particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F/test/snr_particles.csv" \
+  --output-dir particles2SNR_pipeline/results/reports/snr_comparison \
   --output-name snr_by_class_3way \
   --classes 2um,4um,10um \
   --threshold-db -10
@@ -93,10 +106,10 @@ standalone Noise folder, and Doppler peak frequencies:
 
 ```bash
 python3 particles2SNR_pipeline/spectral_noise_particle_report.py \
-  --old-output particles2SNR_pipeline/output/p0_c1_particles2SNR/test \
-  --new-output particles2SNR_pipeline/output/p0_dataset_particles2SNR/test \
-  --noise-dir P0/data/Noise \
-  --output-dir particles2SNR_pipeline/output/spectral_noise_particle_comparison \
+  --old-output particles2SNR_pipeline/results/runs/p0_c1_particles2SNR/test \
+  --new-output particles2SNR_pipeline/results/runs/p0_dataset_particles2SNR/test \
+  --noise-dir P0/data/processed/Noise \
+  --output-dir particles2SNR_pipeline/results/reports/spectral_noise_particle_comparison \
   --classes 2um,4um,10um \
   --doppler-band-khz 10,40
 ```
@@ -121,10 +134,10 @@ intervals against dataset noise windows outside labels:
 
 ```bash
 python3 particles2SNR_pipeline/yolo_detection_spectral_report.py \
-  --old-dataset P1/yolo_dataset_v3 \
-  --new-dataset P0/data/dataset_particles2SNR_c1_yolo \
-  --noise-dir P0/data/Noise \
-  --output-dir particles2SNR_pipeline/output/yolo_detection_spectral_comparison \
+  --old-dataset P1/data/yolo/canonical/yolo_dataset_v3 \
+  --new-dataset P0/data/processed/dataset_particles2SNR_c1_yolo \
+  --noise-dir P0/data/processed/Noise \
+  --output-dir particles2SNR_pipeline/results/reports/yolo_detection_spectral_comparison \
   --splits test \
   --classes 2um,4um,10um \
   --guard-samples 0 \
@@ -149,12 +162,12 @@ The same script also supports a three-way comparison with repeated `--dataset`
 arguments:
 
 ```bash
-P0/.venv/bin/python particles2SNR_pipeline/yolo_detection_spectral_report.py \
-  --dataset "YOLO v3 old pipeline=P1/yolo_dataset_v3" \
-  --dataset "P0 C1 particles2SNR=P0/data/dataset_particles2SNR_c1_yolo" \
-  --dataset "P0 C1 clean + 7-80 kHz=P0/data/dataset_Particles2SNR_F_c1_yolo_trainval" \
-  --noise-dir P0/data/Noise \
-  --output-dir particles2SNR_pipeline/output/yolo_detection_spectral_comparison_3way \
+P0/venv/bin/python particles2SNR_pipeline/yolo_detection_spectral_report.py \
+  --dataset "YOLO v3 old pipeline=P1/data/yolo/canonical/yolo_dataset_v3" \
+  --dataset "P0 C1 particles2SNR=P0/data/processed/dataset_particles2SNR_c1_yolo" \
+  --dataset "P0 C1 clean + 7-80 kHz=P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval" \
+  --noise-dir P0/data/processed/Noise \
+  --output-dir particles2SNR_pipeline/results/reports/yolo_detection_spectral_comparison_3way \
   --output-name yolo_detection_spectral_comparison_3way \
   --splits test \
   --classes 2um,4um,10um \
@@ -172,12 +185,12 @@ To compare all datasets after the same analysis filter and avoid the relative
 percentage bias introduced by pre-filtered signals, generate the v2 report:
 
 ```bash
-P0/.venv/bin/python particles2SNR_pipeline/yolo_detection_spectral_report.py \
-  --dataset "YOLO v3 old pipeline=P1/yolo_dataset_v3" \
-  --dataset "P0 C1 particles2SNR=P0/data/dataset_particles2SNR_c1_yolo" \
-  --dataset "P0 C1 clean + 7-80 kHz=P0/data/dataset_Particles2SNR_F_c1_yolo_trainval" \
-  --noise-dir P0/data/Noise \
-  --output-dir particles2SNR_pipeline/output/yolo_detection_spectral_comparison_3way_v2 \
+P0/venv/bin/python particles2SNR_pipeline/yolo_detection_spectral_report.py \
+  --dataset "YOLO v3 old pipeline=P1/data/yolo/canonical/yolo_dataset_v3" \
+  --dataset "P0 C1 particles2SNR=P0/data/processed/dataset_particles2SNR_c1_yolo" \
+  --dataset "P0 C1 clean + 7-80 kHz=P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval" \
+  --noise-dir P0/data/processed/Noise \
+  --output-dir particles2SNR_pipeline/results/reports/yolo_detection_spectral_comparison_3way_v2 \
   --output-name yolo_detection_spectral_comparison_3way_v2 \
   --splits test \
   --classes 2um,4um,10um \
@@ -198,14 +211,14 @@ the same source filenames; YOLO v3 is included separately as an unaligned old
 pipeline reference.
 
 ```bash
-P0/.venv/bin/python particles2SNR_pipeline/compare_visual_signal_datasets.py \
+P0/venv/bin/python particles2SNR_pipeline/compare_visual_signal_datasets.py \
   --splits test \
   --classes 2um,4um,10um \
   --max-samples 4
 ```
 
 Outputs are written under
-`particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/visual_signal_checks/dataset_comparison/`:
+`particles2SNR_pipeline/results/figures/visual_signal_checks/dataset_comparison/`:
 
 - `test_<class>_comparison.png`: aligned P0 C1 vs P0 C1 clean signals.
 - `yolo_v3_reference_test_<class>.png`: unaligned YOLO v3 reference examples.
@@ -216,24 +229,36 @@ For the focused 4um presentation figure with two high-impact examples and one
 YOLO v3 reference row per example:
 
 ```bash
-P0/.venv/bin/python particles2SNR_pipeline/compare_visual_signal_datasets.py \
+P0/venv/bin/python particles2SNR_pipeline/compare_visual_signal_datasets.py \
   --focused-4um-impact
 ```
 
 This writes `focused_4um_impact_3row.png` and
 `focused_4um_impact_manifest.csv` in the same output directory.
 
+## 4-Class Lim10 Class-Folder Summary
+
+The class-folder `particles2SNR_4_class_lim10` manifests are stored under
+`particles2SNR_pipeline/data/derived/particles2SNR_4_class_lim10/`.
+Quick-look PNGs for class balance and median-SNR distributions are stored under
+`particles2SNR_pipeline/results/figures/particles2SNR_4_class_lim10/`:
+
+- `assigned_class_counts_by_split.png`
+- `unclear_fraction_by_original_class.png`
+- `median_snr_by_original_class.png`
+- `median_snr_by_assigned_class.png`
+
 ## P0 particles2SNR Dataset Generation
 
-Build a non-destructive cleaned dataset from `P0/data/dataset`, remove long
+Build a non-destructive cleaned dataset from `P0/data/processed/dataset`, remove long
 zero-valued regions while keeping at most two zero samples at each junction,
 run particles2SNR ground-truth generation, and export YOLO-compatible annotations:
 
 ```bash
-P0/.venv/bin/python particles2SNR_pipeline/generate_particles2SNR_dataset.py \
-  --input-root P0/data/dataset \
-  --output-root P0/data/dataset_particles2SNR_clean \
-  --particles2SNR-output particles2SNR_pipeline/output/p0_dataset_particles2SNR \
+P0/venv/bin/python particles2SNR_pipeline/generate_particles2SNR_dataset.py \
+  --input-root P0/data/processed/dataset \
+  --output-root P0/data/processed/dataset_particles2SNR_clean \
+  --particles2SNR-output particles2SNR_pipeline/results/runs/p0_dataset_particles2SNR \
   --splits train,test \
   --classes 2um,4um,10um \
   --zero-epsilon 0 \
@@ -241,7 +266,7 @@ P0/.venv/bin/python particles2SNR_pipeline/generate_particles2SNR_dataset.py \
   --device cpu
 ```
 
-Per split outputs are written under `particles2SNR_pipeline/output/p0_dataset_particles2SNR/{train,test}`:
+Per split outputs are written under `particles2SNR_pipeline/results/runs/p0_dataset_particles2SNR/{train,test}`:
 
 - `zero_cleaning_manifest.csv`: source/output file mapping and removed zero intervals.
 - `saturation_intervals.csv`, `saturation_summary.json`: derivative-based saturation scan.
@@ -249,36 +274,36 @@ Per split outputs are written under `particles2SNR_pipeline/output/p0_dataset_pa
   `noise_by_class.csv`: particles2SNR detections and SNR/noise tables.
 - `data.json`: annotation file compatible with `particle_detector` test loaders.
 
-The cleaned signal tree is written to `P0/data/dataset_particles2SNR_clean/{train,test}`.
+The cleaned signal tree is written to `P0/data/processed/dataset_particles2SNR_clean/{train,test}`.
 The P1/detseg YOLO layout is written to
-`P0/data/dataset_particles2SNR_yolo/{train,val,test}/{signals,labels}` with a
+`P0/data/processed/dataset_particles2SNR_yolo/{train,val,test}/{signals,labels}` with a
 minimal `dataset.yaml`; `val` is created empty unless a validation split is
 explicitly generated.
-Source files under `P0/data/dataset` are not modified.
+Source files under `P0/data/processed/dataset` are not modified.
 
 Then generate the SNR/noise report on the test split:
 
 ```bash
-P0/.venv/bin/python particles2SNR_pipeline/snr_noise_report.py \
-  --input-dir particles2SNR_pipeline/output/p0_dataset_particles2SNR/test \
-  --output-dir particles2SNR_pipeline/output/p0_dataset_particles2SNR/test/snr_noise_report
+P0/venv/bin/python particles2SNR_pipeline/snr_noise_report.py \
+  --input-dir particles2SNR_pipeline/results/runs/p0_dataset_particles2SNR/test \
+  --output-dir particles2SNR_pipeline/results/runs/p0_dataset_particles2SNR/test/snr_noise_report
 ```
 
 For Conv1DGAP accuracy-vs-SNR on the generated test split, first run the
 preflight check on the selected checkpoint, then run the SNR curve script:
 
 ```bash
-P0/.venv/bin/python P0/scripts/preflight_conv1dgap_snr.py \
+P0/venv/bin/python P0/scripts/preflight_conv1dgap_snr.py \
   --checkpoint P0/results/benchmark2/checkpoints/<run>/best_model.pth \
-  --data-dir P0/data/dataset_particles2SNR_clean/test \
-  --snr-csv particles2SNR_pipeline/output/p0_dataset_particles2SNR/test/snr_particles.csv \
-  --output-json particles2SNR_pipeline/output/p0_dataset_particles2SNR/test/conv1dgap_snr_preflight.json
+  --data-dir P0/data/processed/dataset_particles2SNR_clean/test \
+  --snr-csv particles2SNR_pipeline/results/runs/p0_dataset_particles2SNR/test/snr_particles.csv \
+  --output-json particles2SNR_pipeline/results/runs/p0_dataset_particles2SNR/test/conv1dgap_snr_preflight.json
 
-P0/.venv/bin/python P0/scripts/conv1dgap_accuracy_vs_snr.py \
+P0/venv/bin/python P0/scripts/conv1dgap_accuracy_vs_snr.py \
   --checkpoint P0/results/benchmark2/checkpoints/<run>/best_model.pth \
-  --data-dir P0/data/dataset_particles2SNR_clean/test \
-  --snr-csv particles2SNR_pipeline/output/p0_dataset_particles2SNR/test/snr_particles.csv \
-  --output-dir particles2SNR_pipeline/output/p0_dataset_particles2SNR/test/conv1dgap_snr
+  --data-dir P0/data/processed/dataset_particles2SNR_clean/test \
+  --snr-csv particles2SNR_pipeline/results/runs/p0_dataset_particles2SNR/test/snr_particles.csv \
+  --output-dir particles2SNR_pipeline/results/runs/p0_dataset_particles2SNR/test/conv1dgap_snr
 ```
 
 
@@ -289,11 +314,11 @@ predictions for each pipeline from its `data.json`. Example for the old C1
 particles2SNR output:
 
 ```bash
-P0/.venv/bin/python particles2SNR_pipeline/event_accuracy_vs_snr.py \
-  --data-json particles2SNR_pipeline/output/p0_c1_particles2SNR/test/data.json \
+P0/venv/bin/python particles2SNR_pipeline/event_accuracy_vs_snr.py \
+  --data-json particles2SNR_pipeline/results/runs/p0_c1_particles2SNR/test/data.json \
   --checkpoint P0/results/particles2SNR_c1_conv1dgap_retrained/checkpoints/Conv1DGAP-L-L4096-decim-dataset_particles2SNR_c1-tier1-seed42/best_model.pth \
   --dataset-label "old particles2SNR event" \
-  --output-dir particles2SNR_pipeline/output/p0_c1_particles2SNR/test/event_conv1dgap_snr \
+  --output-dir particles2SNR_pipeline/results/runs/p0_c1_particles2SNR/test/event_conv1dgap_snr \
   --model-name Conv1DGAP-L \
   --input-length 4096 \
   --crop-native-length 16384 \
@@ -305,14 +330,14 @@ Then compare event predictions with common SNR bins and class-balanced sampling
 inside each `(pipeline, SNR bin)` group:
 
 ```bash
-P0/.venv/bin/python particles2SNR_pipeline/compare_event_accuracy_by_snr.py \
-  --run "old particles2SNR event=particles2SNR_pipeline/output/p0_c1_particles2SNR/test/event_conv1dgap_snr/event_predictions.csv" \
-  --run "Particles2SNR_F event=particles2SNR_pipeline/output/p0_c1_Particles2SNR_F/test/event_conv1dgap_snr_retrained/event_predictions.csv" \
+P0/venv/bin/python particles2SNR_pipeline/compare_event_accuracy_by_snr.py \
+  --run "old particles2SNR event=particles2SNR_pipeline/results/runs/p0_c1_particles2SNR/test/event_conv1dgap_snr/event_predictions.csv" \
+  --run "Particles2SNR_F event=particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F/test/event_conv1dgap_snr_retrained/event_predictions.csv" \
   --bins 10 \
   --balance class-snr \
   --seed 42 \
   --targets 0.85,0.90,0.95,0.97 \
-  --output-dir particles2SNR_pipeline/output/event_accuracy_snr_comparison
+  --output-dir particles2SNR_pipeline/results/reports/event_accuracy_snr_comparison
 ```
 
 The balanced outputs are the reference comparison. Target SNR thresholds are reported only when the target accuracy is reached and remains reached for all higher usable SNR bins:
@@ -326,8 +351,8 @@ Scan a dataset and export interval-level saturation metadata:
 
 ```bash
 python3 detect_saturation.py ../particle_detector/test \
-  --intervals-csv output/saturation_intervals.csv \
-  --summary-json output/saturation_summary.json
+  --intervals-csv results/runs/ad_hoc/saturation_intervals.csv \
+  --summary-json results/runs/ad_hoc/saturation_summary.json
 ```
 
 ## Non-Destructive Saturation Cleaning
@@ -336,8 +361,8 @@ Create a derived cleaned copy without mutating source files:
 
 ```bash
 python3 saturation_cleaning.py ../particle_detector/test \
-  --output-dir output/cleaned_dataset \
-  --noise-dir ../P0/data/Noise \
+  --output-dir data/derived/cleaned_dataset \
+  --noise-dir ../P0/data/processed/Noise \
   --policy replace \
   --guard-before 300 \
   --guard-after 300
@@ -367,7 +392,7 @@ The global `python3` environment may not have `torch`; use the project venv for
 the particles2SNR detector when needed:
 
 ```bash
-P0/.venv/bin/python particles2SNR_pipeline/run_dataset.py \
+P0/venv/bin/python particles2SNR_pipeline/run_dataset.py \
   --dataset-dir /tmp/particles2SNR_smoke_3x \
   --output-dir /tmp/particles2SNR_smoke_3x_out \
   --device cpu

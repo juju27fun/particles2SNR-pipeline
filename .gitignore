@@ -1,0 +1,34 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Legacy scratch output; use data/derived or results/* for tracked artifacts.
+output/
+
+# Heavy generated payloads stay local; summaries/manifests remain visible.
+data/**/*.npy
+data/**/*.npz
+data/**/*.pt
+data/**/*.pth
+data/**/*.ckpt
+data/**/*.safetensors
+data/**/*.h5
+data/**/*.hdf5
+data/**/*.pkl
+data/**/*.pickle
+data/**/*.parquet
+results/**/*.npy
+results/**/*.npz
+results/**/*.pt
+results/**/*.pth
+results/**/*.ckpt
+results/**/*.safetensors
+results/**/*.h5
+results/**/*.hdf5
+results/**/*.pkl
+results/**/*.pickle
+results/**/*.parquet
+
+# Local scratch exports.
+tmp/
+*.tmp

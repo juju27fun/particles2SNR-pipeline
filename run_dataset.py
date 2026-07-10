@@ -12,12 +12,20 @@ from tqdm import tqdm
 from scipy.signal import welch
 from scipy.stats import kurtosis as scipy_kurtosis
 
+from repo_paths import RESULTS_RUNS
+
 from fft_analysis_pipeline_particles2SNR import run_pipeline, Config, load_data
 
 parser = argparse.ArgumentParser(description="Process entire dataset with folder-specific configurations.")
 parser.add_argument("--dataset-dir", "-d", type=str, default=os.path.expanduser("~/Projects/particlesSebas/particle_detector/test"),
                     help="Path to the dataset directory (default: ~/Projects/particlesSebas/particle_detector/test)")
-parser.add_argument("--output-dir", "-o", type=str, default="output", help="Output directory for results (default: output)")
+parser.add_argument(
+    "--output-dir",
+    "-o",
+    type=str,
+    default=str(RESULTS_RUNS / "ad_hoc"),
+    help="Output directory for results (default: results/runs/ad_hoc)",
+)
 parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"], help="Device to use for processing (default: cpu)")
 parser.add_argument("--verbose", "-v", action="store_true", help="Display verbose output")
 
