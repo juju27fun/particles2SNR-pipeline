@@ -19,14 +19,14 @@ from typing import Iterable
 import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks
 
-from repo_paths import RESULTS_RUNS
+from particles2snr.repo_paths import RESULTS_RUNS
 
-from detect_saturation import (
+from particles2snr.detect_saturation import (
     scan_class_folder,
     write_intervals_csv,
     write_summary_json,
 )
-from saturation_cleaning import (
+from particles2snr.saturation_cleaning import (
     clean_signal_non_destructive,
     detect_unsafe_intervals,
     read_noise_pool,
@@ -717,7 +717,7 @@ def particle_to_annotation(particle: dict, signal_length: int, fs: float,
         "clean_peak_z": particle.get("clean_peak_z"),
         "clean_peak_center_ms": particle.get("clean_peak_center_ms"),
         "clean_local_peak_z": particle.get("clean_local_peak_z"),
-        "source": "particles2SNR_pipeline",
+        "source": "particles2SNR-pipeline",
     }
 
 
@@ -1351,7 +1351,7 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
             "description": "particles2SNR-derived particle detection dataset",
             "version": "1.0",
             "source_results": str(dataset_results_path),
-            "annotation_source": "particles2SNR_pipeline",
+            "annotation_source": "particles2SNR-pipeline",
             "passage_time_filter": {
                 "field": "tau",
                 "min_ms": min_passage_time_ms,
@@ -1502,8 +1502,8 @@ def write_detseg_dataset_yaml(root: Path, split_summaries: dict[str, dict],
         ])
     lines.extend([
         "generation_params:",
-        "  source: particles2SNR_pipeline/generate_particles2SNR_dataset.py",
-        "  annotation_source: particles2SNR_pipeline",
+        "  source: particles2SNR-pipeline/generate_particles2SNR_dataset.py",
+        "  annotation_source: particles2SNR-pipeline",
         "  saturation_policy: replace",
         "  min_passage_time_ms: 0.07",
         "  max_passage_time_ms: 0.65",
@@ -1608,7 +1608,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build a zero-cleaned P0 dataset with particles2SNR ground truth."
     )
-    parser.add_argument("--input-root", default="P0/data/processed/dataset")
+    parser.add_argument("--input-root", default="datasets/processed/p0-baseline-3class/v1")
     parser.add_argument("--class-source-dirs", type=parse_class_source_dirs, default=None,
                         help="Comma-separated class=dir sources; creates train/test splits before particles2SNR.")
     parser.add_argument("--staging-root", default=None,
@@ -1616,9 +1616,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-fraction", type=float, default=0.2)
     parser.add_argument("--val-fraction", type=float, default=0.2)
     parser.add_argument("--split-seed", type=int, default=42)
-    parser.add_argument("--output-root", default="P0/data/processed/dataset_Particles2SNR_F_c1")
+    parser.add_argument("--output-root", default="datasets/interim/particles2SNR-pipeline/particles2snr-f-c1-candidate")
     parser.add_argument("--particles2SNR-output", default=str(RESULTS_RUNS / "p0_c1_Particles2SNR_F"))
-    parser.add_argument("--detseg-output", default="P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval",
+    parser.add_argument("--detseg-output", default="datasets/interim/particles2SNR-pipeline/particles2snr-f-c1-yolo-candidate",
                         help="P1/detseg YOLO layout output root; use '' to disable.")
     parser.add_argument("--splits", type=parse_csv_arg, default=DEFAULT_SPLITS)
     parser.add_argument("--classes", type=parse_csv_arg, default=DEFAULT_CLASSES)
@@ -1637,7 +1637,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--saturation-guard-before", type=int, default=300)
     parser.add_argument("--saturation-guard-after", type=int, default=300)
     parser.add_argument("--saturation-mask-value", type=float, default=0.0)
-    parser.add_argument("--noise-dir", default="P0/data/processed/Noise")
+    parser.add_argument("--noise-dir", default="datasets/processed/noise/v1")
     parser.add_argument("--apply-bandpass-output", dest="apply_bandpass_output", action="store_true", default=True)
     parser.add_argument("--no-apply-bandpass-output", dest="apply_bandpass_output", action="store_false")
     parser.add_argument("--bandpass-fmin", type=float, default=DEFAULT_BANDPASS_FMIN)

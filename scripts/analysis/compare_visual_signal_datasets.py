@@ -15,7 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from repo_paths import RESULTS_FIGURES, RESULTS_RUNS
+from particles2snr.repo_paths import RESULTS_FIGURES, RESULTS_RUNS
 
 
 DATASET_C1 = "p0_c1_particles2SNR"
@@ -24,7 +24,7 @@ DATASET_YOLO_V3 = "yolo_v3_source_named"
 
 DATASETS = {
     DATASET_C1: {
-        "root": Path("P0/data/processed/dataset_particles2SNR_c1_yolo"),
+        "root": Path("datasets/interim/particles2SNR-pipeline/particles2snr-c1-yolo"),
         "classes": ("2um", "4um", "10um"),
         "particles2SNR_jsons": {
             "train": RESULTS_RUNS / "p0_c1_particles2SNR" / "train" / "data.json",
@@ -33,7 +33,7 @@ DATASETS = {
         "display": "P0 C1 particles2SNR",
     },
     DATASET_CLEAN: {
-        "root": Path("P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval"),
+        "root": Path("datasets/processed/particles2snr-f-c1-yolo-3class/v1"),
         "classes": ("2um", "4um", "10um"),
         "particles2SNR_jsons": {
             "train": RESULTS_RUNS / "p0_c1_Particles2SNR_F" / "train" / "data.json",
@@ -42,7 +42,7 @@ DATASETS = {
         "display": "P0 C1 clean + 7-80 kHz",
     },
     DATASET_YOLO_V3: {
-        "root": Path("P1/data/yolo/canonical/yolo_dataset_v3_source_named"),
+        "root": Path("datasets/processed/yolo-v3-source-named/v1"),
         "classes": ("2um", "4um", "10um"),
         "particles2SNR_jsons": {},
         "display": "YOLO v3 source-named",

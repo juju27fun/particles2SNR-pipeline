@@ -8,7 +8,6 @@ import csv
 import json
 import math
 import os
-import sys
 from collections import Counter
 from pathlib import Path
 
@@ -19,20 +18,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from repo_paths import RESULTS_RUNS
+from particles2snr.repo_paths import RESULTS_RUNS
 
 
-ROOT = Path(__file__).resolve().parents[1]
-P0_ROOT = ROOT / "P0"
-if str(P0_ROOT) not in sys.path:
-    sys.path.insert(0, str(P0_ROOT))
-
-from models import create_model  # noqa: E402
-from train import AdaptiveBandpassDecimate  # noqa: E402
-try:
-    from scripts.conv1dgap_accuracy_vs_snr import load_model_weights, macro_f1  # noqa: E402
-except ModuleNotFoundError:
-    from scripts.analysis.conv1dgap_accuracy_vs_snr import load_model_weights, macro_f1  # noqa: E402
+from p0.data import AdaptiveBandpassDecimate
+from p0.models import create_model
+from p0.snr_utils import load_model_weights, macro_f1
 
 
 DEFAULT_CLASSES = ("2um", "4um", "10um")
@@ -349,7 +340,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Event-level accuracy-vs-SNR for particles2SNR YOLO annotations.")
     parser.add_argument("--data-json", action="append", type=Path,
                         default=[RESULTS_RUNS / "p0_c1_Particles2SNR_F" / "test" / "data.json"])
-    parser.add_argument("--checkpoint", default="P0/results/particles2SNR_c1_conv1dgap_retrained/checkpoints/Conv1DGAP-L-L4096-decim-dataset_particles2SNR_c1-tier1-seed42/best_model.pth")
+    parser.add_argument("--checkpoint", default="artifacts/SMI_CNN_limitations/particles2SNR_c1_conv1dgap_retrained/checkpoints/Conv1DGAP-L-L4096-decim-dataset_particles2SNR_c1-tier1-seed42/best_model.pth")
     parser.add_argument("--output-dir", type=Path, default=RESULTS_RUNS / "p0_c1_Particles2SNR_F" / "test" / "event_conv1dgap_snr")
     parser.add_argument("--dataset-label", default=None,
                         help="Label written to event_predictions.csv for downstream comparisons")

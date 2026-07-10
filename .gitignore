@@ -1,34 +1,26 @@
 __pycache__/
-*.pyc
+**/__pycache__/
+*.py[cod]
 .pytest_cache/
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
 
-# Legacy scratch output; use data/derived or results/* for tracked artifacts.
+# Use the workspace dataset registry and project artifact root.
+data/
 output/
-
-# Heavy generated payloads stay local; summaries/manifests remain visible.
-data/**/*.npy
-data/**/*.npz
-data/**/*.pt
-data/**/*.pth
-data/**/*.ckpt
-data/**/*.safetensors
-data/**/*.h5
-data/**/*.hdf5
-data/**/*.pkl
-data/**/*.pickle
-data/**/*.parquet
-results/**/*.npy
-results/**/*.npz
-results/**/*.pt
-results/**/*.pth
-results/**/*.ckpt
-results/**/*.safetensors
-results/**/*.h5
-results/**/*.hdf5
-results/**/*.pkl
-results/**/*.pickle
-results/**/*.parquet
-
-# Local scratch exports.
+outputs/
+results/
+artifacts/
 tmp/
+
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.log
 *.tmp

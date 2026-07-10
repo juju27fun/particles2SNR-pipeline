@@ -16,7 +16,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from repo_paths import RESULTS_FIGURES, RESULTS_RUNS
+from particles2snr.repo_paths import RESULTS_FIGURES, RESULTS_RUNS
 
 
 REFERENCE_SELECTION = {
@@ -31,17 +31,17 @@ REFERENCE_SELECTION = {
 
 DEFAULT_DATASETS = {
     "p0_class_folder_clean_filt": {
-        "root": Path("P0/data/processed/dataset_Particles2SNR_F_c1"),
+        "root": Path("datasets/processed/particles2snr-f-c1-events/v1"),
         "kind": "class_folder",
         "classes": ("2um", "4um", "10um"),
     },
     "p0_yolo_clean_filt_trainval": {
-        "root": Path("P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval"),
+        "root": Path("datasets/processed/particles2snr-f-c1-yolo-3class/v1"),
         "kind": "yolo",
         "classes": ("2um", "4um", "10um"),
     },
     "p1_yolo_clean_filt_4class_lim10": {
-        "root": Path("P1/data/yolo/canonical/particles2snr_f_c1_4class_lim10_trainval"),
+        "root": Path("datasets/processed/particles2snr-f-c1-yolo-4class/v1"),
         "kind": "yolo",
         "classes": ("2um", "4um", "10um", "unclear"),
     },

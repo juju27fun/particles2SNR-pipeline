@@ -19,7 +19,7 @@ from pathlib import Path
 
 import yaml
 
-from repo_paths import RESULTS_RUNS
+from particles2snr.repo_paths import RESULTS_RUNS
 
 
 CLASS_NAMES = ("2um", "4um", "10um", "unclear")
@@ -191,7 +191,7 @@ def write_dataset_yaml(
             "label_policy": "snr_db below threshold becomes unclear",
         },
         "generation_params": {
-            "source": "particles2SNR_pipeline/create_particles2SNR_c1_yolo_4class_lim10.py",
+            "source": "particles2SNR-pipeline/scripts/generation/create_particles2SNR_c1_yolo_4class_lim10.py",
             "snr_threshold_db": float(threshold_db),
             "unclear_rule": "snr_db < threshold_db",
             "class_names": list(CLASS_NAMES),
@@ -204,7 +204,7 @@ def write_dataset_yaml(
         "audit_results": {
             "long_sequence": {
                 "status": "not_applicable_single_segment_particles2SNR_c1_4class_lim10",
-                "note": "Structural label audit is performed by P1/detseg/audit_dataset.py.",
+                "note": "Structural label audit is performed by detseg.audit_dataset.",
             }
         },
     }
@@ -218,12 +218,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source-root",
-        default="P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval",
+        default="datasets/processed/particles2snr-f-c1-yolo-3class/v1",
         help="Existing 3-class particles2SNR C1 YOLO train/val/test dataset.",
     )
     parser.add_argument(
         "--output-root",
-        default="P1/data/yolo/canonical/particles2snr_f_c1_4class_lim10_trainval",
+        default="datasets/interim/particles2SNR-pipeline/particles2snr-f-c1-yolo-4class-candidate",
         help="Output 4-class YOLO dataset.",
     )
     parser.add_argument(

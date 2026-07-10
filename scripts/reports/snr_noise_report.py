@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
 
-from repo_paths import RESULTS_REPORTS, RESULTS_RUNS
+from particles2snr.repo_paths import RESULTS_REPORTS, RESULTS_RUNS
 
 
 DEFAULT_CLASSES = ("2um", "4um", "10um")
@@ -276,9 +276,9 @@ def main():
     noise_path = os.path.join(input_dir, "noise_by_file.csv")
     particles_path = os.path.join(input_dir, "snr_particles.csv")
     if not os.path.isfile(noise_path):
-        raise FileNotFoundError(f"Missing {noise_path}; run particles2SNR_pipeline/run_dataset.py first")
+        raise FileNotFoundError(f"Missing {noise_path}; run particles2SNR-pipeline/run_dataset.py first")
     if not os.path.isfile(particles_path):
-        raise FileNotFoundError(f"Missing {particles_path}; run particles2SNR_pipeline/run_dataset.py first")
+        raise FileNotFoundError(f"Missing {particles_path}; run particles2SNR-pipeline/run_dataset.py first")
 
     classes = tuple(item.strip() for item in args.classes.split(",") if item.strip())
     noise_rows = read_csv_rows(noise_path)

@@ -12,9 +12,9 @@ from tqdm import tqdm
 from scipy.signal import welch
 from scipy.stats import kurtosis as scipy_kurtosis
 
-from repo_paths import RESULTS_RUNS
+from particles2snr.repo_paths import RESULTS_RUNS
 
-from fft_analysis_pipeline_particles2SNR import run_pipeline, Config, load_data
+from particles2snr.fft_analysis_pipeline_particles2SNR import run_pipeline, Config, load_data
 
 parser = argparse.ArgumentParser(description="Process entire dataset with folder-specific configurations.")
 parser.add_argument("--dataset-dir", "-d", type=str, default=os.path.expanduser("~/Projects/particlesSebas/particle_detector/test"),

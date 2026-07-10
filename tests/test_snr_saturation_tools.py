@@ -13,19 +13,19 @@ import numpy as np
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-PARTICLES2SNR = os.path.join(ROOT, "particles2SNR_pipeline")
-P0_SCRIPT = os.path.join(ROOT, "P0", "scripts", "conv1dgap_accuracy_vs_snr.py")
-P1_SCRIPT = os.path.join(ROOT, "P1", "generate_long_sequence_dataset.py")
-P1_AUDIT_SCRIPT = os.path.join(ROOT, "P1", "detseg", "audit_saturation_artifacts.py")
-PARTICLES2SNR_GENERATOR = os.path.join(ROOT, "particles2SNR_pipeline", "generate_particles2SNR_dataset.py")
-PARTICLES2SNR_YOLO_LIM10 = os.path.join(ROOT, "particles2SNR_pipeline", "create_particles2SNR_c1_yolo_4class_lim10.py")
-PARTICLES2SNR_LIM10 = os.path.join(ROOT, "particles2SNR_pipeline", "create_particles2SNR_4class_lim10.py")
+PARTICLES2SNR = os.path.join(ROOT, "particles2SNR-pipeline")
+P0_SCRIPT = os.path.join(ROOT, "SMI_CNN_limitations", "scripts", "analysis", "conv1dgap_accuracy_vs_snr.py")
+P1_SCRIPT = os.path.join(ROOT, "SMI_Detection_CNN_transformers", "scripts", "datasets", "generate_long_sequence_dataset.py")
+P1_AUDIT_SCRIPT = os.path.join(ROOT, "SMI_Detection_CNN_transformers", "detseg", "audit_saturation_artifacts.py")
+PARTICLES2SNR_GENERATOR = os.path.join(ROOT, "particles2SNR-pipeline", "scripts", "generation", "generate_particles2SNR_dataset.py")
+PARTICLES2SNR_YOLO_LIM10 = os.path.join(ROOT, "particles2SNR-pipeline", "scripts", "generation", "create_particles2SNR_c1_yolo_4class_lim10.py")
+PARTICLES2SNR_LIM10 = os.path.join(ROOT, "particles2SNR-pipeline", "scripts", "generation", "create_particles2SNR_4class_lim10.py")
 
 for path in (PARTICLES2SNR, ROOT):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from saturation_cleaning import (  # noqa: E402
+from particles2snr.saturation_cleaning import (  # noqa: E402
     clean_signal_non_destructive,
     detect_unsafe_intervals,
     drop_overlapping_events,
@@ -45,7 +45,7 @@ def load_module(path, name):
 
 class VisualSignalCheckTests(unittest.TestCase):
     def test_overlap_segments_counts_active_labels(self):
-        mod = load_module(os.path.join(ROOT, "particles2SNR_pipeline", "generate_visual_signal_checks.py"), "visual_signal_checks_test")
+        mod = load_module(os.path.join(ROOT, "particles2SNR-pipeline", "scripts", "reports", "generate_visual_signal_checks.py"), "visual_signal_checks_test")
         labels = [
             {"start": 0.10, "end": 0.40},
             {"start": 0.25, "end": 0.60},
@@ -64,7 +64,7 @@ class VisualSignalCheckTests(unittest.TestCase):
 
 class EventAccuracySnrTests(unittest.TestCase):
     def test_threshold_at_target_accuracy_interpolates_crossing(self):
-        mod = load_module(os.path.join(ROOT, "particles2SNR_pipeline", "event_accuracy_vs_snr.py"), "event_accuracy_snr_test")
+        mod = load_module(os.path.join(ROOT, "particles2SNR-pipeline", "scripts", "analysis", "event_accuracy_vs_snr.py"), "event_accuracy_snr_test")
         bins = [
             {"snr_center": -5.0, "accuracy": 0.80},
             {"snr_center": 0.0, "accuracy": 0.90},
@@ -74,7 +74,7 @@ class EventAccuracySnrTests(unittest.TestCase):
         self.assertIsNone(mod.threshold_at_target_accuracy(bins, 1.01))
 
     def test_crop_centered_zero_pads_at_edges(self):
-        mod = load_module(os.path.join(ROOT, "particles2SNR_pipeline", "event_accuracy_vs_snr.py"), "event_accuracy_snr_crop_test")
+        mod = load_module(os.path.join(ROOT, "particles2SNR-pipeline", "scripts", "analysis", "event_accuracy_vs_snr.py"), "event_accuracy_snr_crop_test")
         signal = np.arange(5, dtype=np.float32)
         left = mod.crop_centered(signal, center_sample=0, length=7)
         right = mod.crop_centered(signal, center_sample=4, length=7)
@@ -85,7 +85,7 @@ class EventAccuracySnrTests(unittest.TestCase):
 class EventAccuracyComparisonTests(unittest.TestCase):
     def load_compare_module(self):
         return load_module(
-            os.path.join(ROOT, "particles2SNR_pipeline", "compare_event_accuracy_by_snr.py"),
+            os.path.join(ROOT, "particles2SNR-pipeline", "scripts", "analysis", "compare_event_accuracy_by_snr.py"),
             "event_accuracy_comparison_test",
         )
 
@@ -189,10 +189,13 @@ class Particles2SNRClassFolderLim10Tests(unittest.TestCase):
         mod = load_module(PARTICLES2SNR_LIM10, "particles2SNR_lim10_defaults_test")
         defaults = mod.build_parser().parse_args([])
 
-        self.assertTrue(defaults.artifact_root.endswith("particles2SNR_pipeline/data/derived/particles2SNR_4_class_lim10"))
-        self.assertTrue(defaults.figure_root.endswith("particles2SNR_pipeline/results/figures/particles2SNR_4_class_lim10"))
-        self.assertTrue(defaults.source_particles2SNR_output_root.endswith("particles2SNR_pipeline/results/runs/p0_c1_particles2SNR"))
-        self.assertEqual(defaults.output_root, "P0/data/processed/particles2SNR_4_class_lim10")
+        self.assertTrue(defaults.artifact_root.endswith("datasets/interim/particles2SNR-pipeline/particles2SNR_4_class_lim10"))
+        self.assertTrue(defaults.figure_root.endswith("artifacts/particles2SNR-pipeline/figures/particles2SNR_4_class_lim10"))
+        self.assertTrue(defaults.source_particles2SNR_output_root.endswith("artifacts/particles2SNR-pipeline/runs/p0_c1_particles2SNR"))
+        self.assertEqual(
+            defaults.output_root,
+            "datasets/interim/particles2SNR-pipeline/particles2snr-4class-lim10-candidate",
+        )
 
     def test_generate_plots_writes_expected_files(self):
         mod = load_module(PARTICLES2SNR_LIM10, "particles2SNR_lim10_plots_test")

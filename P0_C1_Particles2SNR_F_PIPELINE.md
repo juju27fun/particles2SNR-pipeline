@@ -12,39 +12,39 @@ to a geometry that is usable for detection training.
 The accepted P0 YOLO clean dataset is:
 
 ```text
-P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval
+datasets/processed/particles2snr-f-c1-yolo-3class/v1
 ```
 
 The main particles2SNR artifact directory is:
 
 ```text
-particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F
+artifacts/particles2SNR-pipeline/runs/p0_c1_Particles2SNR_F
 ```
 
 The derived P1 4-class dataset with the SNR -10 dB unclear rule is:
 
 ```text
-P1/data/yolo/canonical/particles2snr_f_c1_4class_lim10_trainval
+datasets/processed/particles2snr-f-c1-yolo-4class/v1
 ```
 
 ## Main Scripts
 
 ```text
-particles2SNR_pipeline/generate_particles2SNR_dataset.py
+particles2SNR-pipeline/scripts/generation/generate_particles2SNR_dataset.py
 ```
 
 Builds the cleaned P0 signal tree, runs particles2SNR detection, post-processes the
 particles2SNR particles, writes `data.json`, and exports a YOLO/detseg layout.
 
 ```text
-particles2SNR_pipeline/create_particles2SNR_c1_yolo_4class_lim10.py
+particles2SNR-pipeline/scripts/generation/create_particles2SNR_c1_yolo_4class_lim10.py
 ```
 
 Converts the 3-class P0 YOLO dataset into a P1 4-class dataset. Labels with
 `snr_db < -10.0` become `unclear`.
 
 ```text
-particles2SNR_pipeline/generate_visual_signal_checks.py
+particles2SNR-pipeline/scripts/reports/generate_visual_signal_checks.py
 ```
 
 Generates PNG visual checks from the final YOLO labels and the particles2SNR metadata.
@@ -54,9 +54,9 @@ Generates PNG visual checks from the final YOLO labels and the particles2SNR met
 The current run uses explicit C1 class source folders:
 
 ```text
-2um  -> P0/C1_HF_5_10_2um_doublet2
-4um  -> P0/C1_HF_5_10_4um_doublet
-10um -> P0/C1_HF_5_10_10um_doublet
+2um  -> datasets/raw/c1-hf-5-10-2um-doublet/v1
+4um  -> datasets/raw/c1-hf-5-10-4um-doublet/v1
+10um -> datasets/raw/c1-hf-5-10-10um-doublet/v1
 ```
 
 The split policy is:
@@ -76,24 +76,24 @@ from the generated train rows when exporting the YOLO/detseg layout.
 The current P0 generation command is:
 
 ```bash
-P0/venv/bin/python particles2SNR_pipeline/generate_particles2SNR_dataset.py \
-  --class-source-dirs 2um=P0/C1_HF_5_10_2um_doublet2,4um=P0/C1_HF_5_10_4um_doublet,10um=P0/C1_HF_5_10_10um_doublet \
-  --output-root P0/data/processed/dataset_Particles2SNR_F_c1 \
-  --particles2SNR-output particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F \
-  --detseg-output P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval \
+.venv/bin/python particles2SNR-pipeline/scripts/generation/generate_particles2SNR_dataset.py \
+  --class-source-dirs 2um=datasets/raw/c1-hf-5-10-2um-doublet/v1,4um=datasets/raw/c1-hf-5-10-4um-doublet/v1,10um=datasets/raw/c1-hf-5-10-10um-doublet/v1 \
+  --output-root datasets/interim/particles2SNR-pipeline/particles2snr-f-c1-candidate \
+  --particles2SNR-output artifacts/particles2SNR-pipeline/runs/p0_c1_Particles2SNR_F \
+  --detseg-output datasets/processed/particles2snr-f-c1-yolo-3class/v1 \
   --device cpu
 ```
 
 The final P1 conversion command is:
 
 ```bash
-P0/venv/bin/python particles2SNR_pipeline/create_particles2SNR_c1_yolo_4class_lim10.py
+.venv/bin/python particles2SNR-pipeline/scripts/generation/create_particles2SNR_c1_yolo_4class_lim10.py
 ```
 
 The visual checks are regenerated with:
 
 ```bash
-P0/venv/bin/python particles2SNR_pipeline/generate_visual_signal_checks.py
+.venv/bin/python particles2SNR-pipeline/scripts/reports/generate_visual_signal_checks.py
 ```
 
 ## Signal Preprocessing
@@ -102,7 +102,7 @@ The source `.npy` files are not modified. The pipeline creates a derived signal
 tree:
 
 ```text
-P0/data/processed/dataset_Particles2SNR_F_c1/{train,test}/{2um,4um,10um}
+datasets/interim/particles2SNR-pipeline/particles2snr-f-c1-candidate/{train,test}/{2um,4um,10um}
 ```
 
 Preprocessing steps:
@@ -114,7 +114,7 @@ Preprocessing steps:
 4. Replace unsafe intervals with chunks from:
 
 ```text
-P0/data/processed/Noise
+datasets/processed/noise/v1
 ```
 
 5. Re-run the saturation audit after cleaning. The generation fails if
@@ -141,7 +141,7 @@ bandpass_order: 4
 For each split, particles2SNR writes artifacts under:
 
 ```text
-particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F/{train,test}
+artifacts/particles2SNR-pipeline/runs/p0_c1_Particles2SNR_F/{train,test}
 ```
 
 Important files:
@@ -330,7 +330,7 @@ boundary_adjusted
 The accepted 3-class P0 YOLO/detseg layout is:
 
 ```text
-P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval
+datasets/processed/particles2snr-f-c1-yolo-3class/v1
 ```
 
 Structure:
@@ -366,7 +366,7 @@ Class names:
 The P1 4-class dataset is derived from the final P0 YOLO clean dataset:
 
 ```text
-P1/data/yolo/canonical/particles2snr_f_c1_4class_lim10_trainval
+datasets/processed/particles2snr-f-c1-yolo-4class/v1
 ```
 
 It uses the same signal files and intervals as P0, but rewrites labels using:
@@ -390,8 +390,8 @@ Class names:
 The converter reads these particles2SNR post-processed files:
 
 ```text
-particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F/train/data.json
-particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F/test/data.json
+artifacts/particles2SNR-pipeline/runs/p0_c1_Particles2SNR_F/train/data.json
+artifacts/particles2SNR-pipeline/runs/p0_c1_Particles2SNR_F/test/data.json
 ```
 
 The `val` split is resolved by matching the P0 YOLO split files against the
@@ -417,15 +417,15 @@ test: files=578, events=895
 Visual signal checks are written to:
 
 ```text
-particles2SNR_pipeline/results/figures/visual_signal_checks
+artifacts/particles2SNR-pipeline/figures/visual_signal_checks
 ```
 
 The script uses:
 
 ```text
-P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval
-particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F/train/data.json
-particles2SNR_pipeline/results/runs/p0_c1_Particles2SNR_F/test/data.json
+datasets/processed/particles2snr-f-c1-yolo-3class/v1
+artifacts/particles2SNR-pipeline/runs/p0_c1_Particles2SNR_F/train/data.json
+artifacts/particles2SNR-pipeline/runs/p0_c1_Particles2SNR_F/test/data.json
 ```
 
 The PNGs overlay:
@@ -438,7 +438,7 @@ The PNGs overlay:
 The manifest is:
 
 ```text
-particles2SNR_pipeline/results/figures/visual_signal_checks/visual_signal_checks_manifest.csv
+artifacts/particles2SNR-pipeline/figures/visual_signal_checks/visual_signal_checks_manifest.csv
 ```
 
 ## Validation Checks
@@ -462,15 +462,15 @@ test boundary drops: 1
 P1 checks:
 
 ```bash
-env PYTHONPATH=P1 P0/venv/bin/python -m detseg.audit_dataset \
-  --data-dir P1/data/yolo/canonical/particles2snr_f_c1_4class_lim10_trainval \
+.venv/bin/python -m detseg.audit_dataset \
+  --data-dir datasets/processed/particles2snr-f-c1-yolo-4class/v1 \
   --strict \
-  --json-out P1/detseg_output_Particles2SNR_F_c1_4class_lim10_dataset_audit.json
+  --json-out artifacts/SMI_Detection_CNN_transformers/audits/particles2snr-f-c1-4class-dataset-audit.json
 
-env PYTHONPATH=P1 P0/venv/bin/python -m detseg.preflight_data_gate \
-  --data-dir P1/data/yolo/canonical/particles2snr_f_c1_4class_lim10_trainval \
+.venv/bin/python -m detseg.preflight_data_gate \
+  --data-dir datasets/processed/particles2snr-f-c1-yolo-4class/v1 \
   --mode strict \
-  --json-out P1/detseg_output_Particles2SNR_F_c1_4class_lim10_preflight.json
+  --json-out artifacts/SMI_Detection_CNN_transformers/audits/particles2snr-f-c1-4class-preflight.json
 ```
 
 Both checks passed on the current generated dataset.

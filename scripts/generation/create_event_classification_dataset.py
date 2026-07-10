@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from repo_paths import RESULTS_RUNS
+from particles2snr.repo_paths import RESULTS_RUNS
 
 
 DEFAULT_CLASSES = ("2um", "4um", "10um")
@@ -140,9 +140,9 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create event-crop classification dataset from clean particles2SNR YOLO annotations.")
-    parser.add_argument("--yolo-root", type=Path, default=Path("P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval"))
+    parser.add_argument("--yolo-root", type=Path, default=Path("datasets/processed/particles2snr-f-c1-yolo-3class/v1"))
     parser.add_argument("--particles2SNR-json", type=Path, action="append", default=None)
-    parser.add_argument("--output-root", type=Path, default=Path("P0/data/processed/dataset_Particles2SNR_F_c1_events"))
+    parser.add_argument("--output-root", type=Path, default=Path("datasets/interim/particles2SNR-pipeline/particles2snr-f-c1-events-candidate"))
     parser.add_argument("--artifact-root", type=Path, default=RESULTS_RUNS / "p0_c1_Particles2SNR_F" / "event_classification_dataset")
     parser.add_argument("--splits", type=parse_csv_arg, default=("train", "val", "test"))
     parser.add_argument("--classes", type=parse_csv_arg, default=DEFAULT_CLASSES)

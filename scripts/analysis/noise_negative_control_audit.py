@@ -28,8 +28,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 from tqdm import tqdm
 
 from generate_particles2SNR_dataset import butter_bandpass_filter, export_yolo_json
-from repo_paths import MONOREPO_ROOT, RESULTS_REPORTS, RESULTS_RUNS
-from run_dataset import export_results, get_config_for_folder, process_signal
+from particles2snr.repo_paths import MONOREPO_ROOT, RESULTS_REPORTS, RESULTS_RUNS
+from particles2snr.run_dataset import export_results, get_config_for_folder, process_signal
 
 
 DEFAULT_CLASSES = ("2um", "4um", "10um")

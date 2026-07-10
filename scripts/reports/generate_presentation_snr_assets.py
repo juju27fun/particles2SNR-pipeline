@@ -22,7 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from repo_paths import RESULTS_FIGURES, RESULTS_RUNS
+from particles2snr.repo_paths import RESULTS_FIGURES, RESULTS_RUNS
 
 
 DATASET_PARTICLES2SNR = "p0_c1_particles2SNR"
@@ -327,8 +327,8 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     roots = {
-        DATASET_PARTICLES2SNR: Path("P0/data/raw/C1_HF_5_10_4um_doublet"),
-        DATASET_PARTICLES2SNR_F: Path("P0/data/processed/dataset_Particles2SNR_F_c1_yolo_trainval"),
+        DATASET_PARTICLES2SNR: Path("datasets/raw/c1-hf-5-10-4um-doublet/v1"),
+        DATASET_PARTICLES2SNR_F: Path("datasets/processed/particles2snr-f-c1-yolo-3class/v1"),
     }
     rows = []
     variants = [

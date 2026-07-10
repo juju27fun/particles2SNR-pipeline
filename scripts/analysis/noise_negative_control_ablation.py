@@ -22,7 +22,7 @@ import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 
 from generate_particles2SNR_dataset import export_yolo_json
-from repo_paths import RESULTS_REPORTS, RESULTS_RUNS
+from particles2snr.repo_paths import RESULTS_REPORTS, RESULTS_RUNS
 
 
 DEFAULT_CLASSES = ("2um", "4um", "10um")

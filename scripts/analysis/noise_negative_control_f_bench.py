@@ -41,8 +41,8 @@ from generate_particles2SNR_dataset import (
     resolve_annotation_boundary_crossings,
     robust_z_values,
 )
-from repo_paths import RESULTS_REPORTS, RESULTS_RUNS
-from run_dataset import get_config_for_folder
+from particles2snr.repo_paths import RESULTS_REPORTS, RESULTS_RUNS
+from particles2snr.run_dataset import get_config_for_folder
 
 
 DEFAULT_CLASSES = ("2um", "4um", "10um")

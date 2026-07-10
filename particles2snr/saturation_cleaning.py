@@ -11,7 +11,7 @@ import os
 
 import numpy as np
 
-from detect_saturation import detect_saturation
+from particles2snr.detect_saturation import detect_saturation
 
 
 def merge_intervals(intervals, signal_len):

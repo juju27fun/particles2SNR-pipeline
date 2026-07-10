@@ -21,7 +21,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from repo_paths import DATA_DERIVED, RESULTS_FIGURES, RESULTS_RUNS
+from particles2snr.repo_paths import DATA_DERIVED, RESULTS_FIGURES, RESULTS_RUNS
 
 
 DEFAULT_CLASSES = ("2um", "4um", "10um")
@@ -426,8 +426,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Create particles2SNR_4_class_lim10 by assigning low-SNR files to unclear."
     )
     parser.add_argument("--dataset-name", default="particles2SNR_4_class_lim10")
-    parser.add_argument("--input-root", default="P0/data/processed/dataset_particles2SNR_c1")
-    parser.add_argument("--output-root", default="P0/data/processed/particles2SNR_4_class_lim10")
+    parser.add_argument("--input-root", default="datasets/interim/particles2SNR-pipeline/particles2snr-c1")
+    parser.add_argument("--output-root", default="datasets/interim/particles2SNR-pipeline/particles2snr-4class-lim10-candidate")
     parser.add_argument(
         "--source-particles2SNR-output-root",
         default=str(RESULTS_RUNS / "p0_c1_particles2SNR"),
