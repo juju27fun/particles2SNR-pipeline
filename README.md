@@ -28,6 +28,9 @@ From the workspace root:
 .venv/bin/python particles2SNR-pipeline/scripts/generation/create_event_classification_dataset.py --help
 ```
 
-The accepted C1 clean generation history is documented in
-`P0_C1_Particles2SNR_F_PIPELINE.md`; paths inside historical sections may refer
-to the pre-registry layout.
+The final dual-clean dataset contract, counts, provenance, limitations, and
+study links are documented in
+[`DATASET_CARD_DUAL_CLEAN_C1.md`](DATASET_CARD_DUAL_CLEAN_C1.md). The detailed
+generation history is retained in
+[`P0_C1_Particles2SNR_F_PIPELINE.md`](P0_C1_Particles2SNR_F_PIPELINE.md); paths
+and counts inside historical sections may refer to pre-registry candidates.

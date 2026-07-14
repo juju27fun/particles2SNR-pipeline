@@ -1,5 +1,11 @@
 # P0 C1 particles2SNR Clean Filt Pipeline
 
+> **Documentation status.** This file preserves detailed generation history,
+> including pre-registry candidate names and counts. The authoritative contract
+> for the final P1/P2/MOMENT source dataset is
+> [`DATASET_CARD_DUAL_CLEAN_C1.md`](DATASET_CARD_DUAL_CLEAN_C1.md). Do not use
+> the historical 4-class counts below as final dual-clean study counts.
+
 This document describes the current C1 particles2SNR pipeline used to generate the
 accepted P0 YOLO clean dataset and its P1 4-class derivative.
 
@@ -361,9 +367,9 @@ Class names:
 2: 10um
 ```
 
-## P1 4-Class Dataset
+## Historical P1 4-Class Derivative
 
-The P1 4-class dataset is derived from the final P0 YOLO clean dataset:
+This pre-final P1 4-class derivative was derived from the P0 YOLO clean dataset:
 
 ```text
 datasets/processed/particles2snr-f-c1-yolo-4class/v1
