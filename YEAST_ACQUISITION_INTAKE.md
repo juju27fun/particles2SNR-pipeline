@@ -111,6 +111,32 @@ and retrieve outstanding results before moving or synchronizing data.
      --output-dir datasets/interim/particles2SNR-pipeline/yeast-event-candidates/v6
    ```
 
+   Review editable copies through the local interface. It writes each decision
+   atomically and records its checksum in `annotation_audit.jsonl`:
+
+   ```bash
+   .venv/bin/python particles2SNR-pipeline/scripts/reports/serve_yeast_event_review.py \
+     --candidate-dataset datasets/interim/particles2SNR-pipeline/yeast-event-candidates/v6 \
+     --review-dir artifacts/particles2SNR-pipeline/audits/<editable-review-dir>
+   ```
+
+   Open `http://127.0.0.1:8765`. For candidate windows, `event present`
+   denotes a localized, physically plausible passage rather than baseline
+   variation, clipping, or a dropout. For retained candidates, `center
+   acceptable` means the proposed center lies in the main transient and `full
+   event visible` means onset and return to baseline are both visible. Display
+   padding at a trace boundary is not itself an acquisition artifact. For full
+   traces, count all true events, retained false positives, rejected candidates
+   that are true events, and events with no candidate. The required identity is
+   `true events = retained true + true rejected + missed`.
+
+   Independently double-review at least 20% of both queues, balanced across
+   review strata. Preserve both raw reviewer copies, report raw agreement and
+   Cohen's kappa for binary decisions, and adjudicate disagreements before
+   creating final labels. If a second qualified reviewer is unavailable, use a
+   blinded delayed repeat and report that it measures intra-rater repeatability,
+   not independent agreement.
+
 7. Analyze completed copies with `--require-complete`. Gate 1 requires the
    frozen global thresholds plus per-source and per-acquisition precision and
    recall. Register completed annotations separately; never edit the candidate

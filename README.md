@@ -38,3 +38,5 @@ and counts inside historical sections may refer to pre-registry candidates.
 The registered multi-acquisition ingestion and sealed OOD procedure for the
 yeast representation study is in
 [`YEAST_ACQUISITION_INTAKE.md`](YEAST_ACQUISITION_INTAKE.md).
+The same runbook documents the local candidate/full-trace reviewer served by
+`scripts/reports/serve_yeast_event_review.py`.

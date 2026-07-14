@@ -90,6 +90,27 @@ def test_complete_review_separates_event_gate_from_acquisition_gate(tmp_path: Pa
     assert result["candidate_review"]["retained_candidate_precision_balanced"]["value"] == 1.0
 
 
+def test_rejected_candidate_review_does_not_require_retained_geometry_fields(
+    tmp_path: Path,
+) -> None:
+    dataset = _dataset(tmp_path)
+    rows = list(csv.DictReader((dataset / "manual_review_queue.csv").open()))
+    rejected = next(row for row in rows if row["quality"] == "reject")
+    rejected["review_center_acceptable"] = ""
+    rejected["review_full_event_visible"] = ""
+    _write(dataset / "manual_review_queue.csv", rows)
+    permissive = ReviewGateThresholds(
+        retained_precision_min=0.0,
+        retained_precision_lower_95_min=0.0,
+        full_trace_recall_min=0.0,
+        full_trace_recall_lower_95_min=0.0,
+        per_group_precision_min=0.0,
+        per_group_recall_min=0.0,
+    )
+    result = analyze_review(dataset, permissive)
+    assert result["candidate_review"]["n_pending"] == 0
+
+
 def test_inconsistent_full_trace_counts_are_rejected(tmp_path: Path) -> None:
     dataset = _dataset(tmp_path)
     rows = list(csv.DictReader((dataset / "manual_file_review_queue.csv").open()))

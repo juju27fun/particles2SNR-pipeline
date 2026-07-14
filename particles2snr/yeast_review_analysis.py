@@ -109,23 +109,26 @@ def _candidate_analysis(
         for row in proposed_review
         if row["quality"] in {"strict", "medium"}
     ]
-    required_fields = (
-        "review_event_present",
-        "review_center_acceptable",
-        "review_full_event_visible",
-        "review_artifact",
-        "reviewer",
-    )
     parsed_all: list[dict[str, Any]] = []
     pending = 0
     for row in review_rows:
         row_id = row["event_id"]
         values = {
             field: parse_bool(row[field], field=field, row_id=row_id)
-            for field in required_fields[:-1]
+            for field in (
+                "review_event_present",
+                "review_center_acceptable",
+                "review_full_event_visible",
+                "review_artifact",
+            )
         }
+        required = [values["review_event_present"], values["review_artifact"]]
+        if row["quality"] in {"strict", "medium"}:
+            required.extend(
+                [values["review_center_acceptable"], values["review_full_event_visible"]]
+            )
         reviewer = row["reviewer"].strip()
-        if any(value is None for value in values.values()) or not reviewer:
+        if any(value is None for value in required) or not reviewer:
             pending += 1
             continue
         parsed_all.append({**row, **values})
