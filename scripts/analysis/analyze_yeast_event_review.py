@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -33,6 +34,12 @@ def main() -> None:
     (args.output_dir / "review_analysis.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    review_root = args.review_dir or args.candidate_dataset
+    shutil.copy2(review_root / "manual_review_queue.csv", args.output_dir / "manual_review_queue.csv")
+    shutil.copy2(
+        review_root / "manual_file_review_queue.csv",
+        args.output_dir / "manual_file_review_queue.csv",
+    )
     repo_root = Path(__file__).resolve().parents[2]
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo_root, check=True, capture_output=True, text=True
@@ -46,7 +53,11 @@ def main() -> None:
         "command": " ".join(sys.argv),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "complete",
-        "outputs": ["review_analysis.json"],
+        "outputs": [
+            "review_analysis.json",
+            "manual_review_queue.csv",
+            "manual_file_review_queue.csv",
+        ],
     }
     (args.output_dir / "run.json").write_text(
         json.dumps(run, indent=2, sort_keys=True) + "\n", encoding="utf-8"

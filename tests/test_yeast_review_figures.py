@@ -49,3 +49,9 @@ def test_render_review_figures_writes_two_pdfs(tmp_path: Path) -> None:
     assert summary["n_candidate_review_rows"] == 1
     assert (output / "candidate_precision_review.pdf").stat().st_size > 0
     assert (output / "full_trace_recall_review.pdf").stat().st_size > 0
+    assert (output / "manual_review_queue.csv").read_text() == (
+        dataset / "manual_review_queue.csv"
+    ).read_text()
+    assert (output / "manual_file_review_queue.csv").read_text() == (
+        dataset / "manual_file_review_queue.csv"
+    ).read_text()

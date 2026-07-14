@@ -35,8 +35,14 @@ def main() -> None:
         "repositories": {"particles2SNR-pipeline": revision},
         "command": " ".join(sys.argv),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "status": "complete",
-        "outputs": [summary["candidate_pdf"], summary["full_trace_pdf"], "review_figure_summary.json"],
+        "status": "awaiting_manual_annotation",
+        "outputs": [
+            summary["candidate_pdf"],
+            summary["full_trace_pdf"],
+            summary["candidate_annotation_csv"],
+            summary["full_trace_annotation_csv"],
+            "review_figure_summary.json",
+        ],
     }
     (args.output_dir / "run.json").write_text(
         json.dumps(run, indent=2, sort_keys=True) + "\n", encoding="utf-8"

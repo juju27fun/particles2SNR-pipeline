@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -144,6 +145,11 @@ def render_review_figures(candidate_dataset: Path, output_dir: Path) -> dict[str
         raise ValueError("File review rows and signals have different lengths")
 
     output_dir.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(candidate_dataset / "manual_review_queue.csv", output_dir / "manual_review_queue.csv")
+    shutil.copy2(
+        candidate_dataset / "manual_file_review_queue.csv",
+        output_dir / "manual_file_review_queue.csv",
+    )
     _candidate_pdf(candidate_rows, candidate_signals, output_dir / "candidate_precision_review.pdf")
     _file_pdf(file_rows, file_signals, candidate_by_id, output_dir / "full_trace_recall_review.pdf")
     summary = {
@@ -152,6 +158,8 @@ def render_review_figures(candidate_dataset: Path, output_dir: Path) -> dict[str
         "n_full_trace_review_rows": len(file_rows),
         "candidate_pdf": "candidate_precision_review.pdf",
         "full_trace_pdf": "full_trace_recall_review.pdf",
+        "candidate_annotation_csv": "manual_review_queue.csv",
+        "full_trace_annotation_csv": "manual_file_review_queue.csv",
         "status": "awaiting_manual_annotation",
     }
     (output_dir / "review_figure_summary.json").write_text(
