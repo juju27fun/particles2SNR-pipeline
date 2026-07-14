@@ -99,3 +99,56 @@ def test_review_schema_unions_candidate_and_background_fields() -> None:
         ]
     )
     assert fields == ["event_id", "snr_proxy", "no_candidate_reason"]
+
+
+def test_candidate_audit_resolves_each_registered_raw_dataset(tmp_path: Path) -> None:
+    roots = {"raw-a@v1": tmp_path / "raw-a", "raw-b@v1": tmp_path / "raw-b"}
+    for root in roots.values():
+        (root / "budding").mkdir(parents=True)
+        np.save(root / "budding" / "event.npy", _synthetic_event())
+    index = tmp_path / "source_index.csv"
+    rows = []
+    for suffix, (dataset_id, _root) in enumerate(roots.items()):
+        rows.append(
+            {
+                "record_id": f"record-{suffix}",
+                "raw_dataset": dataset_id,
+                "relative_path": "budding/event.npy",
+                "source_group": "budding",
+                "condition_id": "exponential-budding",
+                "label_scope": "acquisition-condition-proxy",
+                "acquisition_id": f"session-{suffix}",
+                "capture_block_id": f"session-{suffix}:block-1",
+                "development_split": (
+                    "development_train" if suffix == 0 else "sealed_acquisition_test"
+                ),
+                "is_canonical_duplicate_member": "True",
+            }
+        )
+    with index.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    output = tmp_path / "output"
+    summary = build_candidate_audit(
+        source_index_csv=index,
+        raw_dataset_root=None,
+        raw_dataset_roots=roots,
+        output_dir=output,
+        config=YeastDetectionConfig(
+            active_snr_z=2.5,
+            strict_min_snr=3.0,
+            medium_min_snr=2.0,
+            strict_min_concentration=0.08,
+            medium_min_concentration=0.04,
+            min_width_ms=0.05,
+            max_width_ms=2.0,
+        ),
+        review_per_stratum=1,
+    )
+    assert summary["n_files"] == 2
+    assert summary["raw_datasets"] == ["raw-a@v1", "raw-b@v1"]
+    with (output / "candidate_events.csv").open(newline="", encoding="utf-8") as handle:
+        candidates = list(csv.DictReader(handle))
+    assert {row["raw_dataset"] for row in candidates} == set(roots)

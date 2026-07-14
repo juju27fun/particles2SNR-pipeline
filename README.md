@@ -34,3 +34,7 @@ study links are documented in
 generation history is retained in
 [`P0_C1_Particles2SNR_F_PIPELINE.md`](P0_C1_Particles2SNR_F_PIPELINE.md); paths
 and counts inside historical sections may refer to pre-registry candidates.
+
+The registered multi-acquisition ingestion and sealed OOD procedure for the
+yeast representation study is in
+[`YEAST_ACQUISITION_INTAKE.md`](YEAST_ACQUISITION_INTAKE.md).

@@ -93,7 +93,7 @@ def _stratum_weights(
     population_rows: list[dict[str, str]],
     review_rows: list[dict[str, str]],
     key,
-) -> dict[tuple[str, str], float]:
+) -> dict[tuple[str, ...], float]:
     population = Counter(key(row) for row in population_rows)
     reviewed = Counter(key(row) for row in review_rows)
     return {stratum: population[stratum] / count for stratum, count in reviewed.items() if count}
@@ -139,17 +139,26 @@ def _candidate_analysis(
         by_group[group] = _binary_metric(
             sum(bool(row["review_event_present"]) for row in selected), len(selected)
         )
+    by_acquisition: dict[str, dict[str, Any]] = {}
+    for acquisition in sorted({row["acquisition_id"] for row in retained_review}):
+        selected = [row for row in parsed if row["acquisition_id"] == acquisition]
+        by_acquisition[acquisition] = _binary_metric(
+            sum(bool(row["review_event_present"]) for row in selected), len(selected)
+        )
 
     weights = _stratum_weights(
         retained_population,
         retained_review,
-        lambda row: (row["source_group"], row["quality"]),
+        lambda row: (row["acquisition_id"], row["source_group"], row["quality"]),
     )
     weighted_rows = [
         (float(bool(row["review_event_present"])), 1.0)
         for row in parsed
     ]
-    weighted_values = [weights[(row["source_group"], row["quality"])] for row in parsed]
+    weighted_values = [
+        weights[(row["acquisition_id"], row["source_group"], row["quality"])]
+        for row in parsed
+    ]
     event_present = _binary_metric(
         sum(bool(row["review_event_present"]) for row in parsed), len(parsed)
     )
@@ -177,7 +186,8 @@ def _candidate_analysis(
             sum(bool(row["review_event_present"]) for row in background), len(background)
         ),
         "precision_by_source_group": by_group,
-        "sampling": "balanced source-group x retained-quality review; population point estimate uses expansion weights",
+        "precision_by_acquisition": by_acquisition,
+        "sampling": "balanced acquisition x source-group x retained-quality review; population point estimate uses expansion weights",
     }
 
 
@@ -244,9 +254,19 @@ def _file_analysis(
         tp = sum(int(row["true_positive"]) for row in selected)
         fn = sum(int(row["false_negative"]) for row in selected)
         by_group[group] = _binary_metric(tp, tp + fn)
+    by_acquisition: dict[str, dict[str, Any]] = {}
+    for acquisition in sorted({row["acquisition_id"] for row in review_rows}):
+        selected = [row for row in parsed if row["acquisition_id"] == acquisition]
+        tp = sum(int(row["true_positive"]) for row in selected)
+        fn = sum(int(row["false_negative"]) for row in selected)
+        by_acquisition[acquisition] = _binary_metric(tp, tp + fn)
 
-    def stratum(row: dict[str, str]) -> tuple[str, str]:
-        return row["source_group"], str(min(int(row["n_candidates"]), 3))
+    def stratum(row: dict[str, str]) -> tuple[str, str, str]:
+        return (
+            row["acquisition_id"],
+            row["source_group"],
+            str(min(int(row["n_candidates"]), 3)),
+        )
 
     weights = _stratum_weights(file_population, review_rows, stratum)
     recall_rows = [
@@ -266,8 +286,9 @@ def _file_analysis(
             totals["true_positive"], totals["true_positive"] + totals["false_positive"]
         ),
         "recall_by_source_group": by_group,
+        "recall_by_acquisition": by_acquisition,
         "event_counts": totals,
-        "sampling": "balanced source-group x detected-count stratum; population point estimate uses expansion weights",
+        "sampling": "balanced acquisition x source-group x detected-count stratum; population point estimate uses expansion weights",
     }
 
 
@@ -284,6 +305,26 @@ def analyze_review(
     candidate = _candidate_analysis(candidate_rows, candidate_review)
     traces = _file_analysis(file_rows, file_review)
     acquisitions = sorted({row["acquisition_id"] for row in file_rows})
+    acquisition_roles: dict[str, list[str]] = {
+        acquisition: sorted(
+            {
+                row.get("acquisition_role", "").strip()
+                for row in file_rows
+                if row["acquisition_id"] == acquisition and row.get("acquisition_role", "").strip()
+            }
+        )
+        for acquisition in acquisitions
+    }
+    modern_roles_present = any(acquisition_roles.values())
+    roles_are_valid = (
+        (
+            all(len(roles) == 1 for roles in acquisition_roles.values())
+            and {roles[0] for roles in acquisition_roles.values()}
+            >= {"development", "sealed_ood_test"}
+        )
+        if modern_roles_present
+        else True
+    )
     complete = candidate["n_pending"] == 0 and traces["n_pending"] == 0
 
     checks: dict[str, bool | None] = {key: None for key in (
@@ -293,6 +334,8 @@ def analyze_review(
         "full_trace_recall_lower_95",
         "per_group_precision",
         "per_group_recall",
+        "per_acquisition_precision",
+        "per_acquisition_recall",
         "rejected_event_presence",
     )}
     if complete:
@@ -313,6 +356,14 @@ def analyze_review(
                 metric["value"] is not None and metric["value"] >= thresholds.per_group_recall_min
                 for metric in traces["recall_by_source_group"].values()
             ),
+            "per_acquisition_precision": all(
+                metric["value"] is not None and metric["value"] >= thresholds.per_group_precision_min
+                for metric in candidate["precision_by_acquisition"].values()
+            ),
+            "per_acquisition_recall": all(
+                metric["value"] is not None and metric["value"] >= thresholds.per_group_recall_min
+                for metric in traces["recall_by_acquisition"].values()
+            ),
             "rejected_event_presence": (
                 candidate["rejected_candidate_event_presence"]["value"] is not None
                 and candidate["rejected_candidate_event_presence"]["value"]
@@ -321,7 +372,9 @@ def analyze_review(
         }
 
     event_review_status = "pending" if not complete else ("pass" if all(checks.values()) else "fail")
-    acquisition_ood_ready = len(acquisitions) >= thresholds.minimum_independent_acquisitions
+    acquisition_ood_ready = (
+        len(acquisitions) >= thresholds.minimum_independent_acquisitions and roles_are_valid
+    )
     if event_review_status != "pass":
         gate_1_status = event_review_status
     elif not acquisition_ood_ready:
@@ -338,6 +391,7 @@ def analyze_review(
         "event_review_checks": checks,
         "event_review_status": event_review_status,
         "acquisition_ids": acquisitions,
+        "acquisition_roles": acquisition_roles,
         "acquisition_ood_ready": acquisition_ood_ready,
         "gate_1_status": gate_1_status,
         "interpretation": (

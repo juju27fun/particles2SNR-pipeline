@@ -48,6 +48,11 @@ def read_source_inventory(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _manifest_relative_path(path: str, manifest: Path) -> Path:
+    candidate = Path(path)
+    return candidate if candidate.is_absolute() else manifest.parent / candidate
+
+
 def _assign_group_stratified_block_splits(
     block_groups: dict[str, str],
 ) -> dict[str, str]:
@@ -119,7 +124,8 @@ def build_source_index(
             canonical_index // capture_block_size if canonical_index >= 0 else -1
         )
         split_block_id = (
-            f"{canonical_row['source_group']}:{canonical_row['filename_series']}:"
+            f"{acquisition_id}:{canonical_row['source_group']}:"
+            f"{canonical_row['filename_series']}:"
             f"block-{canonical_block_number:04d}"
         )
         for row in family:
@@ -127,10 +133,15 @@ def build_source_index(
             condition = CONDITION_POLICY[group]
             capture_index = int(row["filename_index"]) if row.get("filename_index") else -1
             nominal_block_number = capture_index // capture_block_size if capture_index >= 0 else -1
-            nominal_block_id = f"{group}:{row['filename_series']}:block-{nominal_block_number:04d}"
+            nominal_block_id = (
+                f"{acquisition_id}:{group}:{row['filename_series']}:"
+                f"block-{nominal_block_number:04d}"
+            )
             output.append(
                 {
-                    "record_id": hashlib.sha256(row["relative_path"].encode()).hexdigest()[:20],
+                    "record_id": hashlib.sha256(
+                        f"{raw_dataset}:{row['relative_path']}".encode()
+                    ).hexdigest()[:20],
                     "raw_dataset": raw_dataset,
                     "relative_path": row["relative_path"],
                     "source_group": group,
@@ -145,6 +156,7 @@ def build_source_index(
                     "is_canonical_duplicate_member": row["relative_path"] == canonical_path,
                     "development_split": "pending-group-stratified-assignment",
                     "split_unit": "capture-block-proxy",
+                    "acquisition_role": "development",
                     "evidence_scope": "single-acquisition-development-only",
                     "sha256": digest,
                     "size_bytes": int(row["size_bytes"]),
@@ -159,6 +171,111 @@ def build_source_index(
     return sorted(output, key=lambda item: item["relative_path"])
 
 
+def combine_acquisition_indexes(
+    indexes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Combine independently indexed acquisitions and seal declared OOD rows."""
+    if len(indexes) < 2:
+        raise ValueError("A multi-acquisition index requires at least two acquisitions")
+
+    acquisition_ids = [str(item["acquisition_id"]) for item in indexes]
+    raw_datasets = [str(item["raw_dataset"]) for item in indexes]
+    if len(acquisition_ids) != len(set(acquisition_ids)):
+        raise ValueError("Acquisition IDs must be unique")
+    if len(raw_datasets) != len(set(raw_datasets)):
+        raise ValueError("Raw dataset IDs must be unique per acquisition")
+
+    allowed_roles = {"development", "sealed_ood_test"}
+    roles = {str(item["role"]) for item in indexes}
+    invalid_roles = roles - allowed_roles
+    if invalid_roles:
+        raise ValueError(f"Unsupported acquisition roles: {sorted(invalid_roles)}")
+    if "development" not in roles or "sealed_ood_test" not in roles:
+        raise ValueError("At least one development and one sealed_ood_test acquisition are required")
+
+    combined: list[dict[str, Any]] = []
+    digest_acquisitions: dict[str, set[str]] = defaultdict(set)
+    for item in indexes:
+        acquisition_id = str(item["acquisition_id"])
+        raw_dataset = str(item["raw_dataset"])
+        role = str(item["role"])
+        rows = list(item["rows"])
+        if not rows:
+            raise ValueError(f"Acquisition {acquisition_id} has no indexed rows")
+        for row in rows:
+            if row["acquisition_id"] != acquisition_id or row["raw_dataset"] != raw_dataset:
+                raise ValueError(f"Index metadata mismatch for acquisition {acquisition_id}")
+            digest_acquisitions[row["sha256"]].add(acquisition_id)
+            updated = dict(row)
+            updated["acquisition_role"] = role
+            if role == "sealed_ood_test":
+                updated["development_split"] = "sealed_acquisition_test"
+                updated["split_unit"] = "acquisition"
+                updated["evidence_scope"] = "sealed-acquisition-ood-only"
+            else:
+                updated["evidence_scope"] = "multi-acquisition-development"
+            combined.append(updated)
+
+    crossing = {
+        digest: sorted(acquisitions)
+        for digest, acquisitions in digest_acquisitions.items()
+        if len(acquisitions) > 1
+    }
+    if crossing:
+        examples = list(sorted(crossing.items()))[:3]
+        raise ValueError(
+            "Exact signal duplicates cross declared independent acquisitions; "
+            f"audit provenance before proceeding: {examples}"
+        )
+
+    record_ids = [row["record_id"] for row in combined]
+    if len(record_ids) != len(set(record_ids)):
+        raise ValueError("Record IDs collide across acquisitions")
+    return sorted(combined, key=lambda row: (row["acquisition_id"], row["relative_path"]))
+
+
+def build_source_index_from_manifest(
+    path: Path,
+    *,
+    capture_block_size: int = 64,
+) -> list[dict[str, Any]]:
+    manifest = path.resolve()
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1:
+        raise ValueError("Acquisition manifest schema_version must be 1")
+    acquisitions = payload.get("acquisitions")
+    if not isinstance(acquisitions, list):
+        raise ValueError("Acquisition manifest must contain an acquisitions list")
+
+    indexes: list[dict[str, Any]] = []
+    for acquisition in acquisitions:
+        if not isinstance(acquisition, dict):
+            raise ValueError("Each acquisition manifest entry must be an object")
+        required = {"acquisition_id", "raw_dataset", "source_inventory", "role"}
+        missing = required - set(acquisition)
+        if missing:
+            raise ValueError(f"Acquisition manifest entry is missing {sorted(missing)}")
+        acquisition_id = str(acquisition["acquisition_id"])
+        raw_dataset = str(acquisition["raw_dataset"])
+        rows = build_source_index(
+            read_source_inventory(
+                _manifest_relative_path(str(acquisition["source_inventory"]), manifest)
+            ),
+            raw_dataset=raw_dataset,
+            acquisition_id=acquisition_id,
+            capture_block_size=capture_block_size,
+        )
+        indexes.append(
+            {
+                "acquisition_id": acquisition_id,
+                "raw_dataset": raw_dataset,
+                "role": str(acquisition["role"]),
+                "rows": rows,
+            }
+        )
+    return combine_acquisition_indexes(indexes)
+
+
 def summarize_source_index(rows: list[dict[str, Any]]) -> dict[str, Any]:
     canonical = [row for row in rows if row["is_canonical_duplicate_member"]]
     family_splits: dict[str, set[str]] = defaultdict(set)
@@ -167,6 +284,16 @@ def summarize_source_index(rows: list[dict[str, Any]]) -> dict[str, Any]:
         family_splits[row["duplicate_family_id"]].add(row["development_split"])
         block_splits[row["capture_block_id"]].add(row["development_split"])
     acquisitions = sorted({row["acquisition_id"] for row in rows})
+    acquisition_roles = {
+        acquisition: sorted(
+            {
+                row.get("acquisition_role", "development")
+                for row in rows
+                if row["acquisition_id"] == acquisition
+            }
+        )
+        for acquisition in acquisitions
+    }
     group_split_counts = {
         group: dict(
             sorted(
@@ -204,9 +331,31 @@ def summarize_source_index(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "n_duplicate_families_crossing_splits": sum(len(splits) > 1 for splits in family_splits.values()),
         "n_capture_blocks_crossing_splits": sum(len(splits) > 1 for splits in block_splits.values()),
         "documented_acquisition_ids": acquisitions,
-        "acquisition_ood_ready": len(acquisitions) >= 2,
+        "acquisition_roles": acquisition_roles,
+        "acquisition_split_counts_canonical": {
+            acquisition: dict(
+                sorted(
+                    Counter(
+                        row["development_split"]
+                        for row in canonical
+                        if row["acquisition_id"] == acquisition
+                    ).items()
+                )
+            )
+            for acquisition in acquisitions
+        },
+        "acquisition_ood_ready": (
+            len(acquisitions) >= 2
+            and any("development" in roles for roles in acquisition_roles.values())
+            and any("sealed_ood_test" in roles for roles in acquisition_roles.values())
+        ),
         "scientific_limit": (
-            "Acquisition-condition folders are not event-level biological labels, and the single documented acquisition cannot support acquisition-level OOD evaluation."
+            "Acquisition-condition folders are not event-level biological labels. "
+            + (
+                "The sealed acquisition may be used only after protocol freeze."
+                if len(acquisitions) >= 2
+                else "The single documented acquisition cannot support acquisition-level OOD evaluation."
+            )
         ),
     }
 

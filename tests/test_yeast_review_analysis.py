@@ -99,6 +99,82 @@ def test_inconsistent_full_trace_counts_are_rejected(tmp_path: Path) -> None:
         analyze_review(dataset)
 
 
+def test_complete_review_requires_and_reports_each_acquisition(tmp_path: Path) -> None:
+    dataset = _dataset(tmp_path)
+    for filename, id_field in (
+        ("candidate_events.csv", "event_id"),
+        ("manual_review_queue.csv", "event_id"),
+        ("file_detection_report.csv", "record_id"),
+        ("manual_file_review_queue.csv", "record_id"),
+    ):
+        path = dataset / filename
+        rows = list(csv.DictReader(path.open(newline="", encoding="utf-8")))
+        copies = []
+        for row in rows:
+            copied = dict(row)
+            copied["acquisition_id"] = "session-2"
+            copied[id_field] = f"{copied[id_field]}-session-2"
+            copied["record_id"] = f"{copied['record_id']}-session-2"
+            copies.append(copied)
+        _write(path, rows + copies)
+
+    permissive = ReviewGateThresholds(
+        retained_precision_min=0.0,
+        retained_precision_lower_95_min=0.0,
+        full_trace_recall_min=0.0,
+        full_trace_recall_lower_95_min=0.0,
+        per_group_precision_min=0.0,
+        per_group_recall_min=0.0,
+    )
+    result = analyze_review(dataset, permissive)
+    assert result["gate_1_status"] == "pass"
+    assert set(result["candidate_review"]["precision_by_acquisition"]) == {
+        "session-1",
+        "session-2",
+    }
+    assert set(result["full_trace_review"]["recall_by_acquisition"]) == {
+        "session-1",
+        "session-2",
+    }
+
+
+def test_modern_review_rejects_two_development_acquisitions_as_ood(tmp_path: Path) -> None:
+    dataset = _dataset(tmp_path)
+    for filename in ("candidate_events.csv", "manual_review_queue.csv"):
+        path = dataset / filename
+        rows = list(csv.DictReader(path.open(newline="", encoding="utf-8")))
+        for row in rows:
+            row["acquisition_role"] = "development"
+        _write(path, rows)
+    for filename in ("file_detection_report.csv", "manual_file_review_queue.csv"):
+        path = dataset / filename
+        rows = list(csv.DictReader(path.open(newline="", encoding="utf-8")))
+        for row in rows:
+            row["acquisition_role"] = "development"
+        copies = []
+        for row in rows:
+            copied = dict(row)
+            copied["record_id"] = f"{row['record_id']}-session-2"
+            copied["acquisition_id"] = "session-2"
+            copies.append(copied)
+        _write(path, rows + copies)
+
+    permissive = ReviewGateThresholds(
+        retained_precision_min=0.0,
+        retained_precision_lower_95_min=0.0,
+        full_trace_recall_min=0.0,
+        full_trace_recall_lower_95_min=0.0,
+        per_group_precision_min=0.0,
+        per_group_recall_min=0.0,
+    )
+    result = analyze_review(dataset, permissive)
+    assert result["acquisition_ood_ready"] is False
+    assert result["acquisition_roles"] == {
+        "session-1": ["development"],
+        "session-2": ["development"],
+    }
+
+
 def test_wilson_interval_is_bounded() -> None:
     assert wilson_interval(0, 10)[0] == 0.0
     assert wilson_interval(10, 10)[1] == 1.0

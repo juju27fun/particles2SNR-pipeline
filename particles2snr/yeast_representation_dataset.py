@@ -3,11 +3,14 @@ from __future__ import annotations
 import csv
 import json
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from scipy.signal import butter, resample_poly, sosfiltfilt
+
+from .yeast_raw_data import normalize_raw_dataset_roots, resolve_raw_signal
 
 
 def read_usable_candidates(path: Path) -> list[dict[str, str]]:
@@ -58,7 +61,8 @@ def preprocess_crop(
 def build_representation_dataset(
     *,
     candidate_csv: Path,
-    raw_dataset_root: Path,
+    raw_dataset_root: Path | None,
+    raw_dataset_roots: Mapping[str, Path] | None = None,
     output_dir: Path,
     raw_dataset_id: str,
     candidate_dataset_id: str,
@@ -80,10 +84,16 @@ def build_representation_dataset(
     train_sum = 0.0
     train_square_sum = 0.0
     train_count = 0
-    raw_root = raw_dataset_root.resolve()
+    raw_root, raw_roots = normalize_raw_dataset_roots(
+        raw_dataset_root=raw_dataset_root,
+        raw_dataset_roots=raw_dataset_roots,
+    )
 
     for index, row in enumerate(rows):
-        raw = np.load(raw_root / row["relative_path"], allow_pickle=False)
+        raw = np.load(
+            resolve_raw_signal(row, single_root=raw_root, roots_by_dataset=raw_roots),
+            allow_pickle=False,
+        )
         crop, crop_start = clamped_crop(raw, int(row["center_index"]), crop_length)
         processed = preprocess_crop(crop, downsample_factor=downsample_factor)
         if processed.size != output_length:
@@ -127,6 +137,7 @@ def build_representation_dataset(
         "schema_version": 1,
         "contract_id": "yeast-event-8192to4096-bandpass-global-v1",
         "raw_dataset": raw_dataset_id,
+        "raw_datasets": sorted(raw_roots) if raw_roots else [raw_dataset_id],
         "candidate_dataset": candidate_dataset_id,
         "input_channels": 1,
         "raw_sampling_frequency_hz": 2_000_000.0,
@@ -152,7 +163,11 @@ def build_representation_dataset(
             "duration_envelope_and_doppler": "preserve",
             "padding": "forbidden",
         },
-        "split_scope": "single-acquisition development only; no acquisition-level OOD claim",
+        "split_scope": (
+            "sealed acquisition OOD available; normalization fitted on development_train only"
+            if any(row["development_split"] == "sealed_acquisition_test" for row in rows)
+            else "single-acquisition development only; no acquisition-level OOD claim"
+        ),
     }
     (output_dir / "input_contract.json").write_text(
         json.dumps(contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -164,6 +179,9 @@ def build_representation_dataset(
         "quality_counts": dict(sorted(Counter(row["quality"] for row in rows).items())),
         "source_group_counts": dict(sorted(Counter(row["source_group"] for row in rows).items())),
         "condition_counts": dict(sorted(Counter(row["condition_id"] for row in rows).items())),
+        "acquisition_counts": dict(
+            sorted(Counter(row.get("acquisition_id", "unknown") for row in rows).items())
+        ),
         "n_source_records": len({row["record_id"] for row in rows}),
         "input_contract": contract["contract_id"],
         "signals_shape": [len(rows), output_length],

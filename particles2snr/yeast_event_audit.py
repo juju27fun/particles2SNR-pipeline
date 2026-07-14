@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from .yeast_events import YeastDetectionConfig, crop_around_index, detect_yeast_events
+from .yeast_raw_data import normalize_raw_dataset_roots, resolve_raw_signal
 
 
 def read_source_index(path: Path, canonical_only: bool = True) -> list[dict[str, str]]:
@@ -94,7 +96,8 @@ def _coverage(candidates: list[dict[str, Any]], sampling_frequency_hz: float) ->
 def build_candidate_audit(
     *,
     source_index_csv: Path,
-    raw_dataset_root: Path,
+    raw_dataset_root: Path | None,
+    raw_dataset_roots: Mapping[str, Path] | None = None,
     output_dir: Path,
     config: YeastDetectionConfig,
     review_crop_length: int = 8192,
@@ -107,10 +110,17 @@ def build_candidate_audit(
         source_rows = source_rows[:max_files]
     candidate_rows: list[dict[str, Any]] = []
     file_rows: list[dict[str, Any]] = []
-    raw_root = raw_dataset_root.resolve()
+    raw_root, raw_roots = normalize_raw_dataset_roots(
+        raw_dataset_root=raw_dataset_root,
+        raw_dataset_roots=raw_dataset_roots,
+    )
 
     for source in source_rows:
-        signal_path = raw_root / source["relative_path"]
+        signal_path = resolve_raw_signal(
+            source,
+            single_root=raw_root,
+            roots_by_dataset=raw_roots,
+        )
         signal = np.load(signal_path, allow_pickle=False)
         candidates, no_candidate_reason = detect_yeast_events(
             signal,
@@ -120,10 +130,12 @@ def build_candidate_audit(
         file_rows.append(
             {
                 "record_id": source["record_id"],
+                "raw_dataset": source.get("raw_dataset", ""),
                 "relative_path": source["relative_path"],
                 "source_group": source["source_group"],
                 "condition_id": source["condition_id"],
                 "acquisition_id": source["acquisition_id"],
+                "acquisition_role": source.get("acquisition_role", ""),
                 "capture_block_id": source["capture_block_id"],
                 "development_split": source["development_split"],
                 "n_candidates": len(candidates),
@@ -144,11 +156,13 @@ def build_candidate_audit(
             row = {
                 "event_id": f"{source['record_id']}:{candidate.candidate_index:02d}",
                 "record_id": source["record_id"],
+                "raw_dataset": source.get("raw_dataset", ""),
                 "relative_path": source["relative_path"],
                 "source_group": source["source_group"],
                 "condition_id": source["condition_id"],
                 "label_scope": source["label_scope"],
                 "acquisition_id": source["acquisition_id"],
+                "acquisition_role": source.get("acquisition_role", ""),
                 "capture_block_id": source["capture_block_id"],
                 "development_split": source["development_split"],
                 "signal_length": int(np.asarray(signal).size),
@@ -157,20 +171,22 @@ def build_candidate_audit(
             }
             candidate_rows.append(row)
 
-    strata: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    strata: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in candidate_rows:
-        strata[(row["source_group"], row["quality"])].append(row)
+        strata[(row["acquisition_id"], row["source_group"], row["quality"])].append(row)
     review_rows: list[dict[str, Any]] = []
     for stratum, rows in sorted(strata.items()):
         selected = sorted(rows, key=lambda row: _stable_order(row["event_id"], seed))[:review_per_stratum]
         for row in selected:
-            review_rows.append({**row, "review_stratum": f"{stratum[0]}:{stratum[1]}"})
+            review_rows.append(
+                {**row, "review_stratum": f"{stratum[0]}:{stratum[1]}:{stratum[2]}"}
+            )
 
-    no_candidate_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    no_candidate_by_group: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in file_rows:
         if row["n_candidates"] == 0:
-            no_candidate_by_group[row["source_group"]].append(row)
-    for group, rows in sorted(no_candidate_by_group.items()):
+            no_candidate_by_group[(row["acquisition_id"], row["source_group"])].append(row)
+    for (acquisition, group), rows in sorted(no_candidate_by_group.items()):
         selected = sorted(rows, key=lambda row: _stable_order(row["record_id"], seed))[:review_per_stratum]
         for row in selected:
             review_rows.append(
@@ -194,14 +210,17 @@ def build_candidate_audit(
                     "doppler_peak_hz": float("nan"),
                     "quality": "no_candidate",
                     "rejection_reason": row["no_candidate_reason"],
-                    "review_stratum": f"{group}:no_candidate",
+                    "review_stratum": f"{acquisition}:{group}:no_candidate",
                 }
             )
 
     review_rows.sort(key=lambda row: (row["review_stratum"], row["event_id"]))
     review_signals = []
     for row in review_rows:
-        signal = np.load(raw_root / row["relative_path"], allow_pickle=False)
+        signal = np.load(
+            resolve_raw_signal(row, single_root=raw_root, roots_by_dataset=raw_roots),
+            allow_pickle=False,
+        )
         review_signals.append(crop_around_index(signal, int(row["center_index"]), review_crop_length))
         row.update(
             {
@@ -217,10 +236,12 @@ def build_candidate_audit(
     candidates_by_record: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in candidate_rows:
         candidates_by_record[row["record_id"]].append(row)
-    file_review_strata: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    file_review_strata: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in file_rows:
         count_bucket = str(min(int(row["n_candidates"]), 3))
-        file_review_strata[(row["source_group"], count_bucket)].append(row)
+        file_review_strata[
+            (row["acquisition_id"], row["source_group"], count_bucket)
+        ].append(row)
     file_review_rows: list[dict[str, Any]] = []
     for stratum, rows in sorted(file_review_strata.items()):
         selected = sorted(rows, key=lambda row: _stable_order(row["record_id"], seed + 1))[
@@ -231,7 +252,9 @@ def build_candidate_audit(
             file_review_rows.append(
                 {
                     **row,
-                    "review_stratum": f"{stratum[0]}:n_candidates_{stratum[1]}",
+                    "review_stratum": (
+                        f"{stratum[0]}:{stratum[1]}:n_candidates_{stratum[2]}"
+                    ),
                     "detected_event_ids": json.dumps([item["event_id"] for item in detected]),
                     "detected_centers": json.dumps([item["center_index"] for item in detected]),
                     "review_true_event_count": "",
@@ -244,7 +267,13 @@ def build_candidate_audit(
             )
     file_review_rows.sort(key=lambda row: (row["review_stratum"], row["record_id"]))
     file_review_signals = [
-        np.asarray(np.load(raw_root / row["relative_path"], allow_pickle=False), dtype=np.float32)
+        np.asarray(
+            np.load(
+                resolve_raw_signal(row, single_root=raw_root, roots_by_dataset=raw_roots),
+                allow_pickle=False,
+            ),
+            dtype=np.float32,
+        )
         for row in file_review_rows
     ]
 
@@ -270,7 +299,10 @@ def build_candidate_audit(
     summary = {
         "schema_version": 1,
         "source_index": str(source_index_csv),
-        "raw_dataset_root": str(raw_dataset_root),
+        "raw_dataset_root": str(raw_dataset_root) if raw_dataset_root is not None else None,
+        "raw_datasets": sorted(raw_roots) if raw_roots else sorted(
+            {row.get("raw_dataset", "") for row in source_rows if row.get("raw_dataset")}
+        ),
         "n_files": len(file_rows),
         "n_files_with_candidates": sum(row["n_candidates"] > 0 for row in file_rows),
         "n_candidates": len(candidate_rows),

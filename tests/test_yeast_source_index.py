@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
-from particles2snr.yeast_source_index import build_source_index, summarize_source_index, write_source_index
+import pytest
+
+from particles2snr.yeast_source_index import (
+    build_source_index,
+    build_source_index_from_manifest,
+    combine_acquisition_indexes,
+    summarize_source_index,
+    write_source_index,
+)
 
 
 def _row(path: str, group: str, index: int, digest: str) -> dict[str, str]:
@@ -78,3 +87,90 @@ def test_source_index_stratifies_groups_with_at_least_three_blocks() -> None:
             "development_validation",
             "in_session_test",
         }
+
+
+def _acquisition(rows: list[dict[str, str]], acquisition_id: str, role: str) -> dict[str, object]:
+    raw_dataset = f"yeast-{acquisition_id}@v1"
+    return {
+        "acquisition_id": acquisition_id,
+        "raw_dataset": raw_dataset,
+        "role": role,
+        "rows": build_source_index(
+            rows,
+            raw_dataset=raw_dataset,
+            acquisition_id=acquisition_id,
+            capture_block_size=3,
+        ),
+    }
+
+
+def test_multi_acquisition_index_namespaces_ids_and_seals_holdout() -> None:
+    development = _acquisition(
+        [_row(f"budding/same_{index}.npy", "budding", index, f"dev-{index}") for index in range(9)],
+        "session-a",
+        "development",
+    )
+    holdout = _acquisition(
+        [_row(f"budding/same_{index}.npy", "budding", index, f"ood-{index}") for index in range(9)],
+        "session-b",
+        "sealed_ood_test",
+    )
+    combined = combine_acquisition_indexes([development, holdout])
+    summary = summarize_source_index(combined)
+
+    assert len({row["record_id"] for row in combined}) == len(combined)
+    assert len({row["capture_block_id"] for row in combined}) == 6
+    assert {
+        row["development_split"] for row in combined if row["acquisition_id"] == "session-b"
+    } == {"sealed_acquisition_test"}
+    assert summary["acquisition_ood_ready"] is True
+    assert summary["acquisition_roles"] == {
+        "session-a": ["development"],
+        "session-b": ["sealed_ood_test"],
+    }
+
+
+def test_multi_acquisition_index_rejects_cross_session_exact_duplicates() -> None:
+    development = _acquisition(
+        [_row("budding/a_0.npy", "budding", 0, "copied-signal")],
+        "session-a",
+        "development",
+    )
+    holdout = _acquisition(
+        [_row("budding/b_0.npy", "budding", 0, "copied-signal")],
+        "session-b",
+        "sealed_ood_test",
+    )
+    with pytest.raises(ValueError, match="Exact signal duplicates cross"):
+        combine_acquisition_indexes([development, holdout])
+
+
+def test_multi_acquisition_manifest_resolves_relative_inventories(tmp_path: Path) -> None:
+    acquisitions = []
+    for suffix, role in (("a", "development"), ("b", "sealed_ood_test")):
+        inventory = tmp_path / f"inventory-{suffix}.csv"
+        rows = [
+            {**_row(f"budding/a_{index}.npy", "budding", index, f"{suffix}-{index}"), "suffix": ".npy"}
+            for index in range(3)
+        ]
+        with inventory.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+        acquisitions.append(
+            {
+                "acquisition_id": f"session-{suffix}",
+                "raw_dataset": f"raw-{suffix}@v1",
+                "source_inventory": inventory.name,
+                "role": role,
+            }
+        )
+    manifest = tmp_path / "acquisitions.json"
+    manifest.write_text(
+        json.dumps({"schema_version": 1, "acquisitions": acquisitions}),
+        encoding="utf-8",
+    )
+
+    rows = build_source_index_from_manifest(manifest, capture_block_size=1)
+    assert len(rows) == 6
+    assert summarize_source_index(rows)["acquisition_ood_ready"] is True
