@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+import csv
+import json
+from pathlib import Path
+
+import numpy as np
+
+from particles2snr.yeast_event_audit import _all_fields, build_candidate_audit
+from particles2snr.yeast_events import YeastDetectionConfig
+
+
+def _synthetic_event(length: int = 16384) -> np.ndarray:
+    rng = np.random.default_rng(7)
+    index = np.arange(length, dtype=np.float32)
+    time = index / 2_000_000.0
+    envelope = np.exp(-0.5 * np.square((index - length // 2) / 420.0))
+    return (
+        envelope
+        * (
+            np.sin(2.0 * np.pi * 22_000.0 * time)
+            + 0.75 * np.sin(2.0 * np.pi * 34_000.0 * time + 0.45)
+        )
+        + 0.015 * rng.normal(size=length)
+    ).astype(np.float32)
+
+
+def test_candidate_audit_writes_review_contract(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    (raw / "budding").mkdir(parents=True)
+    np.save(raw / "budding" / "event.npy", _synthetic_event())
+    index = tmp_path / "source_index.csv"
+    fields = [
+        "record_id",
+        "relative_path",
+        "source_group",
+        "condition_id",
+        "label_scope",
+        "acquisition_id",
+        "capture_block_id",
+        "development_split",
+        "is_canonical_duplicate_member",
+    ]
+    with index.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow(
+            {
+                "record_id": "record-1",
+                "relative_path": "budding/event.npy",
+                "source_group": "budding",
+                "condition_id": "exponential-budding",
+                "label_scope": "acquisition-condition-proxy",
+                "acquisition_id": "session-1",
+                "capture_block_id": "block-1",
+                "development_split": "development_train",
+                "is_canonical_duplicate_member": "True",
+            }
+        )
+    output = tmp_path / "output"
+    config = YeastDetectionConfig(
+        active_snr_z=2.5,
+        strict_min_snr=3.0,
+        medium_min_snr=2.0,
+        strict_min_concentration=0.08,
+        medium_min_concentration=0.04,
+        min_width_ms=0.05,
+        max_width_ms=2.0,
+    )
+    summary = build_candidate_audit(
+        source_index_csv=index,
+        raw_dataset_root=raw,
+        output_dir=output,
+        config=config,
+        review_per_stratum=1,
+    )
+    assert summary["n_candidates"] == 1
+    assert summary["manual_review_status"] == "pending"
+    with np.load(output / "manual_review_signals.npz") as data:
+        assert data["signals"].shape == (1, 8192)
+    with np.load(output / "manual_file_review_signals.npz") as data:
+        assert data["signals"].shape == (1, 16384)
+    with (output / "manual_review_queue.csv").open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["review_event_present"] == ""
+    with (output / "manual_file_review_queue.csv").open(newline="", encoding="utf-8") as handle:
+        file_rows = list(csv.DictReader(handle))
+    assert file_rows[0]["review_missed_event_count"] == ""
+    assert json.loads((output / "candidate_audit_summary.json").read_text())["n_files"] == 1
+
+
+def test_review_schema_unions_candidate_and_background_fields() -> None:
+    fields = _all_fields(
+        [
+            {"event_id": "event", "snr_proxy": 4.0},
+            {"event_id": "background", "no_candidate_reason": "none"},
+        ]
+    )
+    assert fields == ["event_id", "snr_proxy", "no_candidate_reason"]
