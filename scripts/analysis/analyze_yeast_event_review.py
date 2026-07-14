@@ -14,6 +14,11 @@ from particles2snr.yeast_review_analysis import ReviewGateThresholds, analyze_re
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Validate yeast event-review annotations and evaluate Gate 1.")
     parser.add_argument("--candidate-dataset", type=Path, required=True)
+    parser.add_argument(
+        "--review-dir",
+        type=Path,
+        help="Directory containing completed queue CSV copies; never edit a registered candidate dataset",
+    )
     parser.add_argument("--dataset-id", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
@@ -23,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    summary = analyze_review(args.candidate_dataset, ReviewGateThresholds())
+    summary = analyze_review(args.candidate_dataset, ReviewGateThresholds(), args.review_dir)
     args.output_dir.mkdir(parents=True, exist_ok=False)
     (args.output_dir / "review_analysis.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"

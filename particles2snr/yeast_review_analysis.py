@@ -274,11 +274,13 @@ def _file_analysis(
 def analyze_review(
     candidate_dataset: Path,
     thresholds: ReviewGateThresholds = ReviewGateThresholds(),
+    review_dir: Path | None = None,
 ) -> dict[str, Any]:
+    review_root = review_dir or candidate_dataset
     candidate_rows = read_csv(candidate_dataset / "candidate_events.csv")
     file_rows = read_csv(candidate_dataset / "file_detection_report.csv")
-    candidate_review = read_csv(candidate_dataset / "manual_review_queue.csv")
-    file_review = read_csv(candidate_dataset / "manual_file_review_queue.csv")
+    candidate_review = read_csv(review_root / "manual_review_queue.csv")
+    file_review = read_csv(review_root / "manual_file_review_queue.csv")
     candidate = _candidate_analysis(candidate_rows, candidate_review)
     traces = _file_analysis(file_rows, file_review)
     acquisitions = sorted({row["acquisition_id"] for row in file_rows})
@@ -329,6 +331,7 @@ def analyze_review(
     return {
         "schema_version": 1,
         "candidate_dataset": str(candidate_dataset),
+        "review_dir": str(review_root),
         "thresholds": asdict(thresholds),
         "candidate_review": candidate,
         "full_trace_review": traces,
