@@ -86,6 +86,8 @@ def test_candidate_audit_writes_review_contract(tmp_path: Path) -> None:
     with (output / "manual_file_review_queue.csv").open(newline="", encoding="utf-8") as handle:
         file_rows = list(csv.DictReader(handle))
     assert file_rows[0]["review_missed_event_count"] == ""
+    assert file_rows[0]["review_false_retained_candidate_count"] == ""
+    assert file_rows[0]["review_true_rejected_candidate_count"] == ""
     assert json.loads((output / "candidate_audit_summary.json").read_text())["n_files"] == 1
 
 

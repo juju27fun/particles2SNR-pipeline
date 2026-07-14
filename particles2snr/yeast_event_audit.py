@@ -127,6 +127,10 @@ def build_candidate_audit(
                 "capture_block_id": source["capture_block_id"],
                 "development_split": source["development_split"],
                 "n_candidates": len(candidates),
+                "n_retained_candidates": sum(
+                    candidate.quality in {"strict", "medium"} for candidate in candidates
+                ),
+                "n_rejected_candidates": sum(candidate.quality == "reject" for candidate in candidates),
                 "no_candidate_reason": no_candidate_reason,
             }
         )
@@ -231,7 +235,8 @@ def build_candidate_audit(
                     "detected_event_ids": json.dumps([item["event_id"] for item in detected]),
                     "detected_centers": json.dumps([item["center_index"] for item in detected]),
                     "review_true_event_count": "",
-                    "review_false_candidate_count": "",
+                    "review_false_retained_candidate_count": "",
+                    "review_true_rejected_candidate_count": "",
                     "review_missed_event_count": "",
                     "reviewer": "",
                     "review_notes": "",
