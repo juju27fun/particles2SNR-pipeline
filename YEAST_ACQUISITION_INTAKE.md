@@ -137,6 +137,30 @@ and retrieve outstanding results before moving or synchronizing data.
    blinded delayed repeat and report that it measures intra-rater repeatability,
    not independent agreement.
 
+   Build the blank stratified subset before the primary decisions are opened,
+   serve it from a separate directory and port, then compare the preserved raw
+   reviews:
+
+   ```bash
+   .venv/bin/python particles2SNR-pipeline/scripts/reports/build_yeast_reliability_review.py \
+     --candidate-dataset datasets/interim/particles2SNR-pipeline/yeast-event-candidates/v6 \
+     --dataset-id yeast-event-candidates@v6 \
+     --output-dir artifacts/particles2SNR-pipeline/audits/<reliability-review-dir> \
+     --run-id <reliability-review-run-id>
+
+   .venv/bin/python particles2SNR-pipeline/scripts/reports/serve_yeast_event_review.py \
+     --candidate-dataset datasets/interim/particles2SNR-pipeline/yeast-event-candidates/v6 \
+     --review-dir artifacts/particles2SNR-pipeline/audits/<reliability-review-dir> \
+     --port 8766
+
+   .venv/bin/python particles2SNR-pipeline/scripts/analysis/compare_yeast_review_reliability.py \
+     --primary-review-dir artifacts/particles2SNR-pipeline/audits/<editable-review-dir> \
+     --repeat-review-dir artifacts/particles2SNR-pipeline/audits/<reliability-review-dir> \
+     --dataset-id yeast-event-candidates@v6 \
+     --output-dir artifacts/particles2SNR-pipeline/audits/<agreement-run-dir> \
+     --run-id <agreement-run-id>
+   ```
+
 7. Analyze completed copies with `--require-complete`. Gate 1 requires the
    frozen global thresholds plus per-source and per-acquisition precision and
    recall. Register completed annotations separately; never edit the candidate
