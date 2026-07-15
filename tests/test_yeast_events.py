@@ -2,7 +2,21 @@ from __future__ import annotations
 
 import numpy as np
 
-from particles2snr.yeast_events import YeastDetectionConfig, crop_around_index, detect_yeast_events
+from particles2snr.yeast_events import (
+    YeastDetectionConfig,
+    crop_around_index,
+    detect_yeast_events,
+    review_calibrated_detection_config_v1,
+)
+
+
+def test_review_calibrated_config_v1_matches_frozen_selection() -> None:
+    config = review_calibrated_detection_config_v1()
+    assert config.medium_min_snr == config.strict_min_snr == 12.0
+    assert config.boundary_snr_z == 1.5
+    assert config.cluster_gap_ms == 0.128
+    assert config.max_width_ms == 2.0
+    assert config.max_events_per_signal == 5
 
 
 def _synthetic_event(length: int = 16384) -> np.ndarray:

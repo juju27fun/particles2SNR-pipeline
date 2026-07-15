@@ -152,3 +152,104 @@ def test_candidate_audit_resolves_each_registered_raw_dataset(tmp_path: Path) ->
     with (output / "candidate_events.csv").open(newline="", encoding="utf-8") as handle:
         candidates = list(csv.DictReader(handle))
     assert {row["raw_dataset"] for row in candidates} == set(roots)
+
+
+def test_review_sampling_excludes_calibration_records(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    (raw / "budding").mkdir(parents=True)
+    index = tmp_path / "source_index.csv"
+    rows = []
+    for suffix in range(2):
+        np.save(raw / "budding" / f"event-{suffix}.npy", _synthetic_event())
+        rows.append(
+            {
+                "record_id": f"record-{suffix}",
+                "relative_path": f"budding/event-{suffix}.npy",
+                "source_group": "budding",
+                "condition_id": "exponential-budding",
+                "label_scope": "acquisition-condition-proxy",
+                "acquisition_id": "session-1",
+                "capture_block_id": "block-1",
+                "development_split": "development_train",
+                "is_canonical_duplicate_member": "True",
+            }
+        )
+    with index.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    output = tmp_path / "output"
+    summary = build_candidate_audit(
+        source_index_csv=index,
+        raw_dataset_root=raw,
+        output_dir=output,
+        config=YeastDetectionConfig(
+            active_snr_z=2.5,
+            strict_min_snr=3.0,
+            medium_min_snr=2.0,
+            strict_min_concentration=0.08,
+            medium_min_concentration=0.04,
+            min_width_ms=0.05,
+            max_width_ms=2.0,
+        ),
+        review_per_stratum=2,
+        review_excluded_record_ids={"record-0"},
+    )
+
+    assert summary["review_sampling_excluded_record_count"] == 1
+    assert summary["review_sampling_eligible_file_count"] == 1
+    for filename in ("manual_review_queue.csv", "manual_file_review_queue.csv"):
+        with (output / filename).open(newline="", encoding="utf-8") as handle:
+            review_rows = list(csv.DictReader(handle))
+        assert review_rows
+        assert {row["record_id"] for row in review_rows} == {"record-1"}
+
+
+def test_candidate_and_full_trace_sample_sizes_are_independent(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    (raw / "budding").mkdir(parents=True)
+    rows = []
+    for suffix in range(3):
+        np.save(raw / "budding" / f"event-{suffix}.npy", _synthetic_event())
+        rows.append(
+            {
+                "record_id": f"record-{suffix}",
+                "relative_path": f"budding/event-{suffix}.npy",
+                "source_group": "budding",
+                "condition_id": "exponential-budding",
+                "label_scope": "acquisition-condition-proxy",
+                "acquisition_id": "session-1",
+                "capture_block_id": "block-1",
+                "development_split": "development_train",
+                "is_canonical_duplicate_member": "True",
+            }
+        )
+    index = tmp_path / "source_index.csv"
+    with index.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    output = tmp_path / "output"
+    summary = build_candidate_audit(
+        source_index_csv=index,
+        raw_dataset_root=raw,
+        output_dir=output,
+        config=YeastDetectionConfig(
+            active_snr_z=2.5,
+            strict_min_snr=3.0,
+            medium_min_snr=2.0,
+            strict_min_concentration=0.08,
+            medium_min_concentration=0.04,
+            min_width_ms=0.05,
+            max_width_ms=2.0,
+        ),
+        review_per_stratum=3,
+        file_review_per_stratum=1,
+    )
+
+    assert summary["n_manual_review_rows"] == 3
+    assert summary["n_manual_file_review_rows"] == 1
+    assert summary["candidate_review_per_stratum"] == 3
+    assert summary["file_review_per_stratum"] == 1

@@ -33,6 +33,22 @@ class YeastDetectionConfig:
     max_events_per_signal: int = 3
 
 
+def review_calibrated_detection_config_v1() -> YeastDetectionConfig:
+    """Return the detector configuration selected on the completed v5 review.
+
+    This preset is a development result. It must be evaluated on records that
+    were not present in the v5 candidate-window or full-trace review queues.
+    """
+    return YeastDetectionConfig(
+        boundary_snr_z=1.5,
+        medium_min_snr=12.0,
+        strict_min_snr=12.0,
+        cluster_gap_ms=0.128,
+        max_width_ms=2.0,
+        max_events_per_signal=5,
+    )
+
+
 @dataclass(frozen=True)
 class YeastEventCandidate:
     candidate_index: int
@@ -58,6 +74,18 @@ def ensure_1d_signal(values: np.ndarray) -> np.ndarray:
     if signal.ndim != 1:
         raise ValueError(f"Expected one-dimensional signal, got {signal.shape}")
     return signal.astype(np.float32, copy=False)
+
+
+def bandpass_yeast_signal(
+    signal: np.ndarray, config: YeastDetectionConfig
+) -> np.ndarray:
+    """Apply the detector's time-domain preprocessing to a yeast signal."""
+    raw = ensure_1d_signal(signal)
+    nyquist = config.sampling_frequency_hz / 2.0
+    low = config.low_freq_hz / nyquist
+    high = config.high_freq_hz / nyquist
+    coefficients = butter(config.filter_order, [low, high], btype="band")
+    return filtfilt(*coefficients, raw - float(np.mean(raw))).astype(np.float32)
 
 
 def crop_around_index(signal: np.ndarray, center_index: int, length: int) -> np.ndarray:
@@ -175,12 +203,8 @@ def detect_yeast_events(
     raw = ensure_1d_signal(signal)
     if raw.size < config.stft_nperseg:
         return [], "signal_too_short"
-    nyquist = config.sampling_frequency_hz / 2.0
-    low = config.low_freq_hz / nyquist
-    high = config.high_freq_hz / nyquist
     try:
-        coefficients = butter(config.filter_order, [low, high], btype="band")
-        filtered = filtfilt(*coefficients, raw - float(np.mean(raw))).astype(np.float32)
+        filtered = bandpass_yeast_signal(raw, config)
         frequencies, _, complex_values = spectrogram(
             filtered - float(np.mean(filtered)),
             fs=config.sampling_frequency_hz,

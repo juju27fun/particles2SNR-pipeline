@@ -5,7 +5,7 @@ import json
 import threading
 from pathlib import Path
 from http.server import ThreadingHTTPServer
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import numpy as np
 import pytest
@@ -163,6 +163,32 @@ def test_review_workspace_validates_full_trace_counts(tmp_path: Path) -> None:
     assert workspace.save_item("file", 0, values)["complete"] is True
 
 
+def test_pending_full_trace_defaults_to_algorithm_counts(tmp_path: Path) -> None:
+    dataset, review = _review_fixture(tmp_path)
+    workspace = YeastReviewWorkspace(dataset, review)
+    row = workspace.get_item("file", 0)["row"]
+    assert row["review_true_event_count"] == "1"
+    assert row["review_false_retained_candidate_count"] == "0"
+    assert row["review_true_rejected_candidate_count"] == "0"
+    assert row["review_missed_event_count"] == "0"
+
+    workspace.save_item(
+        "file",
+        0,
+        {
+            "review_true_event_count": 3,
+            "review_false_retained_candidate_count": 0,
+            "review_true_rejected_candidate_count": 1,
+            "review_missed_event_count": 1,
+            "reviewer": "reviewer-a",
+            "review_notes": "corrected",
+        },
+    )
+    saved = workspace.get_item("file", 0)["row"]
+    assert saved["review_true_event_count"] == "3"
+    assert saved["review_true_rejected_candidate_count"] == "1"
+
+
 def test_nonretained_candidate_does_not_require_center_or_visibility(tmp_path: Path) -> None:
     dataset, review = _review_fixture(tmp_path)
     queue_path = review / "manual_review_queue.csv"
@@ -189,7 +215,28 @@ def test_nonretained_candidate_does_not_require_center_or_visibility(tmp_path: P
 def test_review_workspace_renders_candidate_and_full_trace_png(tmp_path: Path) -> None:
     dataset, review = _review_fixture(tmp_path)
     workspace = YeastReviewWorkspace(dataset, review)
-    assert workspace.plot_png("candidate", 0).startswith(b"\x89PNG\r\n\x1a\n")
+    filtered = workspace.plot_png("candidate", 0)
+    raw = workspace.plot_png("candidate", 0, "raw")
+    assert filtered.startswith(b"\x89PNG\r\n\x1a\n")
+    assert raw.startswith(b"\x89PNG\r\n\x1a\n")
+    assert filtered != raw
+    assert workspace.plot_png("file", 0).startswith(b"\x89PNG\r\n\x1a\n")
+    with pytest.raises(ValueError, match="signal_view"):
+        workspace.plot_png("candidate", 0, "unknown")
+
+
+def test_review_workspace_renders_full_trace_without_candidates(tmp_path: Path) -> None:
+    dataset, review = _review_fixture(tmp_path)
+    queue_path = review / "manual_file_review_queue.csv"
+    with queue_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    rows[0]["n_candidates"] = "0"
+    rows[0]["n_retained_candidates"] = "0"
+    rows[0]["n_rejected_candidates"] = "0"
+    rows[0]["detected_event_ids"] = "[]"
+    rows[0]["detected_centers"] = "[]"
+    _write_csv(queue_path, rows)
+    workspace = YeastReviewWorkspace(dataset, review)
     assert workspace.plot_png("file", 0).startswith(b"\x89PNG\r\n\x1a\n")
 
 
@@ -211,6 +258,8 @@ def test_review_http_handler_serves_state_and_plot(tmp_path: Path) -> None:
             state = json.load(response)
         with urlopen(f"{base}/plot/candidate/0.png") as response:
             image = response.read()
+        with urlopen(f"{base}/plot/candidate/0.png?signal_view=raw") as response:
+            raw_image = response.read()
     finally:
         server.shutdown()
         server.server_close()
@@ -218,3 +267,43 @@ def test_review_http_handler_serves_state_and_plot(tmp_path: Path) -> None:
     assert state["total"] == 1
     assert state["complete"] == 0
     assert image.startswith(b"\x89PNG\r\n\x1a\n")
+    assert raw_image.startswith(b"\x89PNG\r\n\x1a\n")
+    assert image != raw_image
+
+
+def test_review_http_handler_saves_reviewer(tmp_path: Path) -> None:
+    dataset, review = _review_fixture(tmp_path)
+    workspace = YeastReviewWorkspace(dataset, review)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), build_handler(workspace))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    payload = {
+        "queue": "candidate",
+        "index": 0,
+        "values": {
+            "review_event_present": "yes",
+            "review_center_acceptable": "yes",
+            "review_full_event_visible": "yes",
+            "review_artifact": "no",
+            "reviewer": "reviewer-http",
+            "review_notes": "reviewed",
+        },
+    }
+    request = Request(
+        f"{base}/api/item",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request) as response:
+            saved = json.load(response)
+        with urlopen(f"{base}/api/item?queue=candidate&index=0") as response:
+            reloaded = json.load(response)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+    assert saved["complete"] is True
+    assert reloaded["row"]["reviewer"] == "reviewer-http"

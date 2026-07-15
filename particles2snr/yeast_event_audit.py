@@ -102,8 +102,10 @@ def build_candidate_audit(
     config: YeastDetectionConfig,
     review_crop_length: int = 8192,
     review_per_stratum: int = 6,
+    file_review_per_stratum: int | None = None,
     seed: int = 42,
     max_files: int = 0,
+    review_excluded_record_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     source_rows = read_source_index(source_index_csv)
     if max_files > 0:
@@ -113,6 +115,12 @@ def build_candidate_audit(
     raw_root, raw_roots = normalize_raw_dataset_roots(
         raw_dataset_root=raw_dataset_root,
         raw_dataset_roots=raw_dataset_roots,
+    )
+    excluded_record_ids = review_excluded_record_ids or set()
+    full_trace_review_per_stratum = (
+        review_per_stratum
+        if file_review_per_stratum is None
+        else file_review_per_stratum
     )
 
     for source in source_rows:
@@ -173,6 +181,8 @@ def build_candidate_audit(
 
     strata: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in candidate_rows:
+        if row["record_id"] in excluded_record_ids:
+            continue
         strata[(row["acquisition_id"], row["source_group"], row["quality"])].append(row)
     review_rows: list[dict[str, Any]] = []
     for stratum, rows in sorted(strata.items()):
@@ -184,6 +194,8 @@ def build_candidate_audit(
 
     no_candidate_by_group: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in file_rows:
+        if row["record_id"] in excluded_record_ids:
+            continue
         if row["n_candidates"] == 0:
             no_candidate_by_group[(row["acquisition_id"], row["source_group"])].append(row)
     for (acquisition, group), rows in sorted(no_candidate_by_group.items()):
@@ -238,6 +250,8 @@ def build_candidate_audit(
         candidates_by_record[row["record_id"]].append(row)
     file_review_strata: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in file_rows:
+        if row["record_id"] in excluded_record_ids:
+            continue
         count_bucket = str(min(int(row["n_candidates"]), 3))
         file_review_strata[
             (row["acquisition_id"], row["source_group"], count_bucket)
@@ -245,7 +259,7 @@ def build_candidate_audit(
     file_review_rows: list[dict[str, Any]] = []
     for stratum, rows in sorted(file_review_strata.items()):
         selected = sorted(rows, key=lambda row: _stable_order(row["record_id"], seed + 1))[
-            :review_per_stratum
+            :full_trace_review_per_stratum
         ]
         for row in selected:
             detected = candidates_by_record[row["record_id"]]
@@ -289,12 +303,20 @@ def build_candidate_audit(
     np.savez_compressed(
         output_dir / "manual_review_signals.npz",
         event_id=np.asarray([row["event_id"] for row in review_rows]),
-        signals=np.stack(review_signals).astype(np.float32),
+        signals=(
+            np.stack(review_signals).astype(np.float32)
+            if review_signals
+            else np.empty((0, review_crop_length), dtype=np.float32)
+        ),
     )
     np.savez_compressed(
         output_dir / "manual_file_review_signals.npz",
         record_id=np.asarray([row["record_id"] for row in file_review_rows]),
-        signals=np.stack(file_review_signals).astype(np.float32),
+        signals=(
+            np.stack(file_review_signals).astype(np.float32)
+            if file_review_signals
+            else np.empty((0, 0), dtype=np.float32)
+        ),
     )
     summary = {
         "schema_version": 1,
@@ -315,6 +337,14 @@ def build_candidate_audit(
         ),
         "n_manual_review_rows": len(review_rows),
         "n_manual_file_review_rows": len(file_review_rows),
+        "candidate_review_per_stratum": review_per_stratum,
+        "file_review_per_stratum": full_trace_review_per_stratum,
+        "review_sampling_excluded_record_count": len(
+            excluded_record_ids.intersection(row["record_id"] for row in source_rows)
+        ),
+        "review_sampling_eligible_file_count": sum(
+            row["record_id"] not in excluded_record_ids for row in source_rows
+        ),
         "manual_review_status": "pending",
         "width_ms_quantiles": _quantiles([float(row["width_ms"]) for row in candidate_rows]),
         "snr_proxy_quantiles": _quantiles([float(row["snr_proxy"]) for row in candidate_rows]),

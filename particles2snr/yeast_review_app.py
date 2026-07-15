@@ -19,8 +19,9 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
-from scipy.signal import spectrogram
+from scipy.signal import hilbert, spectrogram
 
+from .yeast_events import YeastDetectionConfig, bandpass_yeast_signal
 from .yeast_review_analysis import analyze_review
 
 
@@ -59,7 +60,6 @@ QUEUE_SPECS = {
         ),
     ),
 }
-
 
 def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     with path.open(newline="", encoding="utf-8") as handle:
@@ -172,6 +172,16 @@ class YeastReviewWorkspace:
             display_row["detected_qualities"] = ", ".join(
                 self._candidate_by_id[event_id]["quality"] for event_id in event_ids
             ) or "none"
+            review_fields = QUEUE_SPECS[queue].required_fields
+            if not any(row.get(field, "").strip() for field in review_fields):
+                display_row.update(
+                    {
+                        "review_true_event_count": row["n_retained_candidates"],
+                        "review_false_retained_candidate_count": "0",
+                        "review_true_rejected_candidate_count": "0",
+                        "review_missed_event_count": "0",
+                    }
+                )
         return {
             "queue": queue,
             "index": index,
@@ -284,11 +294,19 @@ class YeastReviewWorkspace:
         signal_index = self._signal_indices[queue][row[spec.id_field]]
         return self._signals[queue][signal_index]
 
-    @lru_cache(maxsize=64)
-    def plot_png(self, queue: str, index: int) -> bytes:
+    @lru_cache(maxsize=128)
+    def plot_png(self, queue: str, index: int, signal_view: str = "filtered") -> bytes:
+        if signal_view not in {"filtered", "raw"}:
+            raise ValueError("signal_view must be filtered or raw")
         row = self._row(queue, index)
-        signal = self._signal_for(queue, row)
-        sampling_frequency_hz = 2_000_000.0
+        raw_signal = self._signal_for(queue, row)
+        config = YeastDetectionConfig()
+        signal = (
+            bandpass_yeast_signal(raw_signal, config)
+            if signal_view == "filtered"
+            else raw_signal
+        )
+        sampling_frequency_hz = config.sampling_frequency_hz
         frequencies, times, power = spectrogram(
             signal,
             fs=sampling_frequency_hz,
@@ -297,11 +315,11 @@ class YeastReviewWorkspace:
             window="hann",
             mode="magnitude",
         )
-        band = (frequencies >= 7_000.0) & (frequencies <= 80_000.0)
-        figure = Figure(figsize=(12.0, 6.2), constrained_layout=True)
-        time_axis, spectrum_axis = figure.subplots(2, 1)
+        band = (frequencies >= config.low_freq_hz) & (frequencies <= config.high_freq_hz)
 
         if queue == "candidate":
+            figure = Figure(figsize=(12.0, 6.2), constrained_layout=True)
+            time_axis, spectrum_axis = figure.subplots(2, 1)
             time_ms = (
                 np.arange(signal.size) - signal.size // 2
             ) / sampling_frequency_hz * 1000.0
@@ -320,27 +338,134 @@ class YeastReviewWorkspace:
                 time_axis.axvline(0.0, color="#c94b32", linewidth=0.9)
             time_axis.set_xlabel("Time from proposed center (ms)")
         else:
+            event_ids = json.loads(row["detected_event_ids"])
+            centers = json.loads(row["detected_centers"])
+            if event_ids:
+                figure = Figure(figsize=(12.0, 8.6), constrained_layout=True)
+                grid = figure.add_gridspec(
+                    3,
+                    len(event_ids),
+                    height_ratios=(1.45, 1.0, 1.25),
+                )
+                time_axis = figure.add_subplot(grid[0, :])
+                zoom_axes = [
+                    figure.add_subplot(grid[1, item]) for item in range(len(event_ids))
+                ]
+                spectrum_axis = figure.add_subplot(grid[2, :])
+            else:
+                figure = Figure(figsize=(12.0, 6.2), constrained_layout=True)
+                time_axis, spectrum_axis = figure.subplots(2, 1)
+                zoom_axes = []
             time_ms = np.arange(signal.size) / sampling_frequency_hz * 1000.0
             spectrum_time_ms = times * 1000.0
             time_axis.plot(time_ms, signal, color="#202428", linewidth=0.6)
+            if signal_view == "raw":
+                envelope = np.abs(hilbert(signal))
+                time_axis.plot(
+                    time_ms,
+                    envelope,
+                    color="#1769aa",
+                    linewidth=0.8,
+                    alpha=0.7,
+                    label="amplitude envelope",
+                )
+                time_axis.plot(
+                    time_ms,
+                    -envelope,
+                    color="#1769aa",
+                    linewidth=0.8,
+                    alpha=0.7,
+                )
             quality_colors = {"strict": "#16876b", "medium": "#b97700", "reject": "#777777"}
-            event_ids = json.loads(row["detected_event_ids"])
-            centers = json.loads(row["detected_centers"])
             seen_qualities: set[str] = set()
-            for event_id, center in zip(event_ids, centers):
-                quality = self._candidate_by_id[event_id]["quality"]
+            zoom_half_width = 2048
+            for ordinal, (event_id, center) in enumerate(zip(event_ids, centers), start=1):
+                candidate = self._candidate_by_id[event_id]
+                quality = candidate["quality"]
                 location = center / sampling_frequency_hz * 1000.0
+                event_start_ms = int(candidate["event_start"]) / sampling_frequency_hz * 1000.0
+                event_end_ms = int(candidate["event_end"]) / sampling_frequency_hz * 1000.0
                 color = quality_colors[quality]
-                time_axis.axvline(location, color=color, linewidth=1.0)
-                spectrum_axis.axvline(location, color=color, linewidth=1.0)
+                for axis in (time_axis, spectrum_axis):
+                    axis.axvspan(
+                        event_start_ms,
+                        event_end_ms,
+                        color=color,
+                        alpha=0.15,
+                        zorder=2,
+                    )
+                    axis.axvline(location, color=color, linewidth=1.0, zorder=3)
+                time_axis.text(
+                    location,
+                    0.96,
+                    str(ordinal),
+                    transform=time_axis.get_xaxis_transform(),
+                    color="white",
+                    fontsize=8,
+                    fontweight="bold",
+                    ha="center",
+                    va="top",
+                    bbox={"boxstyle": "square,pad=0.22", "facecolor": color, "edgecolor": "none"},
+                    zorder=4,
+                )
+
+                zoom_axis = zoom_axes[ordinal - 1]
+                zoom_start = max(0, int(center) - zoom_half_width)
+                zoom_end = min(signal.size, int(center) + zoom_half_width)
+                zoom_signal = signal[zoom_start:zoom_end]
+                zoom_time_ms = (
+                    np.arange(zoom_start, zoom_end) - int(center)
+                ) / sampling_frequency_hz * 1000.0
+                zoom_axis.plot(zoom_time_ms, zoom_signal, color="#202428", linewidth=0.65)
+                if signal_view == "raw":
+                    zoom_envelope = np.abs(hilbert(zoom_signal))
+                    zoom_axis.plot(
+                        zoom_time_ms,
+                        zoom_envelope,
+                        color="#1769aa",
+                        linewidth=0.75,
+                        alpha=0.65,
+                    )
+                    zoom_axis.plot(
+                        zoom_time_ms,
+                        -zoom_envelope,
+                        color="#1769aa",
+                        linewidth=0.75,
+                        alpha=0.65,
+                    )
+                zoom_axis.axvspan(
+                    (int(candidate["event_start"]) - int(center))
+                    / sampling_frequency_hz
+                    * 1000.0,
+                    (int(candidate["event_end"]) - int(center))
+                    / sampling_frequency_hz
+                    * 1000.0,
+                    color=color,
+                    alpha=0.15,
+                )
+                zoom_axis.axvline(0.0, color=color, linewidth=0.9)
+                zoom_axis.set_title(
+                    f"Candidate {ordinal}: {quality} | {float(candidate['width_ms']):.3g} ms",
+                    fontsize=9,
+                    color=color,
+                )
+                zoom_axis.set_xlabel("Time from candidate center (ms)")
+                zoom_axis.grid(color="#d5d9dc", linewidth=0.35, alpha=0.65)
+                if ordinal == 1:
+                    zoom_axis.set_ylabel("Local signal")
                 seen_qualities.add(quality)
             for quality in sorted(seen_qualities):
                 time_axis.plot([], [], color=quality_colors[quality], label=quality)
-            if seen_qualities:
-                time_axis.legend(loc="upper right", frameon=False, ncol=len(seen_qualities))
+            if signal_view == "raw" or seen_qualities:
+                time_axis.legend(
+                    loc="upper right",
+                    frameon=False,
+                    ncol=(1 if signal_view == "raw" else 0) + len(seen_qualities),
+                )
             time_axis.set_xlabel("Time from trace start (ms)")
 
-        time_axis.set_ylabel("Raw signal")
+        signal_label = "Filtered signal (7-80 kHz)" if signal_view == "filtered" else "Raw signal"
+        time_axis.set_ylabel(signal_label)
         time_axis.grid(color="#d5d9dc", linewidth=0.4, alpha=0.7)
         spectrum_axis.pcolormesh(
             spectrum_time_ms,
@@ -402,7 +527,12 @@ def build_handler(workspace: YeastReviewWorkspace) -> type[BaseHTTPRequestHandle
                 if len(parts) == 3 and parts[0] == "plot" and parts[2].endswith(".png"):
                     queue = parts[1]
                     index = int(parts[2][:-4])
-                    self._send(HTTPStatus.OK, workspace.plot_png(queue, index), "image/png")
+                    signal_view = parse_qs(parsed.query).get("signal_view", ["filtered"])[0]
+                    self._send(
+                        HTTPStatus.OK,
+                        workspace.plot_png(queue, index, signal_view),
+                        "image/png",
+                    )
                     return
                 self._error(HTTPStatus.NOT_FOUND, ValueError("Not found"))
             except (ValueError, IndexError) as exc:
@@ -486,7 +616,15 @@ REVIEW_HTML = r"""<!doctype html>
     .meta { background: white; border: 1px solid #cbd1d4; padding: 10px 12px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px 14px; font-size: 12px; }
     .meta div { min-width: 0; overflow-wrap: anywhere; }
     .meta span { color: #69757a; display: block; margin-bottom: 2px; }
+    .plot-toolbar { background: white; border: 1px solid #cbd1d4; border-top: 0; padding: 8px 12px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+    .plot-toolbar > span { color: #69757a; font-size: 13px; font-weight: 650; }
+    .view-segment { display: grid; grid-template-columns: 1fr 1fr; }
+    .view-segment button { border: 1px solid #aeb7bb; background: white; color: #485156; min-height: 32px; padding: 5px 12px; cursor: pointer; }
+    .view-segment button:first-child { border-radius: 4px 0 0 4px; }
+    .view-segment button:last-child { border-left: 0; border-radius: 0 4px 4px 0; }
+    .view-segment button.active { background: #d9eee8; border-color: #16876b; color: #0d5b49; font-weight: 650; }
     .plot { width: 100%; aspect-ratio: 12 / 6.2; object-fit: contain; display: block; background: white; border: 1px solid #cbd1d4; border-top: 0; }
+    .plot.full-trace { aspect-ratio: 12 / 8.6; }
     form { background: white; border: 1px solid #cbd1d4; border-top: 0; padding: 14px; }
     .decisions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
     fieldset { margin: 0; border: 0; padding: 0; min-width: 0; }
@@ -524,6 +662,13 @@ REVIEW_HTML = r"""<!doctype html>
       <label class="pending-toggle"><input id="pending-only" type="checkbox" checked> Pending only</label>
     </div>
     <section id="meta" class="meta"></section>
+    <div class="plot-toolbar">
+      <span>Signal view</span>
+      <div class="view-segment" role="group" aria-label="Signal view">
+        <button id="filtered-view" class="active" type="button" aria-pressed="true">Filtered 7-80 kHz</button>
+        <button id="raw-view" type="button" aria-pressed="false">Raw</button>
+      </div>
+    </div>
     <img id="plot" class="plot" alt="Signal and spectrogram review plot">
     <form id="form">
       <div id="candidate-fields" class="decisions"></div>
@@ -538,7 +683,7 @@ REVIEW_HTML = r"""<!doctype html>
   </main>
 <script>
 const candidateFields = [
-  ["review_event_present", "Event present"],
+  ["review_event_present", "Box matches an event"],
   ["review_center_acceptable", "Center acceptable"],
   ["review_full_event_visible", "Full event visible"],
   ["review_artifact", "Artifact present"]
@@ -550,7 +695,27 @@ const fileFields = [
   ["review_missed_event_count", "Missed events"]
 ];
 let queue = "candidate", items = [], visible = [], cursor = 0, current = null;
+let signalView = localStorage.getItem("yeast-signal-view") || "filtered";
+if (!['filtered', 'raw'].includes(signalView)) signalView = "filtered";
 const $ = id => document.getElementById(id);
+
+function updateSignalView(nextView, reloadPlot = true) {
+  signalView = nextView;
+  localStorage.setItem("yeast-signal-view", signalView);
+  for (const view of ["filtered", "raw"]) {
+    const button = $(`${view}-view`);
+    const selected = view === signalView;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  }
+  if (reloadPlot) updatePlot();
+}
+
+function updatePlot() {
+  if (!current) return;
+  const params = new URLSearchParams({signal_view: signalView, v: Date.now()});
+  $("plot").src = `${current.plot_url}?${params}`;
+}
 
 function buildFields() {
   $("candidate-fields").innerHTML = candidateFields.map(([field, label]) => `
@@ -603,9 +768,18 @@ async function loadCurrent() {
     ["Width (ms)", row.width_ms || "-"]
   ];
   $("meta").innerHTML = metadata.map(([key, value]) => `<div><span>${escapeHtml(key)}</span>${escapeHtml(value || "-")}</div>`).join("");
-  $("plot").src = `${current.plot_url}?v=${Date.now()}`;
   $("candidate-fields").hidden = queue !== "candidate";
   $("file-fields").hidden = queue !== "file";
+  $("plot").classList.toggle(
+    "full-trace",
+    queue === "file" && Number(row.n_candidates) > 0
+  );
+  document.querySelectorAll("#candidate-fields input").forEach(
+    input => input.disabled = queue !== "candidate"
+  );
+  document.querySelectorAll("#file-fields input").forEach(
+    input => input.disabled = queue !== "file"
+  );
   const fields = queue === "candidate" ? candidateFields : fileFields;
   for (const [field] of fields) {
     const value = row[field] || "";
@@ -622,6 +796,7 @@ async function loadCurrent() {
   $("reviewer").value = row.reviewer || localStorage.getItem("yeast-reviewer") || "";
   $("notes").value = row.review_notes || "";
   $("message").textContent = "";
+  updatePlot();
 }
 
 async function refreshGate() {
@@ -640,6 +815,15 @@ async function changeQueue(nextQueue) {
   await loadItems();
 }
 
+async function advanceAfterSave(savedIndex) {
+  const state = await jsonFetch(`/api/items?queue=${queue}`);
+  items = state.items;
+  const nextItems = $("pending-only").checked ? items.filter(item => !item.complete) : items;
+  const nextItem = nextItems.find(item => item.index > savedIndex) || nextItems[0] || null;
+  await applyFilter(nextItem ? nextItem.index : savedIndex);
+  await refreshGate();
+}
+
 $("form").addEventListener("submit", async event => {
   event.preventDefault();
   try {
@@ -651,7 +835,7 @@ $("form").addEventListener("submit", async event => {
     }
     localStorage.setItem("yeast-reviewer", values.reviewer);
     await jsonFetch("/api/item", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({queue, index: current.index, values}) });
-    await loadItems();
+    await advanceAfterSave(current.index);
   } catch (error) { $("message").textContent = error.message; }
 });
 
@@ -661,6 +845,10 @@ $("pending-only").onchange = () => applyFilter(current ? current.index : null);
 $("candidate-tab").onclick = () => changeQueue("candidate");
 $("file-tab").onclick = () => changeQueue("file");
 buildFields();
+updateSignalView(signalView, false);
+$("filtered-view").onclick = () => updateSignalView("filtered");
+$("raw-view").onclick = () => updateSignalView("raw");
+$("reviewer").oninput = () => localStorage.setItem("yeast-reviewer", $("reviewer").value);
 if (new URLSearchParams(window.location.search).get("queue") === "file") {
   changeQueue("file").catch(error => $("message").textContent = error.message);
 } else {
