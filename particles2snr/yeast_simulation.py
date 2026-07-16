@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.signal import butter, sosfiltfilt
+from scipy.signal import butter, hilbert, sosfiltfilt
 
 from .yeast_representation_dataset import preprocess_crop
 
@@ -28,6 +29,142 @@ FACTOR_POLICY: dict[str, dict[str, Any]] = {
     "absolute_physical_amplitude": {"role": "unresolved_excluded", "reason": "not identifiable after acquisition gain"},
     "yeast_morphology": {"role": "unresolved_excluded", "reason": "simulated components are not validated morphology labels"},
 }
+
+SUPPORT_CALIBRATION_ID = "yeast-followup-train-hilbert-support-v1"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def envelope_support_duration_ms(
+    signals: np.ndarray, *, sampling_frequency_hz: float = 1_000_000.0
+) -> np.ndarray:
+    values = np.asarray(signals, dtype=np.float64)
+    if values.ndim == 1:
+        values = values[None, :]
+    if values.ndim != 2 or values.shape[1] == 0:
+        raise ValueError("signals must have shape (n_signals, n_samples)")
+    if sampling_frequency_hz <= 0.0:
+        raise ValueError("sampling_frequency_hz must be positive")
+    envelope = np.abs(hilbert(values, axis=1))
+    threshold = 0.25 * np.max(envelope, axis=1, keepdims=True)
+    duration = np.sum(envelope >= threshold, axis=1) / sampling_frequency_hz * 1000.0
+    if not np.isfinite(duration).all():
+        raise ValueError("Envelope support calculation produced non-finite values")
+    return duration.astype(np.float64)
+
+
+def fit_support_calibration(
+    real_root: Path,
+    *,
+    quantile_knots: int = 101,
+    lower_quantile: float = 0.05,
+    upper_quantile: float = 0.95,
+) -> dict[str, Any]:
+    if quantile_knots < 3:
+        raise ValueError("quantile_knots must be at least three")
+    if not 0.0 < lower_quantile < upper_quantile < 1.0:
+        raise ValueError("Calibration quantiles must lie strictly inside (0, 1)")
+    development_path = real_root / "development_events.csv"
+    if not development_path.is_file():
+        raise FileNotFoundError(
+            "Support calibration requires the physically separated development_events.csv"
+        )
+    with development_path.open(newline="", encoding="utf-8") as handle:
+        development_rows = list(csv.DictReader(handle))
+    observed_splits = {row["development_split"] for row in development_rows}
+    allowed_splits = {"followup_train", "followup_validation"}
+    if not observed_splits <= allowed_splits:
+        raise PermissionError(
+            f"Support calibration development metadata contains forbidden splits: "
+            f"{sorted(observed_splits - allowed_splits)}"
+        )
+    train_rows = [row for row in development_rows if row["development_split"] == "followup_train"]
+    if not train_rows:
+        raise ValueError("Support calibration requires followup_train signals")
+    signals_path = real_root / "signals.npy"
+    signals = np.load(signals_path, mmap_mode="r")
+    indices = np.asarray([int(row["signal_row"]) for row in train_rows], dtype=np.int64)
+    if indices.min() < 0 or indices.max() >= len(signals):
+        raise ValueError("Training signal row lies outside signals.npy")
+    durations = []
+    for start in range(0, len(indices), 256):
+        selected = np.asarray(signals[indices[start : start + 256]], dtype=np.float32)
+        durations.append(envelope_support_duration_ms(selected))
+    support = np.concatenate(durations)
+    probabilities = np.linspace(lower_quantile, upper_quantile, quantile_knots)
+    values = np.quantile(support, probabilities)
+    if np.any(np.diff(values) < 0.0) or values[0] <= 0.0:
+        raise ValueError("Invalid support-duration quantiles")
+    summary_path = real_root / "dataset_summary.json"
+    dataset_id = "yeast-events-followup@v2"
+    if summary_path.is_file():
+        dataset_id = json.loads(summary_path.read_text(encoding="utf-8")).get(
+            "dataset_id", dataset_id
+        )
+    return {
+        "schema_version": 1,
+        "calibration_id": SUPPORT_CALIBRATION_ID,
+        "source_dataset": dataset_id,
+        "source_split": "followup_train",
+        "source_metadata": "development_events.csv",
+        "n_train_signals": len(train_rows),
+        "observable": {
+            "name": "hilbert_envelope_support_above_25pct_peak_ms",
+            "sampling_frequency_hz": 1_000_000.0,
+            "threshold_fraction": 0.25,
+        },
+        "robust_quantile_interval": [lower_quantile, upper_quantile],
+        "quantile_probabilities": probabilities.tolist(),
+        "support_duration_ms_quantiles": values.tolist(),
+        "source_checksums": {
+            "development_events.csv": _sha256(development_path),
+            "signals.npy": _sha256(signals_path),
+        },
+        "sealed_splits_used": [],
+        "trace_policy": "quantiles only; no real signal or template is copied into simulation",
+    }
+
+
+def _sample_calibrated_duration_ms(
+    rng: np.random.Generator, calibration: dict[str, Any]
+) -> float:
+    probabilities = np.asarray(calibration["quantile_probabilities"], dtype=np.float64)
+    values = np.asarray(calibration["support_duration_ms_quantiles"], dtype=np.float64)
+    if probabilities.ndim != 1 or values.shape != probabilities.shape:
+        raise ValueError("Malformed support calibration quantiles")
+    probability = rng.uniform(float(probabilities[0]), float(probabilities[-1]))
+    return float(np.interp(probability, probabilities, values))
+
+
+def _finite_support_tukey_envelope(
+    time: np.ndarray,
+    *,
+    center: float,
+    target_support_ms: float,
+    alpha: float,
+) -> np.ndarray:
+    if not 0.0 < alpha <= 1.0:
+        raise ValueError("Tukey alpha must lie in (0, 1]")
+    if target_support_ms <= 0.0:
+        raise ValueError("target_support_ms must be positive")
+    # At 25% height, Tukey support spans (1 - alpha / 3) of its finite support.
+    total_support = target_support_ms / (1.0 - alpha / 3.0) / 1000.0
+    normalized = np.abs(time - center) / max(total_support / 2.0, 1.0e-12)
+    envelope = np.zeros_like(time, dtype=np.float64)
+    inside = normalized <= 1.0
+    flat = normalized <= 1.0 - alpha
+    envelope[flat] = 1.0
+    taper = inside & ~flat
+    envelope[taper] = 0.5 * (
+        1.0 + np.cos(np.pi * (normalized[taper] - (1.0 - alpha)) / alpha)
+    )
+    return envelope
 
 
 def _colored_noise(rng: np.random.Generator, length: int, variant: str) -> np.ndarray:
@@ -62,23 +199,43 @@ def simulate_view(
     *,
     variant: str = "base",
     raw_length: int = 8192,
+    envelope_model: str = "gaussian",
+    tukey_alpha: float = 0.50,
 ) -> tuple[np.ndarray, dict[str, float]]:
     sampling_frequency = 2_000_000.0
     time = np.arange(raw_length, dtype=np.float64) / sampling_frequency
-    duration_s = float(factors["duration_ms"]) / 1000.0
-    sigma = duration_s / 2.355
     position = float(rng.uniform(0.10, 0.90))
     center = position * (raw_length - 1) / sampling_frequency
     phase = float(rng.uniform(0.0, 2.0 * np.pi))
     frequency = float(factors["doppler_khz"]) * 1000.0
-    envelope = np.exp(-0.5 * np.square((time - center) / sigma))
+    if envelope_model == "gaussian":
+        duration_s = float(factors["duration_ms"]) / 1000.0
+        sigma = duration_s / 2.355
+        envelope = np.exp(-0.5 * np.square((time - center) / sigma))
+    elif envelope_model == "finite_support_tukey":
+        envelope = _finite_support_tukey_envelope(
+            time,
+            center=center,
+            target_support_ms=float(factors["duration_ms"]),
+            alpha=tukey_alpha,
+        )
+    else:
+        raise ValueError(f"Unknown envelope model: {envelope_model}")
     clean = envelope * np.cos(2.0 * np.pi * frequency * time + phase)
     if int(factors["component_count"]) == 2:
         separation = float(factors["component_separation_ms"]) / 1000.0
         second_center = np.clip(center + rng.choice((-0.5, 0.5)) * separation, time[0], time[-1])
         second_frequency = frequency + rng.choice((-1.0, 1.0)) * float(factors["frequency_separation_khz"]) * 1000.0
         second_phase = float(rng.uniform(0.0, 2.0 * np.pi))
-        second_envelope = np.exp(-0.5 * np.square((time - second_center) / sigma))
+        if envelope_model == "gaussian":
+            second_envelope = np.exp(-0.5 * np.square((time - second_center) / sigma))
+        else:
+            second_envelope = _finite_support_tukey_envelope(
+                time,
+                center=float(second_center),
+                target_support_ms=float(factors["duration_ms"]),
+                alpha=tukey_alpha,
+            )
         clean = clean + float(factors["relative_component_amplitude"]) * second_envelope * np.cos(
             2.0 * np.pi * second_frequency * time + second_phase
         )
@@ -114,9 +271,23 @@ def build_simulation_dataset(
     n_test_latents: int,
     views_per_latent: int = 2,
     seed: int = 42,
+    support_calibration: dict[str, Any] | None = None,
+    envelope_model: str = "gaussian",
+    tukey_alpha: float = 0.50,
 ) -> dict[str, Any]:
     if min(n_train_latents, n_validation_latents, n_test_latents, views_per_latent) <= 0:
         raise ValueError("Simulation counts must be positive")
+    if envelope_model == "gaussian" and support_calibration is not None:
+        raise ValueError("Gaussian v1 generation cannot consume support calibration")
+    if envelope_model == "finite_support_tukey":
+        if support_calibration is None:
+            raise ValueError("Finite-support generation requires train-only calibration")
+        if support_calibration.get("sealed_splits_used") != []:
+            raise PermissionError("Support calibration accessed a sealed split")
+        if support_calibration.get("source_split") != "followup_train":
+            raise PermissionError("Support calibration must use followup_train only")
+    elif envelope_model != "gaussian":
+        raise ValueError(f"Unknown envelope model: {envelope_model}")
     split_specs = (
         ("train", n_train_latents, seed, "base"),
         ("validation", n_validation_latents, seed + 10_000, "base"),
@@ -133,10 +304,20 @@ def build_simulation_dataset(
         latent_rng = np.random.default_rng(split_seed)
         for latent_index in range(count):
             factors = _latent_factors(latent_rng)
+            if support_calibration is not None:
+                factors["duration_ms"] = _sample_calibrated_duration_ms(
+                    latent_rng, support_calibration
+                )
             latent_id = f"{split}-{latent_index:07d}"
             for view_index in range(views_per_latent):
                 view_rng = np.random.default_rng(split_seed + latent_index * 1009 + view_index * 1_000_003)
-                signal, nuisance = simulate_view(view_rng, factors, variant=variant)
+                signal, nuisance = simulate_view(
+                    view_rng,
+                    factors,
+                    variant=variant,
+                    envelope_model=envelope_model,
+                    tukey_alpha=tukey_alpha,
+                )
                 signals[signal_row] = signal
                 rows.append(
                     {
@@ -145,6 +326,11 @@ def build_simulation_dataset(
                         "view_index": view_index,
                         "split": split,
                         "generator_variant": variant,
+                        **(
+                            {"envelope_model": envelope_model, "tukey_alpha": tukey_alpha}
+                            if support_calibration is not None
+                            else {}
+                        ),
                         **factors,
                         **nuisance,
                     }
@@ -156,12 +342,30 @@ def build_simulation_dataset(
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+    factor_policy = json.loads(json.dumps(FACTOR_POLICY))
+    if support_calibration is not None:
+        factor_policy["duration_ms"]["source"] = (
+            "followup_train Hilbert-support p05-p95 quantile calibration"
+        )
+        factor_policy["duration_ms"]["range"] = [
+            support_calibration["support_duration_ms_quantiles"][0],
+            support_calibration["support_duration_ms_quantiles"][-1],
+        ]
     (output_dir / "factor_policy.json").write_text(
-        json.dumps(FACTOR_POLICY, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(factor_policy, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    if support_calibration is not None:
+        (output_dir / "support_calibration.json").write_text(
+            json.dumps(support_calibration, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     summary = {
         "schema_version": 1,
-        "generator_id": "yeast-passage-identifiable-v1",
+        "generator_id": (
+            "yeast-passage-finite-support-v2"
+            if envelope_model == "finite_support_tukey"
+            else "yeast-passage-identifiable-v1"
+        ),
         "input_contract": "yeast-event-8192to4096-bandpass-global-v1-compatible",
         "n_signals": total,
         "n_latents": sum(spec[1] for spec in split_specs),
@@ -172,7 +376,41 @@ def build_simulation_dataset(
         "test_policy": "held-out sensor/noise response variant",
         "scientific_limit": "components are generic passage factors and are not validated yeast morphology labels",
     }
+    if support_calibration is not None:
+        summary.update(
+            {
+                "envelope_model": envelope_model,
+                "envelope_model_id": f"finite-support-tukey-alpha-{tukey_alpha:g}-v1",
+                "support_calibration": support_calibration["calibration_id"],
+            }
+        )
     (output_dir / "dataset_summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return summary
+
+
+def build_support_calibrated_simulation_dataset(
+    *,
+    real_root: Path,
+    output_dir: Path,
+    n_train_latents: int,
+    n_validation_latents: int,
+    n_test_latents: int,
+    views_per_latent: int = 2,
+    seed: int = 42,
+    tukey_alpha: float = 0.50,
+    quantile_knots: int = 101,
+) -> dict[str, Any]:
+    calibration = fit_support_calibration(real_root, quantile_knots=quantile_knots)
+    return build_simulation_dataset(
+        output_dir=output_dir,
+        n_train_latents=n_train_latents,
+        n_validation_latents=n_validation_latents,
+        n_test_latents=n_test_latents,
+        views_per_latent=views_per_latent,
+        seed=seed,
+        support_calibration=calibration,
+        envelope_model="finite_support_tukey",
+        tukey_alpha=tukey_alpha,
+    )
