@@ -23,10 +23,10 @@ def test_template_comparator_uses_disjoint_train_only_records(tmp_path: Path) ->
                 "development_split": "followup_train" if index < 36 else "followup_test",
             }
         )
-    with (source / "events.csv").open("w", newline="", encoding="utf-8") as handle:
+    with (source / "development_events.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(rows[:36])
     rng = np.random.default_rng(2)
     np.save(source / "signals.npy", rng.normal(size=(40, 64)).astype(np.float32))
     output = tmp_path / "output"

@@ -194,6 +194,7 @@ def build_followup_representation_dataset(
     output_dir: Path,
     source_dataset_id: str,
     representation_dataset_id: str,
+    output_dataset_id: str = "yeast-events-followup@v1",
     seed: int = 20260716,
 ) -> dict[str, Any]:
     source_rows = _read_csv(source_index_csv)
@@ -276,6 +277,20 @@ def build_followup_representation_dataset(
         writer = csv.DictWriter(handle, fieldnames=list(selected[0]))
         writer.writeheader()
         writer.writerows(selected)
+    development_rows = [
+        row
+        for row in selected
+        if row["development_split"] in {"followup_train", "followup_validation"}
+    ]
+    final_rows = [row for row in selected if row["development_split"] == "followup_test"]
+    for name, rows_to_write in (
+        ("development_events.csv", development_rows),
+        ("sealed_followup_test_events.csv", final_rows),
+    ):
+        with (output_dir / name).open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows_to_write[0]))
+            writer.writeheader()
+            writer.writerows(rows_to_write)
 
     parent_contract = json.loads(
         (representation_root / "input_contract.json").read_text(encoding="utf-8")
@@ -301,6 +316,11 @@ def build_followup_representation_dataset(
             "followup_test",
             "test",
         ],
+        "metadata_partition": {
+            "development": "development_events.csv",
+            "sealed_final": "sealed_followup_test_events.csv",
+            "complete_provenance_index": "events.csv",
+        },
         "historical_non_development_event_counts_not_copied": dict(sorted(rejected_split_counts.items())),
     }
     (output_dir / "input_contract.json").write_text(
@@ -332,7 +352,7 @@ def build_followup_representation_dataset(
     distributions = _distribution_summary(selected)
     summary = {
         "schema_version": 1,
-        "dataset_id": "yeast-events-followup@v1",
+        "dataset_id": output_dataset_id,
         "n_events": len(selected),
         "split_counts": dict(sorted(Counter(row["development_split"] for row in selected).items())),
         "source_group_counts": dict(sorted(Counter(row["source_group"] for row in selected).items())),

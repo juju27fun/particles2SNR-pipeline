@@ -131,6 +131,17 @@ def test_builder_copies_only_development_and_normalizes_from_followup_train(
     output_events = list(csv.DictReader((output / "events.csv").open(newline="")))
     assert all(row["prior_development_split"] == "development_train" for row in output_events)
     assert "old-final" not in {row["record_id"] for row in output_events}
+    development_events = list(
+        csv.DictReader((output / "development_events.csv").open(newline=""))
+    )
+    assert {row["development_split"] for row in development_events} == {
+        "followup_train",
+        "followup_validation",
+    }
+    sealed_events = list(
+        csv.DictReader((output / "sealed_followup_test_events.csv").open(newline=""))
+    )
+    assert {row["development_split"] for row in sealed_events} == {"followup_test"}
     assert summary["n_events"] == len(source_rows) - 1
     audit = json.loads((output / "split_audit.json").read_text())
     assert audit["forbidden_event_signals_copied"] == 0

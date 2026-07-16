@@ -48,9 +48,12 @@ def build_template_comparator(
 ) -> dict[str, Any]:
     if min(n_train, n_validation) <= 0:
         raise ValueError("Comparator split sizes must be positive")
+    development_index = followup_root / "development_events.csv"
+    if not development_index.is_file():
+        raise FileNotFoundError("Template generation requires development_events.csv")
     rows = [
         row
-        for row in _read_rows(followup_root / "events.csv")
+        for row in _read_rows(development_index)
         if row["development_split"] == "followup_train"
     ]
     if not rows:

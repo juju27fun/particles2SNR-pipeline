@@ -16,6 +16,7 @@ def main() -> None:
     parser.add_argument("--source-dataset-id", required=True)
     parser.add_argument("--representation-root", type=Path, required=True)
     parser.add_argument("--representation-dataset-id", required=True)
+    parser.add_argument("--output-dataset-id", default="yeast-events-followup@v1")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=20260716)
     args = parser.parse_args()
@@ -25,6 +26,7 @@ def main() -> None:
         output_dir=args.output_dir,
         source_dataset_id=args.source_dataset_id,
         representation_dataset_id=args.representation_dataset_id,
+        output_dataset_id=args.output_dataset_id,
         seed=args.seed,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
