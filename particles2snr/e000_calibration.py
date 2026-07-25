@@ -310,6 +310,24 @@ def _git_revision(path: Path) -> str:
         return "unavailable"
 
 
+def _computation_fingerprint(provenance: dict[str, object]) -> str:
+    required = {
+        "datasets",
+        "inputs",
+        "parameters",
+        "metric_definitions",
+        "code",
+        "git_revision",
+    }
+    canonical = json.dumps(
+        {key: provenance[key] for key in sorted(required)},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def write_preflight_run(
     workspace_root: Path,
     output_dir: Path,
@@ -345,6 +363,47 @@ def write_preflight_run(
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     source_path = Path(__file__).resolve()
+    source_revision = _git_revision(source_path.parents[1])
+    provenance: dict[str, object] = {
+        "datasets": [binding.dataset_id for binding in DATASETS],
+        "inputs": {
+            "experiment_digest": PROTOCOL_DIGEST,
+            "population": "all rows in the three frozen E000 revision 2 manifests",
+            "verification_mode": result["verification_mode"],
+        },
+        "parameters": {
+            "acquisition_fields": list(ACQUISITION_FIELDS),
+            "expected_array_shape": [16384],
+            "allow_pickle": False,
+        },
+        "metric_definitions": {
+            "preflight": (
+                "Exact manifest and file identity, readable finite NPY shape, "
+                "cross-split content uniqueness, and acquisition-group presence"
+            )
+        },
+        "code": {
+            "entrypoint": "scripts/analysis/run_e000_bead_calibration.py",
+            "source_sha256": sha256_file(source_path),
+        },
+        "git_revision": source_revision,
+    }
+    metrics_manifest = {
+        "schema_version": 1,
+        "analysis_run_id": output_dir.name,
+        "computation_provenance": provenance,
+        "computation_fingerprint": _computation_fingerprint(provenance),
+        "metrics": [
+            {
+                "path": "preflight.json",
+                "sha256": sha256_file(preflight_path),
+            }
+        ],
+    }
+    (output_dir / "metrics_manifest.json").write_text(
+        json.dumps(metrics_manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     run = {
         "schema_version": 1,
         "project": "particles2SNR-pipeline",
@@ -361,7 +420,7 @@ def write_preflight_run(
         },
         "repositories": {
             "workspace": _git_revision(workspace_root),
-            "particles2SNR-pipeline": _git_revision(source_path.parents[1]),
+            "particles2SNR-pipeline": source_revision,
         },
         "command": command,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -383,7 +442,7 @@ def write_preflight_run(
                 workspace_root / "requirements/workspace.lock.txt"
             ),
         },
-        "outputs": ["preflight.json", "run.json"],
+        "outputs": ["metrics_manifest.json", "preflight.json", "run.json"],
         "normalized_outcome": {
             "code": result["decision"],
             "confirmation_opened": False,
