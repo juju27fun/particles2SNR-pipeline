@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import subprocess
@@ -144,15 +145,49 @@ def test_holdout_authorization_binds_run_receipt_and_config(tmp_path: Path) -> N
                     "approved": True,
                     "next_stage_blocked": False,
                 },
-                "frozen_config_sha256": fingerprint,
             }
         ),
         encoding="utf-8",
     )
+    (run_dir / "checkpoint_spec.json").write_text(
+        json.dumps({"frozen_config_sha256": fingerprint}), encoding="utf-8"
+    )
+    asset = run_dir / "method.png"
+    asset.write_bytes(b"frozen visual")
+    asset_sha = hashlib.sha256(asset.read_bytes()).hexdigest()
+    contract = {
+        "run_id": "calibration-result-r1",
+        "primary_assets": [{"path": "method.png", "sha256": asset_sha}],
+    }
+    decisions = {
+        "run_id": "calibration-result-r1",
+        "reviewer": "Louis",
+        "decisions": {"calibration-result": {"decision": "supported"}},
+        "complete": True,
+    }
+    contract_path = run_dir / "review_contract.json"
+    decisions_path = run_dir / "review" / "decisions.json"
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    decisions_path.write_text(json.dumps(decisions), encoding="utf-8")
+    receipt = {
+        "schema_version": 1,
+        "run_id": "calibration-result-r1",
+        "reviewer": "Louis",
+        "decision_count": 1,
+        "decisions_file": "review/decisions.json",
+        "contract_file": "review_contract.json",
+        "decisions_sha256": hashlib.sha256(decisions_path.read_bytes()).hexdigest(),
+        "contract_sha256": hashlib.sha256(contract_path.read_bytes()).hexdigest(),
+        "primary_assets": contract["primary_assets"],
+    }
     (run_dir / "review" / "receipt.json").write_text(
-        json.dumps({"run_id": "calibration-result-r1"}), encoding="utf-8"
+        json.dumps(receipt), encoding="utf-8"
     )
     validate_holdout_authorization(run_dir / "run.json", config_sha256=fingerprint)
+    decisions["decisions"]["calibration-result"]["decision"] = "insufficient"
+    decisions_path.write_text(json.dumps(decisions), encoding="utf-8")
+    with pytest.raises(PermissionError, match="receipt mismatch"):
+        validate_holdout_authorization(run_dir / "run.json", config_sha256=fingerprint)
 
 
 def test_calibration_build_is_immutable_and_portable(tmp_path: Path) -> None:

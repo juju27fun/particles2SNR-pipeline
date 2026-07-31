@@ -115,14 +115,63 @@ def validate_holdout_authorization(
     checkpoint = payload.get("visual_checkpoint", {})
     if checkpoint.get("approved") is not True or checkpoint.get("next_stage_blocked") is not False:
         raise PermissionError("holdout authorization gate is not open")
-    if payload.get("frozen_config_sha256") != config_sha256:
+    spec_path = authorization_path.parent / "checkpoint_spec.json"
+    spec = (
+        json.loads(spec_path.read_text(encoding="utf-8"))
+        if spec_path.is_file()
+        else {}
+    )
+    frozen_config = payload.get("frozen_config_sha256") or spec.get(
+        "frozen_config_sha256"
+    )
+    if frozen_config != config_sha256:
         raise PermissionError("holdout authorization does not match detector config")
-    receipt_path = authorization_path.parent / "review" / "receipt.json"
+    run_dir = authorization_path.parent
+    receipt_path = run_dir / "review" / "receipt.json"
     if not receipt_path.is_file():
         raise PermissionError("holdout authorization has no verified review receipt")
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    if receipt.get("run_id") != payload.get("run_id"):
+    contract_path = run_dir / "review_contract.json"
+    decisions_path = run_dir / "review" / "decisions.json"
+    if not contract_path.is_file() or not decisions_path.is_file():
+        raise PermissionError("holdout authorization review contract is incomplete")
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    decisions = json.loads(decisions_path.read_text(encoding="utf-8"))
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("run_id") != payload.get("run_id")
+        or contract.get("run_id") != payload.get("run_id")
+        or decisions.get("run_id") != payload.get("run_id")
+    ):
         raise PermissionError("holdout authorization receipt belongs to another run")
+    checks = {
+        "review_complete": decisions.get("complete") is True,
+        "reviewer": receipt.get("reviewer") == decisions.get("reviewer"),
+        "decision_count": receipt.get("decision_count")
+        == len(decisions.get("decisions", {})),
+        "decisions_file": receipt.get("decisions_file") == "review/decisions.json",
+        "contract_file": receipt.get("contract_file") == "review_contract.json",
+        "decisions_sha256": receipt.get("decisions_sha256")
+        == _sha256(decisions_path),
+        "contract_sha256": receipt.get("contract_sha256") == _sha256(contract_path),
+    }
+    primary_assets = receipt.get("primary_assets", [])
+    if primary_assets != contract.get("primary_assets", []):
+        checks["primary_assets"] = False
+    else:
+        checks["primary_assets"] = all(
+            isinstance(item, dict)
+            and not Path(str(item.get("path", ""))).is_absolute()
+            and ".." not in Path(str(item.get("path", ""))).parts
+            and (run_dir / str(item.get("path", ""))).is_file()
+            and _sha256(run_dir / str(item["path"])) == item.get("sha256")
+            for item in primary_assets
+        )
+    failed = sorted(name for name, valid in checks.items() if not valid)
+    if failed:
+        raise PermissionError(
+            f"holdout authorization review receipt mismatch: {failed}"
+        )
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
