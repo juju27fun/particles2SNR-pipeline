@@ -486,7 +486,11 @@ def _json_bytes(value: Any) -> bytes:
     return (json.dumps(value, sort_keys=True) + "\n").encode("utf-8")
 
 
-def build_handler(workspace: YeastReviewWorkspace) -> type[BaseHTTPRequestHandler]:
+def build_handler(
+    workspace: YeastReviewWorkspace,
+    *,
+    read_only: bool = False,
+) -> type[BaseHTTPRequestHandler]:
     class ReviewHandler(BaseHTTPRequestHandler):
         server_version = "YeastReview/1"
 
@@ -508,7 +512,14 @@ def build_handler(workspace: YeastReviewWorkspace) -> type[BaseHTTPRequestHandle
             parsed = urlparse(self.path)
             try:
                 if parsed.path == "/":
-                    self._send(HTTPStatus.OK, REVIEW_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                    page = REVIEW_HTML.replace(
+                        "__READ_ONLY__", "true" if read_only else "false"
+                    )
+                    self._send(
+                        HTTPStatus.OK,
+                        page.encode("utf-8"),
+                        "text/html; charset=utf-8",
+                    )
                     return
                 if parsed.path == "/api/items":
                     queue = parse_qs(parsed.query).get("queue", ["candidate"])[0]
@@ -541,6 +552,12 @@ def build_handler(workspace: YeastReviewWorkspace) -> type[BaseHTTPRequestHandle
                 self._error(HTTPStatus.INTERNAL_SERVER_ERROR, exc)
 
         def do_POST(self) -> None:  # noqa: N802
+            if read_only:
+                self._error(
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                    ValueError("This review is served in read-only mode"),
+                )
+                return
             if urlparse(self.path).path != "/api/item":
                 self._error(HTTPStatus.NOT_FOUND, ValueError("Not found"))
                 return
@@ -572,14 +589,22 @@ def serve_review(
     *,
     host: str = "127.0.0.1",
     port: int = 8765,
+    read_only: bool = False,
 ) -> None:
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("The annotation server may bind only to a loopback address")
     workspace = YeastReviewWorkspace(candidate_dataset, review_dir)
-    server = ThreadingHTTPServer((host, port), build_handler(workspace))
+    server = ThreadingHTTPServer(
+        (host, port),
+        build_handler(workspace, read_only=read_only),
+    )
     print(f"Yeast review server: http://{host}:{port}", flush=True)
     print(f"Candidate dataset: {workspace.candidate_dataset}", flush=True)
-    print(f"Editable review directory: {workspace.review_dir}", flush=True)
+    print(
+        f"{'Read-only annotations' if read_only else 'Editable review directory'}: "
+        f"{workspace.review_dir}",
+        flush=True,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -613,6 +638,7 @@ REVIEW_HTML = r"""<!doctype html>
     button.primary { background: #116b57; color: white; border-color: #116b57; font-weight: 650; }
     #progress { font-size: 14px; color: #485156; text-align: center; }
     .pending-toggle { justify-self: end; display: flex; align-items: center; gap: 7px; font-size: 14px; }
+    .readonly-banner { margin-bottom: 12px; border: 1px solid #8fb9ad; border-radius: 4px; background: #e6f4ef; color: #0d5b49; padding: 10px 12px; font-size: 13px; font-weight: 650; }
     .meta { background: white; border: 1px solid #cbd1d4; padding: 10px 12px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px 14px; font-size: 12px; }
     .meta div { min-width: 0; overflow-wrap: anywhere; }
     .meta span { color: #69757a; display: block; margin-bottom: 2px; }
@@ -655,6 +681,7 @@ REVIEW_HTML = r"""<!doctype html>
   <header><h1>Yeast event review</h1><div id="gate">Gate 1: loading</div></header>
   <nav><button id="candidate-tab" class="active">Candidate windows</button><button id="file-tab">Full traces</button></nav>
   <main>
+    <div id="readonly-banner" class="readonly-banner" hidden>Inspection en lecture seule des annotations finales. Aucune décision ou note ne peut être modifiée.</div>
     <div class="toolbar">
       <button id="prev" class="command">Previous</button>
       <button id="next" class="command">Next</button>
@@ -682,6 +709,7 @@ REVIEW_HTML = r"""<!doctype html>
     </form>
   </main>
 <script>
+const readOnly = __READ_ONLY__;
 const candidateFields = [
   ["review_event_present", "Box matches an event"],
   ["review_center_acceptable", "Center acceptable"],
@@ -725,6 +753,14 @@ function buildFields() {
     </div></fieldset>`).join("");
   $("file-fields").innerHTML = fileFields.map(([field, label]) => `
     <label><span class="title">${label}</span><input type="number" min="0" step="1" name="${field}" required></label>`).join("");
+}
+
+function enforceReadOnly() {
+  if (!readOnly) return;
+  document.querySelectorAll("#form input, #form textarea").forEach(
+    input => input.disabled = true
+  );
+  document.querySelector('#form button[type="submit"]').hidden = true;
 }
 
 async function jsonFetch(url, options) {
@@ -796,6 +832,7 @@ async function loadCurrent() {
   $("reviewer").value = row.reviewer || localStorage.getItem("yeast-reviewer") || "";
   $("notes").value = row.review_notes || "";
   $("message").textContent = "";
+  enforceReadOnly();
   updatePlot();
 }
 
@@ -845,6 +882,12 @@ $("pending-only").onchange = () => applyFilter(current ? current.index : null);
 $("candidate-tab").onclick = () => changeQueue("candidate");
 $("file-tab").onclick = () => changeQueue("file");
 buildFields();
+if (readOnly) {
+  $("readonly-banner").hidden = false;
+  $("pending-only").checked = false;
+  $("pending-only").closest("label").hidden = true;
+  enforceReadOnly();
+}
 updateSignalView(signalView, false);
 $("filtered-view").onclick = () => updateSignalView("filtered");
 $("raw-view").onclick = () => updateSignalView("raw");

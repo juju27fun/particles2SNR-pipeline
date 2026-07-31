@@ -35,6 +35,11 @@ generation history is retained in
 [`P0_C1_Particles2SNR_F_PIPELINE.md`](P0_C1_Particles2SNR_F_PIPELINE.md); paths
 and counts inside historical sections may refer to pre-registry candidates.
 
+The two registered Wave8-like long-sequence derivatives, their distinct
+capability/deployment estimands, exact counts, construction, and uncertainty
+rules are documented in
+[`DATASET_CARD_WAVE8LIKE_C1.md`](DATASET_CARD_WAVE8LIKE_C1.md).
+
 The registered multi-acquisition ingestion and sealed OOD procedure for the
 yeast representation study is in
 [`YEAST_ACQUISITION_INTAKE.md`](YEAST_ACQUISITION_INTAKE.md).

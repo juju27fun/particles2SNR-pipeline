@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Dataset Provenance"
+  short_description: "Build and register immutable datasets safely"
+  default_prompt: "Use $manage-dataset-provenance to build or audit a registered dataset with complete provenance."

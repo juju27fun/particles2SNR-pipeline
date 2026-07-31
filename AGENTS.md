@@ -1,13 +1,13 @@
-# particles2SNR Pipeline agent context
+# particles2SNR data and provenance contract
 
-- This repository owns dataset generation, signal processing, and dataset
-  provenance for the parent workspace; obey the root `AGENTS.md` as well.
-- Put reusable logic in `particles2snr/` and thin CLIs in the grouped `scripts/`
-  directories. Do not restore flat root scripts.
-- Write generated data to the workspace dataset roots and register it with a
-  checksum manifest. Never mutate a registered version in place.
-- Write reports and run payloads to `artifacts/particles2SNR-pipeline/` with a
-  `run.json`; do not create local `data/`, `output/`, `results/`, or a venv.
-- Import shared `p0` utilities from the installed package, not by path.
-- Verify with `.venv/bin/python -m pytest -q particles2SNR-pipeline/tests` from
-  the workspace root.
+- If `../workspace-repos.lock` exists, read `../AGENTS.md` first; Git roots do
+  not inherit parent instructions.
+- This repo alone owns dataset generation, signal processing, and provenance.
+  Put reusable logic in `particles2snr/` and thin CLIs in grouped `scripts/`;
+  import installed `p0`, never restore flat scripts or inject paths.
+- Write data only to workspace `datasets/{interim,processed}`, register it with
+  checksums, and never mutate a registered version.
+- Write manifested reports and runs under `artifacts/particles2SNR-pipeline/`.
+  Do not create local data/output/result trees, caches, or environments.
+- Verify from the workspace root with
+  `.venv/bin/python -m pytest -q particles2SNR-pipeline/tests`.

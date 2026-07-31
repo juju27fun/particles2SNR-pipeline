@@ -141,7 +141,12 @@ def process_signal(file_path: str, folder_name: str, config: Config,
     # Load and process signal
     signal_np = load_data(file_path)
     result, all_particles, _, _, _, filtered_signal_np, noise_floor = run_pipeline(
-        signal_np, args, config, device, verbose=False
+        signal_np,
+        args,
+        config,
+        device,
+        verbose=False,
+        pre_filtered=bool(getattr(args, "pre_filtered", False)),
     )
     
     if 'error' in result:

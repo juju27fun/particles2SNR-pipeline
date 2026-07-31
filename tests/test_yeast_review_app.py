@@ -5,6 +5,7 @@ import json
 import threading
 from pathlib import Path
 from http.server import ThreadingHTTPServer
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import numpy as np
@@ -307,3 +308,40 @@ def test_review_http_handler_saves_reviewer(tmp_path: Path) -> None:
         thread.join(timeout=2.0)
     assert saved["complete"] is True
     assert reloaded["row"]["reviewer"] == "reviewer-http"
+
+
+def test_review_http_handler_read_only_shows_annotations_and_refuses_save(
+    tmp_path: Path,
+) -> None:
+    dataset, review = _review_fixture(tmp_path)
+    workspace = YeastReviewWorkspace(dataset, review)
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        build_handler(workspace, read_only=True),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    request = Request(
+        f"{base}/api/item",
+        data=json.dumps(
+            {"queue": "candidate", "index": 0, "values": {}}
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(f"{base}/") as response:
+            page = response.read().decode("utf-8")
+        with pytest.raises(HTTPError) as error:
+            urlopen(request)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+    assert "const readOnly = true;" in page
+    assert "Inspection en lecture seule" in page
+    assert '$("form").hidden = true' not in page
+    assert 'input.disabled = true' in page
+    assert error.value.code == 405
+    assert not (review / "annotation_audit.jsonl").exists()

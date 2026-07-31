@@ -10,8 +10,375 @@ import json
 import os
 
 import numpy as np
+from scipy.signal import butter, filtfilt
 
 from particles2snr.detect_saturation import detect_saturation
+
+
+SATURATION_REPAIR_METHODS = {
+    "direct",
+    "cosine-pre-filter",
+    "cosine-filtered-domain",
+}
+
+
+def butter_bandpass_filter(signal, fs=2_000_000, fmin=7000, fmax=80000,
+                           order=4):
+    """Apply the same zero-phase Butterworth used by the dual-clean generator."""
+    arr = np.asarray(signal)
+    if arr.ndim != 1:
+        arr = np.squeeze(arr)
+    if arr.ndim != 1:
+        raise ValueError(f"Expected a 1D signal, got shape {arr.shape}")
+    nyquist = float(fs) / 2.0
+    low = max(0.001, min(float(fmin) / nyquist, 0.99))
+    high = max(low + 0.001, min(float(fmax) / nyquist, 0.99))
+    b, a = butter(int(order), [low, high], btype="band")
+    return filtfilt(b, a, arr).astype(arr.dtype, copy=False)
+
+
+def cosine_blend_replacement(signal, replacement, *, core_interval,
+                             expanded_interval):
+    """Blend one replacement carrier into a signal across explicit guards.
+
+    ``replacement`` covers the entire expanded interval. The core is copied
+    from it, while raised-cosine transitions blend the original and
+    replacement values in the left and right guards.
+    """
+    source = np.asarray(signal)
+    carrier = np.asarray(replacement)
+    if source.ndim != 1 or carrier.ndim != 1:
+        raise ValueError("signal and replacement must be one-dimensional")
+    core_start, core_end = (int(value) for value in core_interval)
+    expanded_start, expanded_end = (int(value) for value in expanded_interval)
+    if not (
+        0 <= expanded_start <= core_start < core_end <= expanded_end <= len(source)
+    ):
+        raise ValueError("core and expanded intervals are inconsistent")
+    if len(carrier) != expanded_end - expanded_start:
+        raise ValueError("replacement length must match the expanded interval")
+
+    output = source.copy()
+    left_guard = core_start - expanded_start
+    right_guard = expanded_end - core_end
+    core_left = core_start - expanded_start
+    core_right = core_end - expanded_start
+
+    if left_guard:
+        phase = (
+            np.linspace(0.0, np.pi, left_guard, endpoint=True)
+            if left_guard > 1
+            else np.asarray([np.pi / 2.0])
+        )
+        replacement_weight = 0.5 - 0.5 * np.cos(phase)
+        original = source[expanded_start:core_start]
+        replacement_left = carrier[:left_guard]
+        output[expanded_start:core_start] = (
+            (1.0 - replacement_weight) * original
+            + replacement_weight * replacement_left
+        )
+    output[core_start:core_end] = carrier[core_left:core_right]
+    if right_guard:
+        phase = (
+            np.linspace(0.0, np.pi, right_guard, endpoint=True)
+            if right_guard > 1
+            else np.asarray([np.pi / 2.0])
+        )
+        replacement_weight = 0.5 + 0.5 * np.cos(phase)
+        original = source[core_end:expanded_end]
+        replacement_right = carrier[core_right:]
+        output[core_end:expanded_end] = (
+            replacement_weight * replacement_right
+            + (1.0 - replacement_weight) * original
+        )
+    return output.astype(source.dtype, copy=False)
+
+
+def repair_saturation_intervals_pre_filter(
+    signal,
+    replacements,
+    *,
+    fs=2_000_000,
+    fmin=7000,
+    fmax=80000,
+    order=4,
+):
+    """Repair disjoint saturation regions before one canonical bandpass pass."""
+    source = np.asarray(signal)
+    rows = sorted(
+        list(replacements),
+        key=lambda row: tuple(int(value) for value in row["expanded_interval"]),
+    )
+    previous_end = -1
+    clean = source.copy()
+    regions = []
+    for row in rows:
+        core_interval = tuple(int(value) for value in row["core_interval"])
+        expanded_interval = tuple(
+            int(value) for value in row["expanded_interval"]
+        )
+        if expanded_interval[0] < previous_end:
+            raise ValueError("expanded saturation intervals must be disjoint")
+        previous_end = expanded_interval[1]
+        clean = cosine_blend_replacement(
+            clean,
+            np.asarray(row["replacement"]),
+            core_interval=core_interval,
+            expanded_interval=expanded_interval,
+        )
+        regions.append(
+            {
+                "core_interval": list(core_interval),
+                "expanded_interval": list(expanded_interval),
+            }
+        )
+    filtered = butter_bandpass_filter(
+        clean, fs=fs, fmin=fmin, fmax=fmax, order=order
+    )
+    return {
+        "method": "cosine-pre-filter",
+        "clean_signal": clean.astype(source.dtype, copy=False),
+        "filtered_signal": filtered.astype(source.dtype, copy=False),
+        "regions": regions,
+    }
+
+
+def forward_backward_filter_response_radius(
+    *,
+    signal_length=16_384,
+    fs=2_000_000,
+    fmin=7000,
+    fmax=80000,
+    order=4,
+    mass_fraction=0.999,
+):
+    """Return the symmetric radius containing a fixed L1 response mass.
+
+    The centered impulse is filtered with the exact zero-phase filter used by
+    the generator.  This produces a filter-derived boundary guard rather than
+    calibrating one on reviewed annotations.
+    """
+    length = int(signal_length)
+    fraction = float(mass_fraction)
+    if length < 3:
+        raise ValueError("signal_length must be at least 3")
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError("mass_fraction must be in (0, 1]")
+    center = length // 2
+    impulse = np.zeros(length, dtype=np.float64)
+    impulse[center] = 1.0
+    response = np.abs(
+        butter_bandpass_filter(
+            impulse, fs=fs, fmin=fmin, fmax=fmax, order=order
+        )
+    )
+    total = float(np.sum(response))
+    if not np.isfinite(total) or total <= 0.0:
+        raise RuntimeError("invalid forward-backward filter impulse response")
+    for radius in range(max(center, length - center)):
+        left = max(0, center - radius)
+        right = min(length, center + radius + 1)
+        if float(np.sum(response[left:right])) / total >= fraction:
+            return radius
+    return length - 1
+
+
+def boundary_proposal_decision(
+    *,
+    center_sample,
+    expanded_intervals,
+    response_radius,
+    clean_local_peak_z,
+    clean_local_min_z=1.5,
+    clean_peak_center_sample=None,
+    clean_peak_max_alignment_samples=None,
+):
+    """Apply the filter-derived boundary veto to one detector proposal."""
+    boundaries = [
+        int(boundary)
+        for interval in expanded_intervals
+        for boundary in interval
+    ]
+    distance = (
+        min(abs(float(center_sample) - boundary) for boundary in boundaries)
+        if boundaries
+        else None
+    )
+    within_guard = distance is not None and distance <= int(response_radius)
+    try:
+        clean_amplitude_supported = (
+            np.isfinite(float(clean_local_peak_z))
+            and float(clean_local_peak_z) >= float(clean_local_min_z)
+        )
+    except (TypeError, ValueError):
+        clean_amplitude_supported = False
+    if clean_peak_max_alignment_samples is None:
+        clean_alignment_samples = None
+        clean_aligned = True
+    else:
+        try:
+            clean_alignment_samples = abs(
+                float(clean_peak_center_sample) - float(center_sample)
+            )
+            clean_aligned = (
+                np.isfinite(clean_alignment_samples)
+                and clean_alignment_samples
+                <= float(clean_peak_max_alignment_samples)
+            )
+        except (TypeError, ValueError):
+            clean_alignment_samples = None
+            clean_aligned = False
+    clean_supported = clean_amplitude_supported and clean_aligned
+    keep = not within_guard or clean_supported
+    return {
+        "keep": bool(keep),
+        "within_filter_response_guard": bool(within_guard),
+        "boundary_distance_samples": distance,
+        "clean_amplitude_supported": bool(clean_amplitude_supported),
+        "clean_peak_alignment_samples": clean_alignment_samples,
+        "clean_peak_aligned": bool(clean_aligned),
+        "clean_supported": bool(clean_supported),
+        "reason": (
+            "kept_outside_boundary_guard"
+            if not within_guard
+            else (
+                "kept_with_clean_support"
+                if clean_supported
+                else "rejected_boundary_without_clean_support"
+            )
+        ),
+    }
+
+
+def repair_saturation_interval(signal, replacement, *, core_interval,
+                               expanded_interval, method,
+                               fs=2_000_000, fmin=7000, fmax=80000,
+                               order=4):
+    """Return clean and filtered views for one reproducible saturation repair.
+
+    The filtered-domain method still returns a cosine-repaired non-bandpassed
+    signal for dual-clean peak evidence. Only its model-facing filtered output
+    is assembled after filtering the raw signal and carrier separately.
+    """
+    if method not in SATURATION_REPAIR_METHODS:
+        raise ValueError(f"Unknown saturation repair method: {method}")
+    source = np.asarray(signal)
+    carrier = np.asarray(replacement)
+    expanded_start, expanded_end = (int(value) for value in expanded_interval)
+    if method == "direct":
+        clean = source.copy()
+        if len(carrier) != expanded_end - expanded_start:
+            raise ValueError("replacement length must match the expanded interval")
+        clean[expanded_start:expanded_end] = carrier
+        filtered = butter_bandpass_filter(
+            clean, fs=fs, fmin=fmin, fmax=fmax, order=order
+        )
+    else:
+        clean = cosine_blend_replacement(
+            source,
+            carrier,
+            core_interval=core_interval,
+            expanded_interval=expanded_interval,
+        )
+        if method == "cosine-pre-filter":
+            filtered = butter_bandpass_filter(
+                clean, fs=fs, fmin=fmin, fmax=fmax, order=order
+            )
+        else:
+            filtered_source = butter_bandpass_filter(
+                source, fs=fs, fmin=fmin, fmax=fmax, order=order
+            )
+            filtered_carrier = butter_bandpass_filter(
+                carrier, fs=fs, fmin=fmin, fmax=fmax, order=order
+            )
+            filtered = cosine_blend_replacement(
+                filtered_source,
+                filtered_carrier,
+                core_interval=core_interval,
+                expanded_interval=expanded_interval,
+            )
+    return {
+        "method": method,
+        "clean_signal": clean.astype(source.dtype, copy=False),
+        "filtered_signal": filtered.astype(source.dtype, copy=False),
+        "core_interval": [int(value) for value in core_interval],
+        "expanded_interval": [int(value) for value in expanded_interval],
+    }
+
+
+def repair_saturation_intervals_filtered_domain(
+    signal,
+    replacements,
+    *,
+    fs=2_000_000,
+    fmin=7000,
+    fmax=80000,
+    order=4,
+):
+    """Repair several disjoint saturation regions with the approved method B.
+
+    ``replacements`` is an iterable of mappings with ``core_interval``,
+    ``expanded_interval`` and ``replacement`` entries.  The raw trace is
+    filtered once, each carrier is filtered independently, and raised-cosine
+    raccords are then applied in the filtered domain.  This prevents one
+    repaired interval from changing the filtering context of another one.
+    """
+    source = np.asarray(signal)
+    rows = list(replacements)
+    ordered = sorted(
+        rows,
+        key=lambda row: tuple(int(value) for value in row["expanded_interval"]),
+    )
+    previous_end = -1
+    for row in ordered:
+        expanded_start, expanded_end = (
+            int(value) for value in row["expanded_interval"]
+        )
+        if expanded_start < previous_end:
+            raise ValueError("expanded saturation intervals must be disjoint")
+        previous_end = expanded_end
+
+    filtered = butter_bandpass_filter(
+        source, fs=fs, fmin=fmin, fmax=fmax, order=order
+    )
+    clean = source.copy()
+    for row in ordered:
+        carrier = np.asarray(row["replacement"])
+        core_interval = tuple(int(value) for value in row["core_interval"])
+        expanded_interval = tuple(
+            int(value) for value in row["expanded_interval"]
+        )
+        clean = cosine_blend_replacement(
+            clean,
+            carrier,
+            core_interval=core_interval,
+            expanded_interval=expanded_interval,
+        )
+        filtered_carrier = butter_bandpass_filter(
+            carrier, fs=fs, fmin=fmin, fmax=fmax, order=order
+        )
+        filtered = cosine_blend_replacement(
+            filtered,
+            filtered_carrier,
+            core_interval=core_interval,
+            expanded_interval=expanded_interval,
+        )
+    return {
+        "method": "cosine-filtered-domain",
+        "clean_signal": clean.astype(source.dtype, copy=False),
+        "filtered_signal": filtered.astype(source.dtype, copy=False),
+        "regions": [
+            {
+                "core_interval": [
+                    int(value) for value in row["core_interval"]
+                ],
+                "expanded_interval": [
+                    int(value) for value in row["expanded_interval"]
+                ],
+            }
+            for row in ordered
+        ],
+    }
 
 
 def merge_intervals(intervals, signal_len):
