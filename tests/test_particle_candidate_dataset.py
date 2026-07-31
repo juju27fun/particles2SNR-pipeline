@@ -308,5 +308,6 @@ def test_cli_writes_portable_manifested_run(tmp_path: Path) -> None:
     )
     run = json.loads((run_output / "run.json").read_text(encoding="utf-8"))
     assert run["status"] == "complete"
+    assert run["command"] == "scripts/generation/build_particle_mad_candidate_dataset.py"
     assert run["dataset_path"] == "datasets/interim/particle-mad/v1"
     assert str(tmp_path) not in json.dumps(run)

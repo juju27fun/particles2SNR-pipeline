@@ -75,6 +75,7 @@ def main() -> None:
             "schema_version": 1,
             "run_id": args.run_id,
             "project": "particles2SNR-pipeline",
+            "command": "scripts/generation/build_particle_mad_candidate_dataset.py",
             "status": "complete",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "dataset": args.dataset_id,
