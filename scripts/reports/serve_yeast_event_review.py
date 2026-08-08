@@ -15,6 +15,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--review-dir", type=Path, required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Disable all annotation writes and hide the editing form.",
+    )
     return parser
 
 
@@ -25,6 +30,7 @@ def main() -> None:
         args.review_dir,
         host=args.host,
         port=args.port,
+        read_only=args.read_only,
     )
 
 

@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from collections import Counter
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,16 @@ from particles2snr.particle_events import ParticleDetectionConfig, config_finger
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts/generation/build_particle_mad_candidate_dataset.py"
+
+
+def _cli_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("build_particle_mad_candidate_dataset", CLI)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _rows() -> list[dict[str, str]]:
@@ -83,6 +94,22 @@ def test_population_assignment_is_deterministic_and_stratified() -> None:
         "legacy_exploration": 3,
     }
     assert all(row["population_role"] != "mad_holdout" for row in first if row["split"] == "val")
+
+
+def test_cli_loads_hash_bound_frozen_config_wrapper(tmp_path: Path) -> None:
+    module = _cli_module()
+    config = ParticleDetectionConfig(deblend_enabled=True)
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"config": asdict(config), "config_sha256": config_fingerprint(config)}),
+        encoding="utf-8",
+    )
+    assert module._load_config(path) == config
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["config_sha256"] = "0" * 64
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="fingerprint"):
+        module._load_config(path)
 
 
 def test_holdout_requires_matching_completed_authorization(tmp_path: Path) -> None:

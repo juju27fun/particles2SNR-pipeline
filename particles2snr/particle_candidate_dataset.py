@@ -104,29 +104,9 @@ def assign_population_roles(
     return sorted(output, key=lambda row: row["filename"])
 
 
-def validate_holdout_authorization(
-    authorization_path: Path, *, config_sha256: str
-) -> None:
-    if authorization_path.name != "run.json":
-        raise PermissionError("holdout authorization must be a reviewed run.json")
-    payload = json.loads(authorization_path.read_text(encoding="utf-8"))
-    if payload.get("status") != "visual_review_complete":
-        raise PermissionError("holdout authorization is not a completed visual review")
-    checkpoint = payload.get("visual_checkpoint", {})
-    if checkpoint.get("approved") is not True or checkpoint.get("next_stage_blocked") is not False:
-        raise PermissionError("holdout authorization gate is not open")
-    spec_path = authorization_path.parent / "checkpoint_spec.json"
-    spec = (
-        json.loads(spec_path.read_text(encoding="utf-8"))
-        if spec_path.is_file()
-        else {}
-    )
-    frozen_config = payload.get("frozen_config_sha256") or spec.get(
-        "frozen_config_sha256"
-    )
-    if frozen_config != config_sha256:
-        raise PermissionError("holdout authorization does not match detector config")
-    run_dir = authorization_path.parent
+def _validate_review_receipt(
+    run_dir: Path, payload: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
     receipt_path = run_dir / "review" / "receipt.json"
     if not receipt_path.is_file():
         raise PermissionError("holdout authorization has no verified review receipt")
@@ -151,12 +131,15 @@ def validate_holdout_authorization(
         == len(decisions.get("decisions", {})),
         "decisions_file": receipt.get("decisions_file") == "review/decisions.json",
         "contract_file": receipt.get("contract_file") == "review_contract.json",
-        "decisions_sha256": receipt.get("decisions_sha256")
-        == _sha256(decisions_path),
+        "decisions_sha256": receipt.get("decisions_sha256") == _sha256(decisions_path),
         "contract_sha256": receipt.get("contract_sha256") == _sha256(contract_path),
     }
     primary_assets = receipt.get("primary_assets", [])
-    if primary_assets != contract.get("primary_assets", []):
+    contract_assets = [
+        {"path": item.get("path"), "sha256": item.get("sha256")}
+        for item in contract.get("primary_assets", [])
+    ]
+    if primary_assets != contract_assets:
         checks["primary_assets"] = False
     else:
         checks["primary_assets"] = all(
@@ -169,9 +152,90 @@ def validate_holdout_authorization(
         )
     failed = sorted(name for name, valid in checks.items() if not valid)
     if failed:
-        raise PermissionError(
-            f"holdout authorization review receipt mismatch: {failed}"
+        raise PermissionError(f"holdout authorization review receipt mismatch: {failed}")
+    return receipt, decisions
+
+
+def _validate_visual_gate(run_dir: Path, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    if payload.get("status") != "visual_review_complete":
+        raise PermissionError("holdout authorization is not a completed visual review")
+    checkpoint = payload.get("visual_checkpoint", {})
+    if checkpoint.get("approved") is not True or checkpoint.get("next_stage_blocked") is not False:
+        raise PermissionError("holdout authorization gate is not open")
+    return _validate_review_receipt(run_dir, payload)
+
+
+def validate_holdout_authorization(
+    authorization_path: Path, *, config_sha256: str
+) -> None:
+    if authorization_path.name != "run.json":
+        raise PermissionError("holdout authorization must be a run.json")
+    payload = json.loads(authorization_path.read_text(encoding="utf-8"))
+    run_dir = authorization_path.parent
+
+    if payload.get("kind") == "particle-mad-config-freeze":
+        if payload.get("status") != "complete":
+            raise PermissionError("holdout configuration freeze is incomplete")
+        if payload.get("frozen_config_sha256") != config_sha256:
+            raise PermissionError("holdout authorization does not match detector config")
+        manifest_path = run_dir / "freeze_manifest.json"
+        config_path = run_dir / "detector_config.json"
+        if (
+            not manifest_path.is_file()
+            or not config_path.is_file()
+            or payload.get("freeze_manifest_sha256") != _sha256(manifest_path)
+            or payload.get("detector_config_file_sha256") != _sha256(config_path)
+        ):
+            raise PermissionError("holdout configuration freeze hash mismatch")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+        if (
+            manifest.get("run_id") != payload.get("run_id")
+            or manifest.get("config_sha256") != config_sha256
+            or config_payload.get("config_sha256") != config_sha256
+            or manifest.get("sealed_holdout_accessed") is not False
+        ):
+            raise PermissionError("holdout configuration freeze contract mismatch")
+        artifacts_root = next(
+            (parent for parent in run_dir.parents if parent.name == "artifacts"),
+            None,
         )
+        if artifacts_root is None:
+            raise PermissionError("holdout configuration freeze is outside artifacts")
+        result_run_id = str(manifest.get("approval", {}).get("result_run_id", ""))
+        result_dir = artifacts_root / "particles2SNR-pipeline" / "reviews" / result_run_id
+        result_payload = json.loads((result_dir / "run.json").read_text(encoding="utf-8"))
+        receipt, decisions = _validate_visual_gate(result_dir, result_payload)
+        approval = manifest["approval"]
+        decision_values = {
+            item.get("decision") for item in decisions.get("decisions", {}).values()
+        }
+        if (
+            approval.get("receipt_sha256") != _sha256(result_dir / "review/receipt.json")
+            or approval.get("decisions_sha256") != receipt.get("decisions_sha256")
+            or approval.get("decision") not in {"supported", "conditionally_supported"}
+            or approval.get("decision") not in decision_values
+        ):
+            raise PermissionError("holdout freeze approval chain mismatch")
+        return
+
+    if payload.get("status") != "visual_review_complete":
+        raise PermissionError("holdout authorization is not a completed visual review")
+    checkpoint = payload.get("visual_checkpoint", {})
+    if checkpoint.get("approved") is not True or checkpoint.get("next_stage_blocked") is not False:
+        raise PermissionError("holdout authorization gate is not open")
+    spec_path = run_dir / "checkpoint_spec.json"
+    spec = (
+        json.loads(spec_path.read_text(encoding="utf-8"))
+        if spec_path.is_file()
+        else {}
+    )
+    frozen_config = payload.get("frozen_config_sha256") or spec.get(
+        "frozen_config_sha256"
+    )
+    if frozen_config != config_sha256:
+        raise PermissionError("holdout authorization does not match detector config")
+    _validate_review_receipt(run_dir, payload)
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:

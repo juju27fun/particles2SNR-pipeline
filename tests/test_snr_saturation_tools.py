@@ -26,11 +26,17 @@ for path in (PARTICLES2SNR, ROOT):
         sys.path.insert(0, path)
 
 from particles2snr.saturation_cleaning import (  # noqa: E402
+    boundary_proposal_decision,
     clean_signal_non_destructive,
+    cosine_blend_replacement,
     detect_unsafe_intervals,
     drop_overlapping_events,
     expand_intervals,
+    forward_backward_filter_response_radius,
     merge_intervals,
+    repair_saturation_interval,
+    repair_saturation_intervals_filtered_domain,
+    repair_saturation_intervals_pre_filter,
 )
 
 
@@ -305,8 +311,349 @@ class SaturationCleaningTests(unittest.TestCase):
         np.testing.assert_array_equal(replaced[:3], noise[0])
         self.assertEqual(actions[0]["action"], "replaced_with_noise")
 
+    def test_cosine_repair_preserves_source_and_interval_geometry(self):
+        signal = np.linspace(-1.0, 1.0, 200, dtype=np.float64)
+        source_copy = signal.copy()
+        replacement = np.sin(np.linspace(0, 6 * np.pi, 100))
+        repaired = cosine_blend_replacement(
+            signal,
+            replacement,
+            core_interval=(80, 120),
+            expanded_interval=(50, 150),
+        )
+        np.testing.assert_array_equal(signal, source_copy)
+        np.testing.assert_array_equal(repaired[:50], signal[:50])
+        np.testing.assert_array_equal(repaired[150:], signal[150:])
+        np.testing.assert_array_equal(repaired[80:120], replacement[30:70])
+        self.assertEqual(repaired.shape, signal.shape)
+
+    def test_repair_methods_are_deterministic_and_reduce_direct_splice(self):
+        fs = 20_000.0
+        time = np.arange(2000) / fs
+        signal = np.sin(2 * np.pi * 500 * time)
+        replacement = 3.0 + 0.1 * np.sin(
+            2 * np.pi * 700 * np.arange(800) / fs
+        )
+        direct = repair_saturation_interval(
+            signal,
+            replacement,
+            core_interval=(800, 1200),
+            expanded_interval=(600, 1400),
+            method="direct",
+            fs=fs,
+            fmin=100,
+            fmax=2000,
+            order=2,
+        )
+        cosine = repair_saturation_interval(
+            signal,
+            replacement,
+            core_interval=(800, 1200),
+            expanded_interval=(600, 1400),
+            method="cosine-pre-filter",
+            fs=fs,
+            fmin=100,
+            fmax=2000,
+            order=2,
+        )
+        repeated = repair_saturation_interval(
+            signal,
+            replacement,
+            core_interval=(800, 1200),
+            expanded_interval=(600, 1400),
+            method="cosine-pre-filter",
+            fs=fs,
+            fmin=100,
+            fmax=2000,
+            order=2,
+        )
+        np.testing.assert_array_equal(
+            cosine["filtered_signal"], repeated["filtered_signal"]
+        )
+        direct_step = abs(
+            direct["clean_signal"][600] - direct["clean_signal"][599]
+        )
+        cosine_step = abs(
+            cosine["clean_signal"][600] - cosine["clean_signal"][599]
+        )
+        self.assertLess(cosine_step, direct_step)
+
+    def test_cosine_repair_supports_signal_edge_intervals(self):
+        signal = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+        replacement = np.linspace(-0.1, 0.1, 120, dtype=np.float32)
+        repaired = cosine_blend_replacement(
+            signal,
+            replacement,
+            core_interval=(0, 80),
+            expanded_interval=(0, 120),
+        )
+        np.testing.assert_array_equal(repaired[:80], replacement[:80])
+        np.testing.assert_array_equal(repaired[120:], signal[120:])
+        self.assertEqual(repaired.dtype, signal.dtype)
+
+    def test_filtered_domain_multi_repair_is_deterministic_and_disjoint(self):
+        fs = 20_000.0
+        time = np.arange(4000) / fs
+        signal = np.sin(2 * np.pi * 500 * time).astype(np.float32)
+        source_copy = signal.copy()
+        replacements = [
+            {
+                "core_interval": (700, 1100),
+                "expanded_interval": (500, 1300),
+                "replacement": np.sin(
+                    2 * np.pi * 650 * np.arange(800) / fs
+                ).astype(np.float32),
+            },
+            {
+                "core_interval": (2700, 3100),
+                "expanded_interval": (2500, 3300),
+                "replacement": np.sin(
+                    2 * np.pi * 750 * np.arange(800) / fs
+                ).astype(np.float32),
+            },
+        ]
+        first = repair_saturation_intervals_filtered_domain(
+            signal,
+            replacements,
+            fs=fs,
+            fmin=100,
+            fmax=2000,
+            order=2,
+        )
+        second = repair_saturation_intervals_filtered_domain(
+            signal,
+            list(reversed(replacements)),
+            fs=fs,
+            fmin=100,
+            fmax=2000,
+            order=2,
+        )
+        np.testing.assert_array_equal(
+            first["filtered_signal"], second["filtered_signal"]
+        )
+        np.testing.assert_array_equal(signal, source_copy)
+        self.assertEqual(len(first["regions"]), 2)
+        with self.assertRaisesRegex(ValueError, "disjoint"):
+            repair_saturation_intervals_filtered_domain(
+                signal,
+                [
+                    replacements[0],
+                    {
+                        **replacements[1],
+                        "expanded_interval": (1200, 3300),
+                        "core_interval": (1400, 3100),
+                        "replacement": np.zeros(2100, dtype=np.float32),
+                    },
+                ],
+                fs=fs,
+                fmin=100,
+                fmax=2000,
+                order=2,
+            )
+
+    def test_pre_filter_multi_repair_filters_once_and_is_order_independent(self):
+        fs = 20_000.0
+        time = np.arange(4000) / fs
+        signal = np.sin(2 * np.pi * 500 * time).astype(np.float32)
+        replacements = [
+            {
+                "core_interval": (700, 1100),
+                "expanded_interval": (500, 1300),
+                "replacement": np.sin(
+                    2 * np.pi * 650 * np.arange(800) / fs
+                ).astype(np.float32),
+            },
+            {
+                "core_interval": (2700, 3100),
+                "expanded_interval": (2500, 3300),
+                "replacement": np.sin(
+                    2 * np.pi * 750 * np.arange(800) / fs
+                ).astype(np.float32),
+            },
+        ]
+        first = repair_saturation_intervals_pre_filter(
+            signal,
+            replacements,
+            fs=fs,
+            fmin=100,
+            fmax=2000,
+            order=2,
+        )
+        second = repair_saturation_intervals_pre_filter(
+            signal,
+            list(reversed(replacements)),
+            fs=fs,
+            fmin=100,
+            fmax=2000,
+            order=2,
+        )
+        np.testing.assert_array_equal(
+            first["clean_signal"], second["clean_signal"]
+        )
+        np.testing.assert_array_equal(
+            first["filtered_signal"], second["filtered_signal"]
+        )
+        self.assertEqual(first["method"], "cosine-pre-filter")
+
+    def test_cosine_raccord_hits_exact_guard_endpoints(self):
+        signal = np.linspace(-2.0, 2.0, 40)
+        replacement = np.linspace(5.0, 7.0, 20)
+        repaired = cosine_blend_replacement(
+            signal,
+            replacement,
+            core_interval=(15, 25),
+            expanded_interval=(10, 30),
+        )
+        self.assertEqual(repaired[10], signal[10])
+        self.assertEqual(repaired[14], replacement[4])
+        self.assertEqual(repaired[25], replacement[15])
+        self.assertEqual(repaired[29], signal[29])
+
+    def test_filter_radius_and_boundary_veto_are_filter_derived(self):
+        radius = forward_backward_filter_response_radius(
+            signal_length=4096,
+            fs=20_000,
+            fmin=100,
+            fmax=2000,
+            order=2,
+            mass_fraction=0.999,
+        )
+        self.assertGreater(radius, 0)
+        rejected = boundary_proposal_decision(
+            center_sample=100 + radius,
+            expanded_intervals=[(100, 300)],
+            response_radius=radius,
+            clean_local_peak_z=1.49,
+        )
+        self.assertFalse(rejected["keep"])
+        self.assertEqual(
+            rejected["reason"], "rejected_boundary_without_clean_support"
+        )
+        rescued = boundary_proposal_decision(
+            center_sample=100,
+            expanded_intervals=[(100, 300)],
+            response_radius=radius,
+            clean_local_peak_z=1.5,
+        )
+        self.assertTrue(rescued["keep"])
+        self.assertTrue(rescued["clean_supported"])
+        misaligned = boundary_proposal_decision(
+            center_sample=100,
+            expanded_intervals=[(100, 300)],
+            response_radius=radius,
+            clean_local_peak_z=5.0,
+            clean_peak_center_sample=500,
+            clean_peak_max_alignment_samples=360,
+        )
+        self.assertFalse(misaligned["keep"])
+        self.assertFalse(misaligned["clean_peak_aligned"])
+        outside = boundary_proposal_decision(
+            center_sample=100 + radius + 1,
+            expanded_intervals=[(100, 100 + 3 * radius + 10)],
+            response_radius=radius,
+            clean_local_peak_z=None,
+        )
+        self.assertTrue(outside["keep"])
+
 
 class Particles2SNRDatasetGeneratorTests(unittest.TestCase):
+    def test_detector_receives_prefiltered_contract(self):
+        mod = load_module(
+            PARTICLES2SNR_GENERATOR,
+            "particles2SNR_dataset_generator_prefiltered_test",
+        )
+        observed = []
+        fake = types.SimpleNamespace(
+            load_all_data=lambda *_args: [("/tmp/sample.npy", "2um")],
+            get_config_for_folder=lambda _name: types.SimpleNamespace(
+                bandpass_lowcut=0.0,
+                bandpass_highcut=0.0,
+                bandpass_order=0,
+            ),
+            process_signal=lambda _path, _folder, _config, args, _index: (
+                observed.append(args.pre_filtered) or {"filename": "sample.npy"}
+            ),
+            export_results=lambda *_args, **_kwargs: None,
+        )
+        import particles2snr
+
+        previous = sys.modules.get("particles2snr.run_dataset")
+        previous_attribute = getattr(particles2snr, "run_dataset", None)
+        sys.modules["particles2snr.run_dataset"] = fake
+        particles2snr.run_dataset = fake
+        try:
+            mod.run_particles2SNR_split(
+                Path("/tmp"),
+                Path("/tmp"),
+                ("2um",),
+                "cpu",
+                False,
+                7000,
+                80000,
+                4,
+                pre_filtered=True,
+            )
+        finally:
+            if previous is None:
+                sys.modules.pop("particles2snr.run_dataset", None)
+            else:
+                sys.modules["particles2snr.run_dataset"] = previous
+            if previous_attribute is None:
+                delattr(particles2snr, "run_dataset")
+            else:
+                particles2snr.run_dataset = previous_attribute
+        self.assertEqual(observed, [True])
+
+    def test_fresh_low_snr_annotation_maps_to_unclear_class(self):
+        mod = load_module(
+            PARTICLES2SNR_GENERATOR,
+            "particles2SNR_dataset_generator_unclear_test",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            results = root / "results.json"
+            results.write_text(
+                json.dumps(
+                    {
+                        "signals": [
+                            {
+                                "filename": "sample.npy",
+                                "path": str(root / "sample.npy"),
+                                "class": "10um",
+                                "signal_length": 1000,
+                                "particles": [
+                                    {
+                                        "idx": 4,
+                                        "t0": 0.5,
+                                        "tau": 0.05,
+                                        "P0": 1.0,
+                                        "frequency": 20_000,
+                                        "snr_db": -12.0,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            data = mod.export_yolo_json(
+                results,
+                root / "data.json",
+                ("2um", "4um", "10um", "unclear"),
+                fs=1000.0,
+                min_passage_time_ms=None,
+                max_passage_time_ms=None,
+                merge_overlaps=False,
+                peak_evidence_filter=False,
+                yolo_width_filter=False,
+                resolve_boundary_crossings=False,
+                unclear_snr_threshold_db=-10.0,
+            )
+        annotation = data["data"][0]["annotations"][0]
+        self.assertEqual(annotation["class_id"], 3)
+        self.assertEqual(annotation["detector_annotation_id"], 4)
+
     def test_remove_long_zero_runs_keeps_two_zero_raccord(self):
         mod = load_module(PARTICLES2SNR_GENERATOR, "particles2SNR_dataset_generator_test")
         signal = np.asarray([1, 0, 0, 0, 0, 2, 0, 0, 3], dtype=np.float32)
@@ -512,6 +859,137 @@ class Particles2SNRDatasetGeneratorTests(unittest.TestCase):
             )
             self.assertEqual(len(data["data"][0]["annotations"]), 1)
             self.assertTrue(data["data"][0]["annotations"][0]["clean_peak_support"])
+
+    def test_export_yolo_json_dual_clean_can_explicitly_rescue_local_support(self):
+        mod = load_module(PARTICLES2SNR_GENERATOR, "particles2SNR_dataset_generator_dual_clean_rescue_test")
+        original_detector = mod.detect_peak_groups
+        mod.detect_peak_groups = lambda *args, **kwargs: (
+            [],
+            np.zeros(1000),
+            np.full(1000, 2.8),
+            0.0,
+            1.0,
+        )
+        try:
+            kept, dropped, _ = mod.annotate_clean_peak_support(
+                particles=[{
+                    "t0": 0.5,
+                    "tau": 0.05,
+                    "peak_z": 14.0,
+                    "frequency": 20000,
+                    "snr_db": 3.0,
+                }],
+                signal_values=np.zeros(1000),
+                signal_length=1000,
+                fs=1000.0,
+                envelope_window_ms=0.08,
+                min_z=4.0,
+                prominence_z=2.0,
+                min_separation_ms=0.18,
+                valley_ratio=0.55,
+                rescue_filtered_min_z=12.0,
+                rescue_clean_local_min_z=2.5,
+            )
+        finally:
+            mod.detect_peak_groups = original_detector
+
+        self.assertEqual(dropped, [])
+        self.assertFalse(kept[0]["clean_peak_support"])
+        self.assertTrue(kept[0]["clean_peak_rescued"])
+        self.assertEqual(
+            kept[0]["clean_peak_rescue_reason"],
+            "strong_filtered_moderate_clean_local",
+        )
+
+    def test_clean_peak_margin_assigns_one_group_to_only_one_particle(self):
+        mod = load_module(
+            PARTICLES2SNR_GENERATOR,
+            "particles2SNR_dataset_generator_clean_peak_margin_test",
+        )
+        original_detector = mod.detect_peak_groups
+        mod.detect_peak_groups = lambda *args, **kwargs: (
+            [{
+                "id": 7,
+                "peak_sample": 500,
+                "peak_z": 8.0,
+                "peaks": [500],
+            }],
+            np.zeros(1000),
+            np.full(1000, 1.5),
+            0.0,
+            1.0,
+        )
+        particles = [
+            {"t0": 0.490, "tau": 0.010, "peak_z": 12.0},
+            {"t0": 0.510, "tau": 0.010, "peak_z": 12.0},
+        ]
+        try:
+            historical, historical_drops, _ = mod.annotate_clean_peak_support(
+                particles=particles,
+                signal_values=np.zeros(1000),
+                signal_length=1000,
+                fs=1000.0,
+                envelope_window_ms=0.08,
+                min_z=4.0,
+                prominence_z=2.0,
+                min_separation_ms=0.18,
+                valley_ratio=0.55,
+            )
+            assigned, assigned_drops, _ = mod.annotate_clean_peak_support(
+                particles=particles,
+                signal_values=np.zeros(1000),
+                signal_length=1000,
+                fs=1000.0,
+                envelope_window_ms=0.08,
+                min_z=4.0,
+                prominence_z=2.0,
+                min_separation_ms=0.18,
+                valley_ratio=0.55,
+                association_margin_ms=1.0,
+            )
+        finally:
+            mod.detect_peak_groups = original_detector
+
+        self.assertEqual(len(historical), 2)
+        self.assertEqual(historical_drops, [])
+        self.assertEqual(len(assigned), 1)
+        self.assertEqual(len(assigned_drops), 1)
+        self.assertEqual(assigned[0]["clean_peak_group_id"], 7)
+
+    def test_clean_peak_margin_prefers_peak_inside_annotation(self):
+        from particles2snr.dual_clean import assign_peak_groups_one_to_one
+
+        assignments = assign_peak_groups_one_to_one(
+            [
+                (100.0, 120.0, 110.0),
+                (121.0, 141.0, 131.0),
+            ],
+            [{
+                "id": 3,
+                "peak_sample": 121.0,
+                "peak_z": 9.0,
+                "peaks": [121.0],
+            }],
+            margin_samples=1.0,
+        )
+
+        self.assertEqual(set(assignments), {1})
+        self.assertEqual(assignments[1]["id"], 3)
+
+    def test_export_yolo_json_rejects_partial_clean_peak_rescue_config(self):
+        mod = load_module(PARTICLES2SNR_GENERATOR, "particles2SNR_dataset_generator_partial_rescue_test")
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp_dir = Path(tmp_name)
+            results_path = tmp_dir / "dataset_results.json"
+            results_path.write_text('{"signals": []}')
+            with self.assertRaisesRegex(ValueError, "requires both"):
+                mod.export_yolo_json(
+                    results_path,
+                    tmp_dir / "data.json",
+                    ("2um",),
+                    fs=1000.0,
+                    clean_peak_rescue_filtered_min_z=12.0,
+                )
 
 
     def test_merge_overlapping_particles_keeps_best_snr(self):

@@ -405,7 +405,8 @@ def generate_pdf(signal: np.ndarray, particles: list, window_centers: list,
 
 
 def run_pipeline(signal_np: np.ndarray, args: argparse.Namespace, config: Config,
-                 device: torch.device, verbose: bool) -> tuple:
+                 device: torch.device, verbose: bool,
+                 pre_filtered: bool = False) -> tuple:
     """Run the FFT analysis pipeline on a signal and return JSON-serializable results."""
     fs = config.sampling_rate
     fft_len = config.fft_window_length
@@ -422,10 +423,14 @@ def run_pipeline(signal_np: np.ndarray, args: argparse.Namespace, config: Config
     # ── Load and preprocess signal ──────────────────────────────────────────
     t0_load = time.perf_counter()
     signal_len = len(signal_np)
-    filtered_signal_np = processor.bandpass(
-        signal_np,
-        config.bandpass_lowcut, config.bandpass_highcut,
-        config.bandpass_order, fs
+    filtered_signal_np = (
+        np.asarray(signal_np).copy()
+        if pre_filtered
+        else processor.bandpass(
+            signal_np,
+            config.bandpass_lowcut, config.bandpass_highcut,
+            config.bandpass_order, fs
+        )
     )
     signal = torch.from_numpy(filtered_signal_np.copy()).float().to(device)
     original_signal = signal.clone()

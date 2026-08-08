@@ -19,6 +19,10 @@ from typing import Iterable
 import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks
 
+from particles2snr.dual_clean import (
+    assign_peak_groups_one_to_one,
+    should_rescue_missing_clean_peak,
+)
 from particles2snr.repo_paths import RESULTS_RUNS
 
 from particles2snr.detect_saturation import (
@@ -26,6 +30,7 @@ from particles2snr.detect_saturation import (
     write_intervals_csv,
     write_summary_json,
 )
+from particles2snr.saturation_cleaning import boundary_proposal_decision
 from particles2snr.saturation_cleaning import (
     clean_signal_non_destructive,
     detect_unsafe_intervals,
@@ -38,6 +43,13 @@ DEFAULT_SPLITS = ("train", "test")
 DEFAULT_FS = 2_000_000.0
 DEFAULT_BANDPASS_FMIN = 7_000.0
 DEFAULT_BANDPASS_FMAX = 80_000.0
+
+
+def portable_path(path: str | Path) -> str:
+    """Serialize paths relative to the invocation workspace."""
+    return Path(
+        os.path.relpath(Path(path).resolve(), Path.cwd().resolve())
+    ).as_posix()
 DEFAULT_BANDPASS_ORDER = 4
 
 
@@ -222,8 +234,8 @@ def prepare_split_tree_from_class_sources(class_source_dirs: dict[str, Path],
             rows.append({
                 "class": class_name,
                 "split": split,
-                "source_path": str(source_path),
-                "staged_path": str(output_path),
+                "source_path": portable_path(source_path),
+                "staged_path": portable_path(output_path),
                 "action": action,
             })
     return rows
@@ -259,8 +271,8 @@ def clean_split(input_split_dir: Path, output_split_dir: Path,
 
         if not zero_actions:
             zero_manifest_rows.append({
-                "source_path": str(source_path),
-                "output_path": str(output_path),
+                "source_path": portable_path(source_path),
+                "output_path": portable_path(output_path),
                 "class": class_name,
                 "filename": source_path.name,
                 "interval_idx": "",
@@ -278,8 +290,8 @@ def clean_split(input_split_dir: Path, output_split_dir: Path,
         else:
             for action in zero_actions:
                 zero_manifest_rows.append({
-                    "source_path": str(source_path),
-                    "output_path": str(output_path),
+                    "source_path": portable_path(source_path),
+                    "output_path": portable_path(output_path),
                     "class": class_name,
                     "filename": source_path.name,
                     "source_length": int(np.asarray(signal).size),
@@ -308,8 +320,8 @@ def clean_split(input_split_dir: Path, output_split_dir: Path,
         for action in sat_actions:
             saturation_rows.append({
                 "split": split,
-                "source_path": str(source_path),
-                "output_path": str(output_path),
+                "source_path": portable_path(source_path),
+                "output_path": portable_path(output_path),
                 "class": class_name,
                 "filename": source_path.name,
                 "policy": args.saturation_policy,
@@ -336,9 +348,9 @@ def clean_split(input_split_dir: Path, output_split_dir: Path,
                 "split": split,
                 "class": class_name,
                 "filename": source_path.name,
-                "source_path": str(source_path),
-                "filtered_output_path": str(output_path),
-                "peak_evidence_clean_path": str(peak_evidence_path),
+                "source_path": portable_path(source_path),
+                "filtered_output_path": portable_path(output_path),
+                "peak_evidence_clean_path": portable_path(peak_evidence_path),
                 "action": "saturation_cleaned_no_bandpass",
             })
         if args.apply_bandpass_output:
@@ -354,8 +366,8 @@ def clean_split(input_split_dir: Path, output_split_dir: Path,
         if not sat_actions:
             saturation_rows.append({
                 "split": split,
-                "source_path": str(source_path),
-                "output_path": str(output_path),
+                "source_path": portable_path(source_path),
+                "output_path": portable_path(output_path),
                 "class": class_name,
                 "filename": source_path.name,
                 "policy": args.saturation_policy,
@@ -451,12 +463,17 @@ def run_particles2SNR_split(split_dir: Path, output_dir: Path,
                       class_names: tuple[str, ...], device: str,
                       verbose: bool, bandpass_fmin: float | None = None,
                       bandpass_fmax: float | None = None,
-                      bandpass_order: int | None = None) -> None:
+                      bandpass_order: int | None = None,
+                      pre_filtered: bool = False) -> None:
     # Import lazily so tests for pure cleaning/JSON helpers do not require torch.
-    import run_dataset
+    from particles2snr import run_dataset
 
     data_files = run_dataset.load_all_data(str(split_dir), list(class_names))
-    particles2SNR_args = SimpleNamespace(device=device, verbose=verbose)
+    particles2SNR_args = SimpleNamespace(
+        device=device,
+        verbose=verbose,
+        pre_filtered=bool(pre_filtered),
+    )
     results = []
     for signal_idx, (file_path, folder_name) in enumerate(data_files):
         config = run_dataset.get_config_for_folder(folder_name)
@@ -696,6 +713,9 @@ def particle_to_annotation(particle: dict, signal_length: int, fs: float,
     half_width = min(0.5, 2.5 * std)
     return {
         "id": int(ann_id),
+        "detector_annotation_id": (
+            int(particle["idx"]) if particle.get("idx") is not None else None
+        ),
         "class_id": int(class_id),
         "mean": float(mean),
         "std": float(std),
@@ -717,6 +737,8 @@ def particle_to_annotation(particle: dict, signal_length: int, fs: float,
         "clean_peak_z": particle.get("clean_peak_z"),
         "clean_peak_center_ms": particle.get("clean_peak_center_ms"),
         "clean_local_peak_z": particle.get("clean_local_peak_z"),
+        "clean_peak_rescued": particle.get("clean_peak_rescued", False),
+        "clean_peak_rescue_reason": particle.get("clean_peak_rescue_reason"),
         "source": "particles2SNR-pipeline",
     }
 
@@ -1122,6 +1144,9 @@ def annotate_clean_peak_support(
     prominence_z: float,
     min_separation_ms: float,
     valley_ratio: float,
+    association_margin_ms: float = 0.0,
+    rescue_filtered_min_z: float | None = None,
+    rescue_clean_local_min_z: float | None = None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     peak_groups, _envelope, z_values, _baseline, _scale = detect_peak_groups(
         signal_values,
@@ -1132,9 +1157,23 @@ def annotate_clean_peak_support(
         min_separation_ms=min_separation_ms,
         valley_ratio=valley_ratio,
     )
+    if association_margin_ms < 0:
+        raise ValueError("association_margin_ms must be non-negative")
+    assignments = {}
+    if association_margin_ms > 0:
+        assignments = assign_peak_groups_one_to_one(
+            [
+                particle_interval_samples(
+                    particle, signal_length, fs
+                )
+                for particle in particles
+            ],
+            peak_groups,
+            margin_samples=association_margin_ms / 1000.0 * fs,
+        )
     kept = []
     dropped = []
-    for particle in particles:
+    for particle_index, particle in enumerate(particles):
         enriched = annotate_particle_peak_evidence(
             particle,
             signal_length,
@@ -1142,6 +1181,22 @@ def annotate_clean_peak_support(
             peak_groups,
             z_values,
         )
+        if association_margin_ms > 0:
+            selected = assignments.get(particle_index)
+            enriched["peak_support"] = selected is not None
+            enriched["peak_group_id"] = (
+                int(selected["id"]) if selected is not None else None
+            )
+            enriched["peak_z"] = (
+                float(selected["peak_z"])
+                if selected is not None
+                else enriched["local_peak_z"]
+            )
+            enriched["peak_center_ms"] = (
+                float(selected["peak_sample"]) / fs * 1000.0
+                if selected is not None
+                else None
+            )
         if enriched.get("peak_support"):
             out = dict(particle)
             out["clean_peak_support"] = True
@@ -1149,17 +1204,53 @@ def annotate_clean_peak_support(
             out["clean_peak_z"] = enriched.get("peak_z")
             out["clean_peak_center_ms"] = enriched.get("peak_center_ms")
             out["clean_local_peak_z"] = enriched.get("local_peak_z")
+            out["clean_peak_rescued"] = False
             kept.append(out)
             continue
+        rescued = should_rescue_missing_clean_peak(
+            filtered_peak_z=particle.get("peak_z"),
+            clean_local_peak_z=enriched.get("local_peak_z"),
+            filtered_min_z=rescue_filtered_min_z,
+            clean_local_min_z=rescue_clean_local_min_z,
+        )
+        if rescued:
+            out = dict(particle)
+            out["clean_peak_support"] = False
+            out["clean_peak_group_id"] = None
+            out["clean_peak_z"] = enriched.get("peak_z")
+            out["clean_peak_center_ms"] = None
+            out["clean_local_peak_z"] = enriched.get("local_peak_z")
+            out["clean_peak_rescued"] = True
+            out["clean_peak_rescue_reason"] = "strong_filtered_moderate_clean_local"
+            kept.append(out)
+            continue
+        left, right, center = particle_interval_samples(
+            particle, signal_length, fs
+        )
         dropped.append({
             "reason": "missing_clean_peak_support",
             "stage": "clean_peak_evidence",
             "peak_support": False,
             "peak_z": enriched.get("peak_z"),
             "local_peak_z": enriched.get("local_peak_z"),
+            "filtered_peak_z": particle.get("peak_z"),
             "snr_db": particle.get("snr_db"),
             "frequency": particle.get("frequency"),
             "passage_time_ms": particle_passage_time_ms(particle),
+            "detector_annotation_id": particle.get("idx"),
+            "candidate_annotation": {
+                "id": particle.get("idx"),
+                "detector_annotation_id": particle.get("idx"),
+                "start": left / signal_length,
+                "end": right / signal_length,
+                "center": center / signal_length,
+                "amplitude": particle.get("P0"),
+                "frequency": particle.get("frequency"),
+                "passage_time_ms": particle_passage_time_ms(particle),
+                "snr_db": particle.get("snr_db"),
+                "peak_z": particle.get("peak_z"),
+                "clean_local_peak_z": enriched.get("local_peak_z"),
+            },
         })
     peak_summary = [{
         "id": int(g["id"]),
@@ -1169,6 +1260,35 @@ def annotate_clean_peak_support(
         "source": "clean_no_bandpass",
     } for g in peak_groups]
     return kept, dropped, peak_summary
+
+
+def load_saturation_boundary_regions(
+    manifest_path: Path,
+) -> tuple[dict[str, list[tuple[int, int]]], int]:
+    """Load canonical repair boundaries and their frozen filter radius."""
+    grouped: dict[str, list[tuple[int, int]]] = {}
+    radii: set[int] = set()
+    with manifest_path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            filename = row.get("filename")
+            if not filename:
+                raise ValueError("saturation boundary manifest lacks filename")
+            start = int(row["expanded_start_sample"])
+            end = int(row["expanded_end_sample"])
+            if not 0 <= start < end:
+                raise ValueError(
+                    f"invalid saturation boundary interval for {filename}"
+                )
+            grouped.setdefault(filename, []).append((start, end))
+            radii.add(int(row["filter_response_radius_samples"]))
+    if len(radii) != 1:
+        raise ValueError(
+            "saturation boundary manifest must contain one response radius"
+        )
+    return {
+        filename: sorted(set(intervals))
+        for filename, intervals in grouped.items()
+    }, radii.pop()
 
 
 def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
@@ -1199,10 +1319,29 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
                      resolve_boundary_crossings: bool = True,
                      boundary_min_width_ms: float | None = None,
                      peak_evidence_signal_mode: str = "filtered",
-                     peak_evidence_clean_root: Path | None = None) -> dict:
+                     peak_evidence_clean_root: Path | None = None,
+                     clean_peak_support_margin_ms: float = 0.0,
+                     clean_peak_rescue_filtered_min_z: float | None = None,
+                     clean_peak_rescue_local_min_z: float | None = None,
+                     saturation_boundary_regions: dict[str, list[tuple[int, int]]] | None = None,
+                     saturation_boundary_response_radius: int | None = None,
+                     saturation_boundary_clean_local_min_z: float = 1.5,
+                     unclear_snr_threshold_db: float | None = None) -> dict:
     if peak_evidence_signal_mode not in {"filtered", "clean", "dual_clean"}:
         raise ValueError(
             "peak_evidence_signal_mode must be one of: filtered, clean, dual_clean"
+        )
+    if (clean_peak_rescue_filtered_min_z is None) != (clean_peak_rescue_local_min_z is None):
+        raise ValueError(
+            "clean peak rescue requires both filtered and clean-local thresholds"
+        )
+    if clean_peak_support_margin_ms < 0:
+        raise ValueError("clean peak support margin must be non-negative")
+    if (saturation_boundary_regions is None) != (
+        saturation_boundary_response_radius is None
+    ):
+        raise ValueError(
+            "saturation boundary veto requires both regions and response radius"
         )
     with dataset_results_path.open() as f:
         results = json.load(f)
@@ -1273,6 +1412,9 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
                             prominence_z=peak_prominence_z,
                             min_separation_ms=peak_min_separation_ms,
                             valley_ratio=peak_group_valley_ratio,
+                            association_margin_ms=clean_peak_support_margin_ms,
+                            rescue_filtered_min_z=clean_peak_rescue_filtered_min_z,
+                            rescue_clean_local_min_z=clean_peak_rescue_local_min_z,
                         )
                         dropped_annotations.extend(clean_drops)
                         peak_summary = [
@@ -1284,14 +1426,59 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
                         dropped_annotations.append({
                             "reason": "missing_clean_signal_for_dual_peak_evidence",
                             "stage": "clean_peak_evidence",
-                            "path": str(clean_path) if clean_path else None,
+                            "path": (
+                                portable_path(clean_path)
+                                if clean_path
+                                else None
+                            ),
                         })
             else:
                 dropped_annotations.append({
                     "reason": "missing_signal_for_peak_evidence",
                     "stage": "peak_evidence",
-                    "path": str(primary_path) if primary_path else signal_path,
+                    "path": (
+                        portable_path(primary_path)
+                        if primary_path
+                        else portable_path(signal_path)
+                    ),
                 })
+        if saturation_boundary_regions is not None:
+            filename = str(signal.get("filename"))
+            regions = saturation_boundary_regions.get(filename, [])
+            boundary_kept = []
+            for particle in filtered_particles:
+                _left, _right, center = particle_interval_samples(
+                    particle, length, fs
+                )
+                decision = boundary_proposal_decision(
+                    center_sample=center,
+                    expanded_intervals=regions,
+                    response_radius=int(saturation_boundary_response_radius),
+                    clean_local_peak_z=particle.get("clean_local_peak_z"),
+                    clean_local_min_z=saturation_boundary_clean_local_min_z,
+                )
+                if decision["keep"]:
+                    particle["saturation_boundary_audit"] = decision
+                    boundary_kept.append(particle)
+                    continue
+                dropped_annotations.append(
+                    {
+                        **decision,
+                        "reason": "saturation_boundary_without_clean_support",
+                        "boundary_decision_reason": decision["reason"],
+                        "stage": "saturation_boundary_veto",
+                        "center_sample": center,
+                        "frequency": particle.get("frequency"),
+                        "snr_db": particle.get("snr_db"),
+                        "clean_local_peak_z": particle.get(
+                            "clean_local_peak_z"
+                        ),
+                        "filter_response_radius_samples": int(
+                            saturation_boundary_response_radius
+                        ),
+                    }
+                )
+            filtered_particles = boundary_kept
         if merge_overlaps:
             filtered_particles, nms_drops = merge_overlapping_particles(
                 filtered_particles,
@@ -1308,10 +1495,26 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
                 snr_margin_db=merge_snr_margin_db,
             )
             dropped_annotations.extend(nms_drops)
-        annotations = [
-            particle_to_annotation(particle, length, fs, class_id, ann_id)
-            for ann_id, particle in enumerate(filtered_particles)
-        ]
+        unclear_class_id = class_to_id.get("unclear")
+        annotations = []
+        for ann_id, particle in enumerate(filtered_particles):
+            annotation_class_id = class_id
+            if (
+                unclear_snr_threshold_db is not None
+                and unclear_class_id is not None
+                and float(particle.get("snr_db", float("inf")))
+                < float(unclear_snr_threshold_db)
+            ):
+                annotation_class_id = unclear_class_id
+            annotations.append(
+                particle_to_annotation(
+                    particle,
+                    length,
+                    fs,
+                    annotation_class_id,
+                    ann_id,
+                )
+            )
         if yolo_width_filter:
             annotations, width_drops = filter_annotations_by_yolo_width(
                 annotations,
@@ -1335,7 +1538,7 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
             dropped_annotations.extend(boundary_drops)
         data_rows.append({
             "filename": signal.get("filename"),
-            "path": signal.get("path"),
+            "path": portable_path(signal.get("path")),
             "id": int(sample_id),
             "class_id": int(class_id),
             "class_name": class_name,
@@ -1350,7 +1553,7 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
         "info": {
             "description": "particles2SNR-derived particle detection dataset",
             "version": "1.0",
-            "source_results": str(dataset_results_path),
+            "source_results": portable_path(dataset_results_path),
             "annotation_source": "particles2SNR-pipeline",
             "passage_time_filter": {
                 "field": "tau",
@@ -1373,7 +1576,11 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
             "peak_evidence_filter": {
                 "enabled": bool(peak_evidence_filter),
                 "signal_mode": peak_evidence_signal_mode,
-                "clean_root": str(peak_evidence_clean_root) if peak_evidence_clean_root is not None else None,
+                "clean_root": (
+                    portable_path(peak_evidence_clean_root)
+                    if peak_evidence_clean_root is not None
+                    else None
+                ),
                 "envelope_window_ms": peak_envelope_window_ms,
                 "min_z": peak_min_z,
                 "prominence_z": peak_prominence_z,
@@ -1381,6 +1588,17 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
                 "group_valley_ratio": peak_group_valley_ratio,
                 "cluster_gap_ms": peak_cluster_gap_ms,
                 "keep_high_snr_db": peak_keep_high_snr_db,
+                "clean_peak_support_margin_ms": (
+                    clean_peak_support_margin_ms
+                ),
+                "clean_peak_rescue": {
+                    "enabled": (
+                        clean_peak_rescue_filtered_min_z is not None
+                        and clean_peak_rescue_local_min_z is not None
+                    ),
+                    "filtered_min_z": clean_peak_rescue_filtered_min_z,
+                    "clean_local_min_z": clean_peak_rescue_local_min_z,
+                },
             },
             "yolo_width_filter": {
                 "enabled": bool(yolo_width_filter),
@@ -1391,6 +1609,18 @@ def export_yolo_json(dataset_results_path: Path, output_json_path: Path,
                 "enabled": bool(resolve_boundary_crossings),
                 "method": "adjacent_overlap_midpoint",
                 "min_width_ms": min_yolo_width_ms if boundary_min_width_ms is None else boundary_min_width_ms,
+            },
+            "saturation_boundary_veto": {
+                "enabled": saturation_boundary_regions is not None,
+                "filter_response_radius_samples": (
+                    saturation_boundary_response_radius
+                ),
+                "clean_local_min_z": saturation_boundary_clean_local_min_z,
+                "distance_16_samples_is_diagnostic_only": True,
+            },
+            "unclear_class_policy": {
+                "enabled": unclear_snr_threshold_db is not None,
+                "snr_db_below": unclear_snr_threshold_db,
             },
         },
         "classes": [
@@ -1474,7 +1704,7 @@ def export_detseg_yolo_layout(data_json: dict, output_split_dir: Path) -> dict:
         label_path.write_text("\n".join(lines) + ("\n" if lines else ""))
 
     return {
-        "split_dir": str(output_split_dir),
+        "split_dir": portable_path(output_split_dir),
         "signals": copied,
         "labels": labels,
     }
@@ -1525,6 +1755,9 @@ def write_detseg_dataset_yaml(root: Path, split_summaries: dict[str, dict],
         "  peak_group_valley_ratio: 0.55",
         "  peak_cluster_gap_ms: 0.25",
         "  peak_keep_high_snr_db: 4.0",
+        "  clean_peak_rescue_filtered_min_z: null",
+        "  clean_peak_rescue_local_min_z: null",
+        "  clean_peak_support_margin_ms: 0.0",
         "  merge_score: snr_db",
         "  yolo_width_filter: true",
         "  min_yolo_width_ms: 0.08",
@@ -1549,13 +1782,13 @@ def write_run_summary(path: Path, split_summaries: list[dict], args: argparse.Na
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as f:
         json.dump({
-            "input_root": str(Path(args.input_root).resolve()),
+            "input_root": portable_path(args.input_root),
             "class_source_dirs": {
-                key: str(path.resolve())
+                key: portable_path(path)
                 for key, path in (args.class_source_dirs or {}).items()
             },
-            "output_root": str(Path(args.output_root).resolve()),
-            "particles2SNR_output": str(Path(args.particles2SNR_output).resolve()),
+            "output_root": portable_path(args.output_root),
+            "particles2SNR_output": portable_path(args.particles2SNR_output),
             "splits": list(args.splits),
             "classes": list(args.classes),
             "test_fraction": args.test_fraction,
@@ -1593,6 +1826,18 @@ def write_run_summary(path: Path, split_summaries: list[dict], args: argparse.Na
             "peak_group_valley_ratio": args.peak_group_valley_ratio,
             "peak_cluster_gap_ms": args.peak_cluster_gap_ms,
             "peak_keep_high_snr_db": args.peak_keep_high_snr_db,
+            "clean_peak_rescue_filtered_min_z": args.clean_peak_rescue_filtered_min_z,
+            "clean_peak_rescue_local_min_z": args.clean_peak_rescue_local_min_z,
+            "clean_peak_support_margin_ms": args.clean_peak_support_margin_ms,
+            "saturation_boundary_manifest": (
+                portable_path(args.saturation_boundary_manifest)
+                if args.saturation_boundary_manifest is not None
+                else None
+            ),
+            "saturation_boundary_clean_local_min_z": (
+                args.saturation_boundary_clean_local_min_z
+            ),
+            "unclear_snr_threshold_db": args.unclear_snr_threshold_db,
             "merge_score": args.merge_score,
             "yolo_width_filter": args.yolo_width_filter,
             "min_yolo_width_ms": args.min_yolo_width_ms,
@@ -1667,6 +1912,54 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--peak-group-valley-ratio", type=float, default=0.55)
     parser.add_argument("--peak-cluster-gap-ms", type=float, default=0.25)
     parser.add_argument("--peak-keep-high-snr-db", type=float, default=4.0)
+    parser.add_argument(
+        "--clean-peak-rescue-filtered-min-z",
+        type=float,
+        default=None,
+        help=(
+            "Optional filtered-domain z threshold for rescuing a dual-clean "
+            "candidate without a clean peak group; requires "
+            "--clean-peak-rescue-local-min-z."
+        ),
+    )
+    parser.add_argument(
+        "--clean-peak-rescue-local-min-z",
+        type=float,
+        default=None,
+        help=(
+            "Optional clean-domain local z threshold for the dual-clean rescue; "
+            "requires --clean-peak-rescue-filtered-min-z."
+        ),
+    )
+    parser.add_argument(
+        "--clean-peak-support-margin-ms",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional one-to-one clean peak association margin. Zero "
+            "preserves historical exact-interval matching."
+        ),
+    )
+    parser.add_argument(
+        "--saturation-boundary-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Canonical pre-filter repair manifest. Proposals inside its "
+            "filter-derived boundary radius require clean-domain support."
+        ),
+    )
+    parser.add_argument(
+        "--saturation-boundary-clean-local-min-z",
+        type=float,
+        default=1.5,
+    )
+    parser.add_argument(
+        "--unclear-snr-threshold-db",
+        type=float,
+        default=None,
+        help="Map fresh annotations below this SNR to an `unclear` class.",
+    )
     parser.add_argument("--merge-score", choices=("snr_db", "energy"), default="snr_db")
     parser.add_argument("--yolo-width-filter", dest="yolo_width_filter", action="store_true", default=True)
     parser.add_argument("--disable-yolo-width-filter", dest="yolo_width_filter", action="store_false")
@@ -1694,6 +1987,15 @@ def main() -> None:
     detseg_summaries = {}
     rng = np.random.default_rng(args.split_seed)
     noise_pool = read_noise_pool(args.noise_dir, chunk_len=16_384)
+    saturation_boundary_regions = None
+    saturation_boundary_response_radius = None
+    if args.saturation_boundary_manifest is not None:
+        (
+            saturation_boundary_regions,
+            saturation_boundary_response_radius,
+        ) = load_saturation_boundary_regions(
+            args.saturation_boundary_manifest
+        )
     if args.saturation_policy == "replace" and not noise_pool:
         raise FileNotFoundError(f"No .npy noise chunks found in --noise-dir {args.noise_dir!r}")
 
@@ -1788,6 +2090,7 @@ def main() -> None:
                 args.bandpass_fmin if args.apply_bandpass_output else None,
                 args.bandpass_fmax if args.apply_bandpass_output else None,
                 args.bandpass_order if args.apply_bandpass_output else None,
+                pre_filtered=args.apply_bandpass_output,
             )
             data_json = export_yolo_json(
                 split_output_dir / "dataset_results.json",
@@ -1821,6 +2124,13 @@ def main() -> None:
                 args.boundary_min_width_ms,
                 args.peak_evidence_signal_mode,
                 peak_evidence_clean_dir,
+                args.clean_peak_support_margin_ms,
+                args.clean_peak_rescue_filtered_min_z,
+                args.clean_peak_rescue_local_min_z,
+                saturation_boundary_regions,
+                saturation_boundary_response_radius,
+                args.saturation_boundary_clean_local_min_z,
+                args.unclear_snr_threshold_db,
             )
             if args.detseg_output:
                 if split == "train" and args.val_fraction > 0:
@@ -1848,8 +2158,8 @@ def main() -> None:
             "removed_samples": int(sum(int(row.get("removed_samples") or 0) for row in manifest_rows)),
             "saturation_actions": int(sum(1 for row in saturation_rows if row.get("interval_idx") not in ("", None))),
             "post_clean_saturated_files": int(post_sat["total_saturated_files"]),
-            "cleaned_dataset_dir": str(output_split_dir),
-            "artifact_dir": str(split_output_dir),
+            "cleaned_dataset_dir": portable_path(output_split_dir),
+            "artifact_dir": portable_path(split_output_dir),
         })
 
     if args.detseg_output:
