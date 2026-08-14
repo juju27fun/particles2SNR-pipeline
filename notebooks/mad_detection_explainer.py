@@ -294,15 +294,17 @@ demo = detector_trace(tone_signal, config)
 tone_bin = int(np.argmin(np.abs(demo.frequencies - 18e3)))
 print(f"baseline at the 18 kHz bin: {demo.baseline[tone_bin, 0]:.2e}   "
       f"median baseline elsewhere: {float(np.median(demo.baseline)):.2e}")
-print(f"max z outside the burst: {np.delete(demo.energy_z, np.argmax(demo.energy_z) + np.arange(-10, 10)).max():.1f}")
-fig.plot_energy_and_z(demo);
+print(f"excess kept at the 18 kHz bin: {demo.excess[tone_bin].mean() / demo.excess.mean():.2f}"
+      " x the average bin (1.00 would be an ordinary bin)")
+fig.plot_frame_energy(demo);
 
 # %% [markdown]
 # - The 18 kHz row carries a baseline four orders of magnitude above its
-#   neighbours: the tone was learned as background, its excess is ≈ 0, and z
-#   stays below 2 everywhere except the true burst. The nuisance never
-#   becomes a candidate — **no peak threshold was needed, so no real weak
-#   event was put at risk by one**.
+#   neighbours: the tone was learned as background, so its excess is ≈ 0 and
+#   it contributes nothing to E[m] — the excess map (top) is empty at 18 kHz
+#   and E[m] has one bump, at the real burst. The nuisance never becomes a
+#   candidate — **no peak threshold was needed, so no real weak event was
+#   put at risk by one**.
 # - The honest limit: the detection band (7–80 kHz) itself remains a hard
 #   gate. A particle slow enough to fall below 7 kHz is lost to both
 #   approaches; the robustness argument starts only inside the band.
@@ -350,9 +352,10 @@ fig.plot_legacy_vs_energy(slow_trace, replay=replay_slow,
 #   **box-width gate deletes it** (its fitted box is longer than 1.5 ms), and
 #   the final output contains only the fast particle. A real event was
 #   removed by a threshold calibrated on typical ones.
-# - The energy chain activates on both: the slow event sits at z ≈ 1.5·10³,
-#   three orders of magnitude above the 3.5 threshold. No gate on speed,
-#   width or peak shape was consulted to *detect* it.
+# - The energy chain produces a clear bump for **both** events, the slow one
+#   included: no gate on speed, width or peak shape was consulted to see it.
+#   Turning a bump into a decision still needs a rule — that rule is exactly
+#   what section 6 builds.
 # - Honesty notes: this is a constructed illustration, not a prevalence
 #   claim — how often real acquisitions contain such atypical events is an
 #   open question. And the MAD chain's own qualification (section 9) also
@@ -380,12 +383,43 @@ fig.plot_frame_energy(trace);
 # %% [markdown]
 # ## 6 · NORMALISE — median and MAD ★
 #
-# E[m] has arbitrary units: it depends on gain, coupling, bead concentration.
-# A fixed threshold on E would change meaning with every acquisition. The
-# detector needs a *reference level* and a *scale* that the event itself
-# cannot corrupt.
+# Section 5 leaves us with E[m], a 1-D curve where the event is an obvious
+# bump. **Why not stop here and call the bump the particle?**
 #
-# ### 6a · The median does not follow events
+# Because "obvious bump" is a judgement *you* make, per trace, by eye. A
+# detector needs a written rule, and the obvious rule — "E[m] above some
+# value V" — is written in energy units. Energy units are not a property of
+# the particle: they change with amplifier gain, coupling, and the noise
+# level of the day.
+#
+# ### 6a · Why a threshold on E[m] cannot be written down
+#
+# Take V at half the event's peak on this record — as good a hand-picked
+# value as any — and apply that *same* V to the same trace recorded with
+# three times more gain, and three times less:
+
+# %%
+V = 0.5 * trace.frame_energy.max()
+for label, factor in (("original", 1.0), ("gain x3", 3.0), ("gain /3", 1 / 3)):
+    scaled = detector_trace(record.signal * factor, config)
+    print(f"{label:9s}: {int((scaled.frame_energy >= V).sum()):3d} frames above V")
+
+# %% [markdown]
+# Same particle, same physics, three different answers — and at one third of
+# the gain the rule finds **nothing at all**. V is not a bad choice; *any*
+# fixed energy value has this defect. The rule has to be expressed relative
+# to the trace it is applied to, which means estimating two things from the
+# trace itself:
+#
+# 1. its **ordinary level** — what E[m] looks like when nothing happens;
+# 2. its **spread** — how much E[m] normally wanders around that level.
+#
+# Both estimates must survive the presence of the event: if the event drags
+# its own reference upwards, it hides itself. That requirement — not
+# tradition — is why the next two subsections use the median and the MAD
+# rather than the mean and the standard deviation.
+#
+# ### 6b · The ordinary level: a median the event cannot move
 #
 # A toy series of 7 frames, one of which contains an event:
 
@@ -398,23 +432,62 @@ print(f"without outlier: mean = {calm.mean():.3f}   median = {np.median(calm):.0
 # %% [markdown]
 # Replacing **one** value out of seven moves the mean by +164 % and the median
 # by 0 %. The mean follows the event; the median stays with the majority.
+# **Piece 1 acquired**: median(E) is an ordinary level the event cannot drag
+# upwards.
 #
-# ### 6b · The MAD: a robust scale
+# ### 6c · The spread: a MAD the event cannot inflate
 #
-# MAD(E) = median_i(|E_i − median(E)|) — the median of the distances to the
-# median.
+# Same requirement, applied to the spread. The standard deviation squares the
+# distances, so one large value dominates it — the event would inflate the
+# very scale meant to measure it. The MAD takes the *median* of the
+# distances instead:
+#
+# MAD(E) = median_i(|E_i − median(E)|)
 
 # %%
 distances = np.abs(toy - np.median(toy))
 print("distances to the median:", np.sort(distances))
-print("MAD =", np.median(distances))
+print(f"MAD = {np.median(distances):.2f}   (std of the same series = {toy.std():.2f})")
 
 # %% [markdown]
 # The large distance (18) exists but cannot occupy the middle of the sorted
 # list. That is what robustness means here — not a formula, a *position in a
-# sort*.
+# sort*. Compare the two scales on the same seven values: the MAD says the
+# series normally wanders by 1, the standard deviation says 6.5 — inflated
+# more than sixfold by the single value we are trying to detect.
+# **Piece 2 acquired.**
 #
-# ### 6c · On the real signal
+# ### 6d · z: the rule rewritten in units of the trace itself
+#
+# Both pieces are estimated from the trace and immune to its event, so the
+# rule can finally be written without energy units:
+#
+# $$ z[m] \;=\; \frac{E[m] - \mathrm{median}(E)}{1.4826 \times \mathrm{MAD}(E)} $$
+#
+# The numerator asks *how far above ordinary*, the denominator converts that
+# distance into *number of ordinary wanderings*. (The 1.4826 is a scale
+# convention, explained in 6e — it changes nothing to the reasoning.) So:
+#
+# > **z[m] = how many robust scales above its own ordinary level this frame
+# > sits.**
+#
+# Both quantities scale with the recording, so their ratio does not. The same
+# broken experiment as 6a, rerun with the rule written in z:
+
+# %%
+for label, factor in (("original", 1.0), ("gain x3", 3.0), ("gain /3", 1 / 3)):
+    scaled = detector_trace(record.signal * factor, config)
+    above_v = int((scaled.frame_energy >= V).sum())
+    above_z = int((scaled.energy_z >= config.active_snr_z).sum())
+    print(f"{label:9s}: {above_v:3d} frames above V   |   {above_z:3d} frames with z >= 3.5")
+
+# %% [markdown]
+# The energy rule gives 4, 16, then 0. The z rule gives the same answer three
+# times. That is the whole reason z exists: **it is not a new measurement, it
+# is E[m] expressed in a unit the trace defines for itself**, so one written
+# threshold keeps one meaning across acquisitions.
+#
+# ### 6e · On the real signal
 
 # %%
 fig.plot_robust_band(trace);
@@ -428,7 +501,7 @@ fig.plot_robust_band(trace);
 # `energy_scale = 1.4826 × raw_mad`. Two quantities, two names — both have
 # historically been called "MAD", 48 % apart.
 #
-# ### 6d · Where 1.4826 comes from
+# ### 6f · Where 1.4826 comes from
 #
 # 1 / Φ⁻¹(0.75) ≈ 1.4826: for Gaussian noise, 1.4826 × MAD estimates the
 # standard deviation σ.
@@ -444,10 +517,12 @@ print(f"std = {draw.std():.4f}   1.4826 × MAD = {1.4826 * mad:.4f}")
 # Gaussian hypothesis; the detector keeps it as a scale convention, not as a
 # model of the noise.**
 #
-# ### 6e · What the normalisation is invariant to — and what it is not ★
+# ### 6g · The invariance stated exactly — and its limit ★
 #
-# Multiply the signal by 3 (a gain change): power scales by 9, so E[m] scales
-# by 9 — and so do the median and the MAD. The ratio z[m] is unchanged.
+# Subsection 6d showed the *rule* survives a gain change; here is the
+# underlying identity, to numerical precision. Amplitude ×3 means power ×9,
+# so E[m], its median and its MAD all scale by 9 — and the ratio does not
+# move at all.
 
 # %%
 gained = detector_trace(record.signal * 3.0, config)
@@ -474,7 +549,7 @@ print(f"peak z: original = {trace.energy_z.max():.1f}   "
 # changes, which a fixed energy threshold would not. What it does not prove:
 # immunity to noise — z is a contrast against *this trace's* noise floor.
 #
-# ### 6f · What z is not
+# ### 6h · What z is not
 #
 # - z is **not an SNR** in the classical sense (no signal/noise power ratio).
 # - z is **not a probability**.
@@ -483,16 +558,16 @@ print(f"peak z: original = {trace.energy_z.max():.1f}   "
 # z[m] is the distance of E[m] to this trace's own baseline, in units of this
 # trace's own robust scale. Nothing more — and for thresholding, nothing less.
 #
-# ### 6g · Synthesis
+# ### 6i · Synthesis
 
 # %%
 fig.plot_energy_and_z(trace);
 
 # %% [markdown]
 # - Top: E[m] with the median and the ± energy_scale band (now the scaled one).
-# - Bottom: the same curve in z units. **Read z[m] as: "how many robust
-#   scales does this frame sit above the ordinary level of this trace?"**
-#   The red dashed line is the activation threshold z = 3.5 used in section 8.
+# - Bottom: the *same* curve, divided by the scale — no new measurement, just
+#   a change of unit. The red dashed line is the activation threshold z = 3.5
+#   used in section 8, and it is only writable because of that change.
 #
 # *Method only · one manifested record · no claim of detector performance or
 # biological validity.*

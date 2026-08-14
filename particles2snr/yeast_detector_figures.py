@@ -359,16 +359,13 @@ def plot_legacy_vs_energy(
     )
 
     frame_ms = frame_axis_ms(trace)
-    axes[2].plot(frame_ms, trace.energy_z, color=PURPLE, linewidth=1.1, label="z[m]")
-    axes[2].axhline(config.active_snr_z, color=RED, linestyle="--", linewidth=1.2,
-                    label=f"activation z = {config.active_snr_z}")
-    active = trace.active.astype(bool)
-    axes[2].scatter(frame_ms[active], np.full(int(active.sum()), -0.5),
-                    s=14, color=GREEN, marker="s", label="active frames", zorder=4)
-    axes[2].set_yscale("symlog", linthresh=1.0)
-    axes[2].set_ylabel("z[m]")
+    axes[2].plot(frame_ms, trace.frame_energy, color=BLUE, linewidth=1.1, label="E[m]")
+    axes[2].axhline(trace.energy_median, color=GREEN, linewidth=1.2,
+                    label="typical level (median)")
+    axes[2].set_yscale("log")
+    axes[2].set_ylabel("E[m]")
     axes[2].set_xlabel("time [ms]")
-    axes[2].set_title("Energy chain: no hypothesis was ever created to clean")
+    axes[2].set_title("Energy chain: one bump per real event, no hypothesis to clean")
     axes[2].legend(loc="upper left")
     return axes
 
