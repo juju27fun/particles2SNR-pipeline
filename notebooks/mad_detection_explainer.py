@@ -91,7 +91,9 @@ print(f"{EVENT_ID}: {record.signal.size} samples, "
 # | Qualification | width 0.06–2.0 ms, max z ≥ 12, ≤ 5 events per trace |
 #
 # *These values are a development choice validated on a review campaign, not a
-# demonstrated optimum.*
+# demonstrated optimum.* The last three rows name quantities the notebook has
+# not built yet — z is constructed in section 6, C in section 7; the table is
+# here as a reference to come back to, not as something to read now.
 
 # %% [markdown]
 # ## Why energy first — the particles2SNR lesson
@@ -211,7 +213,7 @@ fig.plot_bandpass(record.signal, trace);
 # | fₛ | sampling frequency | 2 MHz |
 # | N | STFT window length | 512 samples (256 µs) |
 # | H | hop between windows | 128 samples (64 µs) |
-# | m | **frame** index — one window position, one column | 0 … 127 |
+# | m | **frame** index — one window position, one column | 0 … 124 |
 # | k | **frequency bin** index — one row | 0 … n_bins−1, spaced fₛ/N ≈ 3.9 kHz |
 # | w | Hann window | — |
 # | X(k, m) | complex STFT value at bin k, frame m | (n_bins × n_frames) matrix |
@@ -299,12 +301,14 @@ print(f"excess kept at the 18 kHz bin: {demo.excess[tone_bin].mean() / demo.exce
 fig.plot_frame_energy(demo);
 
 # %% [markdown]
-# - The 18 kHz row carries a baseline four orders of magnitude above its
-#   neighbours: the tone was learned as background, so its excess is ≈ 0 and
-#   it contributes nothing to E[m] — the excess map (top) is empty at 18 kHz
-#   and E[m] has one bump, at the real burst. The nuisance never becomes a
-#   candidate — **no peak threshold was needed, so no real weak event was
-#   put at risk by one**.
+# - The 18 kHz row carries a baseline **36 000 times** the typical bin's: the
+#   tone was learned as background. The consequence is the whole point — that
+#   row, by far the most powerful of the spectrogram, contributes **a quarter
+#   of what an ordinary bin contributes** to E[m]. Power buys nothing;
+#   only *departure from one's own habit* does. The excess map (top) stays
+#   dim at 18 kHz and E[m] has a single bump, at the real burst.
+# - So the nuisance never becomes a candidate, and **no peak threshold was
+#   needed — hence no real weak event was put at risk by one**.
 # - The honest limit: the detection band (7–80 kHz) itself remains a hard
 #   gate. A particle slow enough to fall below 7 kHz is lost to both
 #   approaches; the robustness argument starts only inside the band.
@@ -323,9 +327,10 @@ fig.plot_legacy_vs_energy(demo, replay=replay_tone, truth_spans_ms=[(4.6, 5.4)])
 # - The tone spawns hypotheses all along the trace: **8 raw hypotheses for 1
 #   real event**. The cleaning cascade has to execute every spurious one —
 #   here six fall to the box-width gate and one to peak evidence.
-# - The final answer is right *on this toy*, but it is right because five
-#   filters agreed. The introduction's yeast record is what happens when the
-#   cascade meets a case its thresholds cannot arbitrate.
+# - The final answer is right *on this toy*, but only because two of the
+#   cascade's gates happened to fire on the right hypotheses. The
+#   introduction's yeast record is what happens when the same cascade meets
+#   a case its thresholds cannot arbitrate.
 # - The energy chain (bottom) never created the problem: the tone lives in
 #   the baseline, so there was nothing to clean.
 #
@@ -466,7 +471,7 @@ print(f"MAD = {np.median(distances):.2f}   (std of the same series = {toy.std():
 #
 # The numerator asks *how far above ordinary*, the denominator converts that
 # distance into *number of ordinary wanderings*. (The 1.4826 is a scale
-# convention, explained in 6e — it changes nothing to the reasoning.) So:
+# convention, explained in 6f — it changes nothing to the reasoning.) So:
 #
 # > **z[m] = how many robust scales above its own ordinary level this frame
 # > sits.**
@@ -494,7 +499,8 @@ fig.plot_robust_band(trace);
 
 # %% [markdown]
 # - The purple band (median ± 1 raw MAD) hugs the noise floor so tightly it is
-#   barely visible at this scale — the event exits it by dozens of band-widths.
+#   barely visible at this scale — the event's peak sits about **112 raw-MAD
+#   widths** above the median.
 #
 # **Vocabulary, fixed once and for all:** this band uses `raw_mad`, the
 # unscaled median absolute deviation. The detector divides by
@@ -578,7 +584,7 @@ fig.plot_energy_and_z(trace);
 # Everything above used the workspace machinery only to fetch a *manifested*
 # example. The method itself needs a plain 1-D array. The protocol:
 #
-# 1. A 1-D float array (any amplitude units — section 6e showed why gain does
+# 1. A 1-D float array (any amplitude units — section 6d showed why gain does
 #    not matter).
 # 2. A `YeastDetectionConfig` whose `sampling_frequency_hz` matches your
 #    acquisition; every other field has the development default. The preset
