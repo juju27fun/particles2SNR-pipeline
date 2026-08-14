@@ -14,8 +14,16 @@
 # %% [markdown]
 # # MAD detection — from a raw trace to a bounded event
 #
-# **Central question: how does a raw acoustic trace become a bounded SSL
-# example?** This notebook retraces the yeast event detector
+# *MAD stands for **median absolute deviation**: a way of measuring how much
+# a signal normally fluctuates that a rare large event cannot distort. It is
+# what lets the detector say "this is unusually high" without anyone fixing a
+# value by hand. Section 6 builds it from nothing; sections 1–5 are what has
+# to happen before it can be applied.*
+#
+# **Central question: how does a raw acoustic trace become a bounded training
+# example?** — bounded meaning *we know where the event starts and ends*, which
+# is what a self-supervised learning (SSL) model needs as input.
+# This notebook retraces the yeast event detector
 # (`particles2snr.yeast_events`) stage by stage on one manifested record,
 # following the same chain as the frozen explainer deck
 # ([Yeast detector explainer v5](../../artifacts/cross-project/presentations/yeast-detector-explainer-v5/render-r1/Yeast_detector_explainer_v5.pdf)):
@@ -24,6 +32,9 @@
 #
 # What this notebook **does**: expose every intermediate quantity of the
 # detector on a real record, with the exact development configuration.
+# *Manifested* record, below, means one whose origin is recorded in the
+# workspace registry — you can trace which acquisition it came from and which
+# human reviewed it.
 #
 # What it **does not do**: it produces no manifested artifact, no performance
 # metric, no detector comparison, and no biological claim. It explains a
@@ -99,15 +110,23 @@ print(f"{EVENT_ID}: {record.signal.size} samples, "
 # ## Why energy first — the particles2SNR lesson
 #
 # The legacy pipeline (particles2SNR) reasons **peak-first**: every local
-# Doppler maximum becomes a particle hypothesis, fitted as t₀ ± 2.5τ, then
-# cleaned and merged. That representation makes one structural mistake: a
+# Doppler maximum becomes a particle hypothesis, fitted as an arrival time
+# t₀ with a decay time τ and turned into the box t₀ ± 2.5τ, then cleaned and
+# merged. That representation makes one structural mistake: a
 # yeast passage can produce **several exact Doppler crests for one single
 # particle**, and the moment each crest becomes a separate hypothesis, the
 # information that they co-occurred as one burst of energy is gone.
-# Everything downstream — passage-time filter, width filter, peak-evidence
-# refinement, dual-clean, temporal NMS — is an attempt to reconstruct that
-# lost information with heuristics, each carrying thresholds that interact
-# with all the others.
+# Everything downstream is an attempt to reconstruct that lost information
+# with heuristics, each carrying thresholds that interact with all the
+# others. The five cleaning stages, in order:
+#
+# | Stage | Deletes a hypothesis when… |
+# |---|---|
+# | passage-time filter | its decay time τ is outside 0.07–0.65 ms |
+# | width filter | its box t₀ ± 2.5τ is outside 0.08–1.5 ms |
+# | peak-evidence refinement | its envelope (the outline of the oscillation's amplitude) shows no clear bump |
+# | dual-clean | that bump is absent from the *unfiltered* view too |
+# | temporal NMS | it overlaps a stronger hypothesis (NMS = non-maximum suppression: among overlapping boxes, keep the strongest) |
 #
 # The cell below **replays that exact failure** on this notebook's record. The
 # replay is contract-checked: it refuses to render if the replayed legacy
@@ -124,9 +143,13 @@ Image(filename=str(failure_png), width=980)
 
 # %% [markdown]
 # - One human-reviewed passage (green span), two exact Doppler crests — but
-#   **five** local P0 frequency hypotheses.
-# - After every cleaning stage (filtered evidence, dual-clean, NMS), still
-#   **two boxes for one single event**: the merge fails at IoU 0.399 < 0.400.
+#   **five** frequency hypotheses from P0 (the legacy pipeline's first stage,
+#   which proposes one particle per spectral maximum).
+# - After all five cleaning stages, still **two boxes for one single event**.
+#   The last stage should have merged them and did not: their overlap, scored
+#   as IoU (intersection over union — shared duration divided by total
+#   duration spanned, so 1 = identical boxes, 0 = disjoint), came out at
+#   **0.399**, just under the 0.400 required to merge.
 #
 # **Could a different merge threshold fix this?** This *case*, yes — the miss
 # is 0.001 wide. That is precisely the problem, not an unlucky detail. Loosen
@@ -142,12 +165,15 @@ Image(filename=str(failure_png), width=980)
 # Two bounded pieces of development context (beads, not yeast):
 #
 # - On the frozen 87-event human ledger of the bead development corpus, the
-#   MAD chain recovered **78/87 confirmed events against 41/87** for the
-#   historical Z8v2 peak stack, with exact per-trace cardinality on 44/60
-#   traces (manifested audit `particle-mad-gt-visual-audit-r2`, frozen
-#   metrics in `particle-gradual-wave8like-final-analysis-r1`).
-#   *Development evidence on one acquisition family; the audit's local
-#   AP@0.5 covers 11 reliable human supports and is not a corpus-wide mAP.*
+#   MAD chain recovered **78/87 confirmed events against 41/87** for Z8v2
+#   (the historical peak-first detector), and returned the *right number* of
+#   events on 44 of 60 traces (manifested audit
+#   `particle-mad-gt-visual-audit-r2`, frozen metrics in
+#   `particle-gradual-wave8like-final-analysis-r1`).
+#   *Development evidence on one acquisition family, on beads. The audit also
+#   reports a localisation score (average precision at IoU 0.5) but only over
+#   the 11 events whose human boundaries were reliable — it is not a
+#   corpus-wide performance figure.*
 # - A peak threshold is also a **hard gate on a proxy**: a persistent
 #   nuisance oscillation *is* a Doppler-like peak, so peak-first has to
 #   threshold it away — and the same threshold can delete a real but
@@ -215,7 +241,7 @@ fig.plot_bandpass(record.signal, trace);
 # | H | hop between windows | 128 samples (64 µs) |
 # | m | **frame** index — one window position, one column | 0 … 124 |
 # | k | **frequency bin** index — one row | 0 … n_bins−1, spaced fₛ/N ≈ 3.9 kHz |
-# | w | Hann window | — |
+# | w | Hann window — a smooth taper fading each window's edges to zero, so a signal entering the window does not create an artificial jump | — |
 # | X(k, m) | complex STFT value at bin k, frame m | (n_bins × n_frames) matrix |
 # | P(k, m) | power \|X(k, m)\|² | same shape, ≥ 0 |
 
@@ -399,15 +425,22 @@ fig.plot_frame_energy(trace);
 #
 # ### 6a · Why a threshold on E[m] cannot be written down
 #
+# The candidate rule is: *flag every frame whose energy reaches V*. Recall
+# from section 3 that a frame is one column of the spectrogram, 64 µs of
+# trace, so the number of flagged frames is simply **how much of the record
+# the rule calls "event"** — here the event is genuinely about 4 frames wide.
+#
 # Take V at half the event's peak on this record — as good a hand-picked
 # value as any — and apply that *same* V to the same trace recorded with
-# three times more gain, and three times less:
+# three times more gain, and three times less. Nothing about the particle
+# changes; only the recording chain does.
 
 # %%
 V = 0.5 * trace.frame_energy.max()
 for label, factor in (("original", 1.0), ("gain x3", 3.0), ("gain /3", 1 / 3)):
     scaled = detector_trace(record.signal * factor, config)
-    print(f"{label:9s}: {int((scaled.frame_energy >= V).sum()):3d} frames above V")
+    flagged = int((scaled.frame_energy >= V).sum())
+    print(f"{label:9s}: the rule 'E >= V' flags {flagged:3d} frames out of {scaled.times.size}")
 
 # %% [markdown]
 # Same particle, same physics, three different answers — and at one third of
@@ -442,12 +475,29 @@ print(f"without outlier: mean = {calm.mean():.3f}   median = {np.median(calm):.0
 #
 # ### 6c · The spread: a MAD the event cannot inflate
 #
-# Same requirement, applied to the spread. The standard deviation squares the
-# distances, so one large value dominates it — the event would inflate the
-# very scale meant to measure it. The MAD takes the *median* of the
-# distances instead:
+# Knowing the ordinary level is not enough. It tells us where the middle is,
+# not **how far from the middle a frame must be before it counts as
+# surprising**. On a calm trace a rise of 3 units is enormous; on a restless
+# one it is nothing. So we need a second number: the typical size of the
+# wandering around the level.
 #
-# MAD(E) = median_i(|E_i − median(E)|)
+# Every level comes with its natural companion measure of spread, built the
+# same way the level was:
+#
+# | Level | Its companion spread | Built as |
+# |---|---|---|
+# | mean | standard deviation | square every distance to the mean, average, take the square root |
+# | median | **MAD** = *median absolute deviation* | the **median** distance to the median |
+#
+# We rejected the mean in 6b because a single event drags it. The standard
+# deviation is worse: it squares each distance before averaging, so the one
+# large distance dominates the result — the event would inflate the very
+# scale meant to measure it. Taking the median of the distances, exactly as
+# we took the median of the values, keeps that from happening:
+#
+# MAD(E) = median over frames i of |E_i − median(E)|
+#
+# On the same seven-value toy, the distances to the median are:
 
 # %%
 distances = np.abs(toy - np.median(toy))
@@ -462,35 +512,52 @@ print(f"MAD = {np.median(distances):.2f}   (std of the same series = {toy.std():
 # more than sixfold by the single value we are trying to detect.
 # **Piece 2 acquired.**
 #
-# ### 6d · z: the rule rewritten in units of the trace itself
+# ### 6d · z: the two pieces assembled
 #
-# Both pieces are estimated from the trace and immune to its event, so the
-# rule can finally be written without energy units:
+# We now have the two numbers 6a asked for, both read off the trace itself,
+# both unmoved by the event they are meant to measure:
 #
-# $$ z[m] \;=\; \frac{E[m] - \mathrm{median}(E)}{1.4826 \times \mathrm{MAD}(E)} $$
+# - the ordinary level, **median(E)** — piece 1, from 6b;
+# - the ordinary wandering, **MAD(E)** — piece 2, from 6c.
 #
-# The numerator asks *how far above ordinary*, the denominator converts that
-# distance into *number of ordinary wanderings*. (The 1.4826 is a scale
-# convention, explained in 6f — it changes nothing to the reasoning.) So:
+# Assembling them is one subtraction and one division. Measure how far a
+# frame is above the level, then express that distance *in units of the
+# wandering* instead of in units of energy:
 #
-# > **z[m] = how many robust scales above its own ordinary level this frame
-# > sits.**
+# $$ z[m] \;=\; \underbrace{\frac{E[m] - \mathrm{median}(E)}{\vphantom{X}}}_{\text{how far above ordinary}} \Bigg/ \underbrace{\big(1.4826 \times \mathrm{MAD}(E)\big)}_{\text{one ordinary wandering}} $$
 #
-# Both quantities scale with the recording, so their ratio does not. The same
-# broken experiment as 6a, rerun with the rule written in z:
+# (The 1.4826 is a scale convention, explained in 6f; it changes nothing to
+# the reasoning here.) The essential point is what happens to the units:
+# numerator and denominator are **both in energy units, so they cancel**.
+# z[m] is a pure number, and that is precisely what 6a could not obtain:
+#
+# > **z[m] = how many ordinary wanderings above its own ordinary level this
+# > frame sits.**
+#
+# Triple the gain and the energy, the level and the wandering all scale
+# together — the ratio cannot move. So the rule "z ≥ 3.5" means the same
+# thing on every recording, where "E ≥ V" did not. Here is 6a's broken
+# experiment, run again with both rules side by side:
 
 # %%
+print(f"{'recording':<12}{'frames flagged by E >= V':>26}{'frames flagged by z >= 3.5':>28}")
+print("-" * 66)
 for label, factor in (("original", 1.0), ("gain x3", 3.0), ("gain /3", 1 / 3)):
     scaled = detector_trace(record.signal * factor, config)
     above_v = int((scaled.frame_energy >= V).sum())
     above_z = int((scaled.energy_z >= config.active_snr_z).sum())
-    print(f"{label:9s}: {above_v:3d} frames above V   |   {above_z:3d} frames with z >= 3.5")
+    print(f"{label:<12}{above_v:>26}{above_z:>28}")
 
 # %% [markdown]
-# The energy rule gives 4, 16, then 0. The z rule gives the same answer three
-# times. That is the whole reason z exists: **it is not a new measurement, it
-# is E[m] expressed in a unit the trace defines for itself**, so one written
-# threshold keeps one meaning across acquisitions.
+# Read the two columns downwards. The energy rule answers **4, then 16, then
+# 0** — it disagrees with itself about a particle that never changed. The z
+# rule answers **14, 14, 14**.
+#
+# That is the whole reason z exists, and it is worth stating plainly: **z is
+# not a new measurement of the signal. It is E[m] in a different unit** — a
+# unit each trace derives from its own quiet stretches. Changing unit is what
+# makes a threshold portable; it adds no information and detects nothing by
+# itself.
 #
 # ### 6e · On the real signal
 
@@ -509,8 +576,19 @@ fig.plot_robust_band(trace);
 #
 # ### 6f · Where 1.4826 comes from
 #
-# 1 / Φ⁻¹(0.75) ≈ 1.4826: for Gaussian noise, 1.4826 × MAD estimates the
-# standard deviation σ.
+# The MAD and the standard deviation both measure spread, but they do not
+# come out at the same number: on Gaussian noise the MAD lands at about 0.67
+# σ. The factor 1.4826 simply rescales it so that the two agree — it puts the
+# MAD "on the σ ruler", which is the ruler everyone's intuition uses.
+#
+# Where the value comes from, for the curious: for a Gaussian, half the
+# values fall within 0.6745 σ of the centre, so that distance *is* the MAD.
+# Since 1 / 0.6745 ≈ 1.4826, multiplying restores σ. (0.6745 is the 75th
+# percentile of the standard Gaussian, written Φ⁻¹(0.75), where Φ is the
+# Gaussian cumulative distribution function — the function giving the
+# probability of falling below a given value.)
+#
+# The check, on 100 000 Gaussian draws:
 
 # %%
 rng = np.random.default_rng(0)
@@ -557,9 +635,13 @@ print(f"peak z: original = {trace.energy_z.max():.1f}   "
 #
 # ### 6h · What z is not
 #
-# - z is **not an SNR** in the classical sense (no signal/noise power ratio).
-# - z is **not a probability**.
-# - z is **not comparable between two traces** with different noise floors.
+# - z is **not an SNR** — a signal-to-noise ratio compares the power of a
+#   signal to the power of the noise; z compares a *distance* to a *spread*.
+# - z is **not a probability**. z = 3.5 does not mean "3.5 sigmas hence
+#   p < 0.001": that reading would require the noise to be Gaussian, which
+#   6f explicitly declined to assume.
+# - z is **not comparable between two traces** with different noise floors:
+#   each trace defines its own unit, so equal z does not mean equal physics.
 #
 # z[m] is the distance of E[m] to this trace's own baseline, in units of this
 # trace's own robust scale. Nothing more — and for thresholding, nothing less.
