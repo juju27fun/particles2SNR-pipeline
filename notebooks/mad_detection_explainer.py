@@ -97,15 +97,18 @@ print(f"{EVENT_ID}: {record.signal.size} samples, "
 #
 # The legacy pipeline (particles2SNR) reasons **peak-first**: every local
 # Doppler maximum becomes a particle hypothesis, fitted as t₀ ± 2.5τ, then
-# cleaned and merged. That works as long as one particle produces one Doppler
-# crest. But a yeast passage can produce **several exact Doppler crests for a
-# single particle** — and a peak-first pipeline has no way of knowing those
-# crests belong to the same object. If the method cannot abstract away from
-# "one Doppler peak = one particle", it can never segment these events.
+# cleaned and merged. That representation makes one structural mistake: a
+# yeast passage can produce **several exact Doppler crests for one single
+# particle**, and the moment each crest becomes a separate hypothesis, the
+# information that they co-occurred as one burst of energy is gone.
+# Everything downstream — passage-time filter, width filter, peak-evidence
+# refinement, dual-clean, temporal NMS — is an attempt to reconstruct that
+# lost information with heuristics, each carrying thresholds that interact
+# with all the others.
 #
 # The cell below **replays that exact failure** on this notebook's record. The
 # replay is contract-checked: it refuses to render if the replayed legacy
-# pipeline drifts from the reference stage counts, so the figure stays bound
+# pipeline drifts from the audited stage counts, so the figure stays bound
 # to the audited result.
 
 # %%
@@ -122,10 +125,33 @@ Image(filename=str(failure_png), width=980)
 # - After every cleaning stage (filtered evidence, dual-clean, NMS), still
 #   **two boxes for one single event**: the merge fails at IoU 0.399 < 0.400.
 #
-# This failure is the motivation for the whole chain that follows: aggregate
-# the energy across frequencies *first*, decide activity on the resulting 1-D
-# curve, and only afterwards describe Doppler peaks as diagnostics. The
-# detector never counts peaks to count particles.
+# **Could a different merge threshold fix this?** This *case*, yes — the miss
+# is 0.001 wide. That is precisely the problem, not an unlucky detail. Loosen
+# the threshold and genuinely distinct neighbouring events fuse; tighten it
+# and multi-Doppler events fragment. No setting is principled, because the
+# quantity that would decide it — *do these crests belong to the same burst
+# of energy?* — was discarded when the crests became separate hypotheses.
+# Tuning relocates the failure; it cannot remove it. The energy-first chain
+# never faces the decision: frequencies are summed (section 5) *before* any
+# hypothesis exists, and Doppler peaks are measured afterwards as
+# descriptors, never as the unit of counting.
+#
+# Two bounded pieces of development context (beads, not yeast):
+#
+# - On the frozen 87-event human ledger of the bead development corpus, the
+#   MAD chain recovered **78/87 confirmed events against 41/87** for the
+#   historical Z8v2 peak stack, with exact per-trace cardinality on 44/60
+#   traces (manifested audit `particle-mad-gt-visual-audit-r2`, frozen
+#   metrics in `particle-gradual-wave8like-final-analysis-r1`).
+#   *Development evidence on one acquisition family; the audit's local
+#   AP@0.5 covers 11 reliable human supports and is not a corpus-wide mAP.*
+# - A peak threshold is also a **hard gate on a proxy**: a persistent
+#   nuisance oscillation *is* a Doppler-like peak, so peak-first has to
+#   threshold it away — and the same threshold can delete a real but
+#   atypical particle, for example an unusually slow one with a weak crest.
+#   Section 4 shows why the energy chain does not need that gate at all: a
+#   persistent oscillation is *learned into the baseline* and never becomes
+#   a candidate in the first place.
 
 # %% [markdown]
 # ## 1 · The trace and the event support
@@ -246,6 +272,38 @@ fig.plot_frequency_baseline(trace);
 #   under the assumption that at least 75 % of frames are noise. A median
 #   would already drift if the event covered close to half the record.
 # - Why clip at zero: a power *deficit* is not an event.
+#
+# ### What the baseline absorbs — persistent nuisances
+#
+# A continuous interference tone (mains harmonic, mechanical vibration, an
+# oscillating bubble) looks exactly like a Doppler peak to a peak detector:
+# it has to be thresholded away, at the risk of deleting weak real peaks
+# with it. For the Q25 baseline, *present most of the time* *is* the
+# definition of background: the tone raises B_k for its own bin and cancels
+# out of P⁺. A synthetic check — a permanent 18 kHz tone plus one real
+# 30 kHz burst:
+
+# %%
+rng = np.random.default_rng(3)
+t = np.arange(16384) / config.sampling_frequency_hz
+tone = 0.25 * np.sin(2 * np.pi * 18e3 * t)
+burst = np.exp(-0.5 * ((t - 5.0e-3) / 2.0e-4) ** 2) * np.sin(2 * np.pi * 30e3 * t)
+demo = detector_trace((tone + burst + 0.02 * rng.normal(size=t.size)).astype(np.float32), config)
+tone_bin = int(np.argmin(np.abs(demo.frequencies - 18e3)))
+print(f"baseline at the 18 kHz bin: {demo.baseline[tone_bin, 0]:.2e}   "
+      f"median baseline elsewhere: {float(np.median(demo.baseline)):.2e}")
+print(f"max z outside the burst: {np.delete(demo.energy_z, np.argmax(demo.energy_z) + np.arange(-10, 10)).max():.1f}")
+fig.plot_energy_and_z(demo);
+
+# %% [markdown]
+# - The 18 kHz row carries a baseline four orders of magnitude above its
+#   neighbours: the tone was learned as background, its excess is ≈ 0, and z
+#   stays below 2 everywhere except the true burst. The nuisance never
+#   becomes a candidate — **no peak threshold was needed, so no real weak
+#   event was put at risk by one**.
+# - The honest limit: the detection band (7–80 kHz) itself remains a hard
+#   gate. A particle slow enough to fall below 7 kHz is lost to both
+#   approaches; the robustness argument starts only inside the band.
 
 # %% [markdown]
 # ## 5 · AGGREGATE — the frame energy E[m]
