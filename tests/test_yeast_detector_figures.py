@@ -9,7 +9,11 @@ import numpy as np
 import pytest
 
 from particles2snr.yeast_detector_figures import (
+    count_active_runs,
+    plot_activation,
     plot_bandpass,
+    plot_concentration,
+    plot_concentration_toy,
     plot_energy_and_z,
     plot_event_support,
     plot_frame_energy,
@@ -64,6 +68,11 @@ def test_every_helper_renders_and_returns_axes(example) -> None:
         plot_robust_band(trace, scaled=True),
         plot_energy_and_z(trace),
         plot_legacy_vs_energy(trace, replay=fake_replay, truth_spans_ms=[(3.9, 4.3)]),
+        plot_concentration_toy({"peaked": np.array([1.0, 9.0, 1.0, 1.0, 1.0, 1.0]),
+                                "flat": np.full(6, 14.0 / 6.0)}),
+        plot_concentration(trace),
+        plot_activation(trace),
+        plot_activation(trace, z_threshold=2.0, c_threshold=0.0),
     ]
     for axes in produced:
         first = axes.flat[0] if isinstance(axes, np.ndarray) else axes
@@ -78,4 +87,19 @@ def test_helpers_draw_into_provided_axes_without_new_figure(example) -> None:
     returned = plot_robust_band(trace, ax=axis)
     assert returned is axis
     assert len(plt.get_fignums()) == open_before
+    plt.close("all")
+
+
+def test_count_active_runs_counts_contiguous_blocks() -> None:
+    assert count_active_runs(np.array([False, False, False])) == 0
+    assert count_active_runs(np.array([True, True, False, True])) == 2
+    assert count_active_runs(np.array([True, False, True, False, True])) == 3
+    assert count_active_runs(np.array([True, True, True])) == 1
+
+
+def test_activation_thresholds_reproduce_the_detector_mask(example) -> None:
+    _signal, config, trace = example
+    axes = plot_activation(trace)
+    expected = int(trace.active.sum())
+    assert f"active frames: {expected} of" in axes[2].get_title()
     plt.close("all")

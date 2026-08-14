@@ -300,6 +300,93 @@ def plot_robust_band(
     return ax
 
 
+def plot_concentration_toy(
+    spectra: dict[str, np.ndarray],
+    *,
+    top_bins: int = 5,
+    axes: np.ndarray | None = None,
+) -> np.ndarray:
+    """Two frame spectra carrying the same total power, one peaked one flat."""
+    axes = _stacked_axes(axes, len(spectra), height=2.2 * len(spectra))
+    for axis, (label, values) in zip(axes, spectra.items()):
+        values = np.asarray(values, dtype=float)
+        share = np.sort(values)[-top_bins:].sum() / values.sum()
+        axis.bar(np.arange(values.size), values, color=TEAL, width=0.75)
+        axis.set_title(f"{label} — total power {values.sum():.0f}, "
+                       f"top-{top_bins} share C = {share:.2f}")
+        axis.set_ylabel("power")
+    axes[-1].set_xlabel("frequency bin k")
+    return axes
+
+
+def plot_concentration(trace: DetectorTrace, *, ax: Axes | None = None) -> Axes:
+    """C[m] along the trace, against the configured floor."""
+    ax = _single_axis(ax)
+    x_ms = frame_axis_ms(trace)
+    floor = trace.config.medium_min_concentration
+    ax.plot(x_ms, trace.concentration, color=TEAL, linewidth=1.1, label="C[m]")
+    ax.axhline(floor, color=ORANGE, linestyle="--", linewidth=1.2,
+               label=f"configured floor C = {floor}")
+    ax.axhline(float(trace.concentration.min()), color=GREY, linestyle=":", linewidth=1.0,
+               label=f"lowest C on this trace = {trace.concentration.min():.2f}")
+    ax.set_ylim(0.0, 1.05)
+    ax.set_xlabel("time [ms]")
+    ax.set_ylabel("C[m]")
+    ax.set_title("Concentration: share of band power held by the top 5 bins")
+    ax.legend(loc="lower right")
+    return ax
+
+
+def count_active_runs(active: np.ndarray) -> int:
+    """Contiguous runs of active frames, before any gap bridging."""
+    flags = np.asarray(active, dtype=bool)
+    if not flags.any():
+        return 0
+    return int(np.count_nonzero(np.diff(flags.astype(np.int8)) == 1) + int(flags[0]))
+
+
+def plot_activation(
+    trace: DetectorTrace,
+    *,
+    z_threshold: float | None = None,
+    c_threshold: float | None = None,
+    axes: np.ndarray | None = None,
+) -> np.ndarray:
+    """z[m], C[m] and the active-frame line for any pair of thresholds."""
+    config = trace.config
+    z_threshold = config.active_snr_z if z_threshold is None else float(z_threshold)
+    c_threshold = (
+        config.medium_min_concentration if c_threshold is None else float(c_threshold)
+    )
+    axes = _stacked_axes(axes, 3, height=7.0)
+    x_ms = frame_axis_ms(trace)
+    active = (trace.energy_z >= z_threshold) & (trace.concentration >= c_threshold)
+
+    axes[0].plot(x_ms, trace.energy_z, color=PURPLE, linewidth=1.1)
+    axes[0].axhline(z_threshold, color=RED, linestyle="--", linewidth=1.2)
+    axes[0].set_yscale("symlog", linthresh=1.0)
+    axes[0].set_ylabel("z[m]")
+    axes[0].set_title(f"unusual?  z >= {z_threshold:.2f}")
+
+    axes[1].plot(x_ms, trace.concentration, color=TEAL, linewidth=1.1)
+    axes[1].axhline(c_threshold, color=ORANGE, linestyle="--", linewidth=1.2)
+    axes[1].set_ylim(0.0, 1.05)
+    axes[1].set_ylabel("C[m]")
+    axes[1].set_title(f"structured?  C >= {c_threshold:.2f}")
+
+    axes[2].fill_between(x_ms, 0, active.astype(float), step="mid",
+                         color=GREEN, alpha=0.85)
+    axes[2].set_ylim(-0.1, 1.3)
+    axes[2].set_yticks([])
+    axes[2].set_ylabel("a[m]")
+    axes[2].set_xlabel("time [ms]")
+    axes[2].set_title(
+        f"active frames: {int(active.sum())} of {active.size}, "
+        f"in {count_active_runs(active)} contiguous run(s) before gap bridging"
+    )
+    return axes
+
+
 _DROP_STAGE_LABELS = {
     "passage_time": "dropped: passage time",
     "width": "dropped: box width",

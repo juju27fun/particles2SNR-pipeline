@@ -53,6 +53,7 @@
 #   data", shows the whole chain on a synthetic trace built from scratch.
 
 # %%
+import matplotlib.pyplot as plt
 import numpy as np
 from IPython.display import Image
 from internship_workspace.config import Workspace
@@ -656,6 +657,166 @@ fig.plot_energy_and_z(trace);
 # - Bottom: the *same* curve, divided by the scale — no new measurement, just
 #   a change of unit. The red dashed line is the activation threshold z = 3.5
 #   used in section 8, and it is only writable because of that change.
+#
+# *Method only · one manifested record · no claim of detector performance or
+# biological validity.*
+
+# %% [markdown]
+# ## 7 · STRUCTURE — the concentration C[m]
+#
+# Everything up to here is shared by **two** detectors in this project: one
+# for yeast (this notebook) and one for beads
+# (`particles2snr.particle_events`). They are the same architecture:
+#
+# `STFT → E[m] → z[m] → [ C[m] mask — optional ] → grouping`
+#
+# The bracketed stage is the subject of this section, and the brackets are
+# the point: it is a stage you switch on or off per population, not a
+# mandatory link.
+#
+# **The question C asks.** z says a frame is unusually energetic. It does not
+# say *how* that energy is arranged across frequency. A particle deposits
+# energy in a few Doppler bins; a click, a saturation transient or a broadband
+# knock spreads it everywhere. C measures that difference:
+#
+# C[m] = (power in the 5 strongest bins) / (total band power in frame m)
+#
+# Two frame spectra carrying exactly the same total power:
+
+# %%
+peaked = np.array([1, 1, 2, 40, 60, 45, 3, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1], dtype=float)
+diffuse = np.full(19, peaked.sum() / 19)
+fig.plot_concentration_toy({"structured — a Doppler signature": peaked,
+                            "diffuse — a broadband knock": diffuse});
+
+# %% [markdown]
+# Same total energy, so **E[m] cannot tell them apart** — z would score both
+# identically. C separates them: the peaked frame keeps most of its power in
+# five bins, the flat one only the share those five bins occupy by chance.
+#
+# ### 7a · C on the real record
+
+# %%
+fig.plot_concentration(trace);
+
+# %% [markdown]
+# **And here is the surprise.** C never comes close to the configured floor
+# of 0.08 — its lowest value on this whole trace is 0.20. The test is
+# structurally satisfied everywhere. Is that specific to this record?
+
+# %%
+print(f"{'record':<26}{'lowest C':>10}{'active z & C':>14}{'active z alone':>16}")
+for event_id in ("9459e76ce29342debc90:00", "214f4ce4967af98a954c:00",
+                 "e1b4603f8b9de6204003:02", "09f788a7473797b794f6:01"):
+    other = detector_trace(load_reviewed_event(workspace, event_id).signal, config)
+    with_c = int(((other.energy_z >= 3.5) & (other.concentration >= 0.08)).sum())
+    z_only = int((other.energy_z >= 3.5).sum())
+    print(f"{event_id:<26}{other.concentration.min():>10.3f}{with_c:>14}{z_only:>16}")
+
+# %% [markdown]
+# On all four manifested records, **deleting the C test would change
+# nothing**: the two right-hand columns are identical. At 0.08, C is not
+# selecting anything — it is a *guard* that never had to fire.
+#
+# There is a structural reason. The 7–80 kHz band holds only 19 STFT bins, so
+# "the top 5" is already 26 % of the band by construction; C is bounded well
+# above 0.08 unless the spectrum is close to perfectly flat *and* the raw
+# power denominator is dominated by bins outside the top five.
+#
+# ### 7b · The denominator is not what you would guess
+#
+# > ```python
+# > top_power     = top-5 of excess        # positive excess P⁺
+# > concentration = top_power / (power.sum(axis=0) + 1e-12)   # raw power P
+# > ```
+# >
+# > The numerator counts **excess** above the baseline; the denominator counts
+# > **total raw power**, baseline included. C is therefore not a share of P⁺
+# > within itself — that quantity would sit near 1 almost always and a 0.08
+# > threshold would be meaningless. It is *the excess of the five best bins,
+# > measured against everything the band carries*. Identical in all
+# > implementations, so intentional — but documented nowhere until here.
+#
+# ### 7c · Same stage, three roles — and the threshold tells you which
+#
+# This is where the second pipeline matters. The bead detector runs the same
+# activation line ([`particle_events.py`](../particles2snr/particle_events.py)):
+#
+# ```python
+# active = (energy_z >= config.active_z) & (concentration >= config.active_min_concentration)
+# ```
+#
+# with `active_min_concentration = 0.0`. The stage is present and neutralised
+# — every frame passes. Across both pipelines the *value* of the threshold,
+# not the presence of the code, says what C is doing:
+#
+# | Setting | Where | Role of C |
+# |---|---|---|
+# | 0.0 | beads, main activation | **off** — easy beads give unambiguous events; a structure test only adds a way to lose one |
+# | 0.08 | yeast activation | **guard** — costs nothing, fires only on a pathologically diffuse frame (never, on these four records) |
+# | 0.08 | beads, event acceptance | guard, moved from the frame level to the event level |
+# | 0.80 – 0.90 | beads, rescue and deblend paths | **selector** — these paths deliberately lower z to reach hard cases, and demand strong structure in exchange |
+#
+# The last row is the honest reading of C: it becomes a real decision only
+# when it is set high, in the regimes that go looking for difficult events.
+# Same code, three regimes, each argued from the population rather than
+# tuned in the abstract.
+#
+# ### 7d · One word, two quantities
+#
+# `concentration_by_frame` (this section, per frame, feeding activation) and
+# the `concentration` reported per **event** at qualification are different
+# quantities sharing a name. The per-event one divides by `event_power`
+# alone, so it sits near 1 — which is why the qualification threshold of 0.12
+# and the activation floor of 0.08 are not comparable numbers despite looking
+# alike.
+
+# %% [markdown]
+# ## 8 · ACTIVATE — the two questions combined ★
+#
+# a[m] = 1 if **z[m] ≥ 3.5** *and* **C[m] ≥ 0.08**, else 0. Two independent
+# questions: *unusual?* and *structured?*
+
+# %%
+fig.plot_activation(trace);
+
+# %% [markdown]
+# - Top and middle: each test with its threshold. Bottom: the frames that
+#   pass both — one contiguous run, which section 9 will turn into an event.
+# - Consistent with 7a, the middle panel never approaches its threshold: the
+#   run is decided by z alone on this record.
+#
+# ### 8a · The sandbox
+#
+# Move the two thresholds and watch the active line. The trace is already
+# computed, so only the decision is recomputed — nothing is re-analysed.
+
+# %%
+from ipywidgets import FloatSlider, interact
+
+
+@interact(z_thr=FloatSlider(value=3.5, min=1.0, max=8.0, step=0.1, description="z ≥"),
+          c_thr=FloatSlider(value=0.08, min=0.0, max=0.95, step=0.01, description="C ≥"))
+def _explore(z_thr: float, c_thr: float) -> None:
+    fig.plot_activation(trace, z_threshold=z_thr, c_threshold=c_thr)
+    plt.show()
+
+# %% [markdown]
+# What the two sliders do is **not** symmetric:
+#
+# - **z sets the duration.** Lowering it from 3.5 to 2.0 lengthens the run at
+#   both edges and eventually raises a second run elsewhere in the trace.
+# - **C does nothing at all** until roughly 0.72, then starts cutting frames
+#   *out of the real event* — 11 frames left at 0.80, 9 at 0.90. On this
+#   record there is no setting of C that removes a false start while keeping
+#   the event intact, because there is no false start for it to remove.
+# - **Set C to 0.00 and you are running the bead activation rule.** The line
+#   does not move. That is the two-pipeline claim of 7c, verified by dragging
+#   a slider rather than asserted in a table.
+#
+# The values 3.5 and 0.08 are a development choice, not a demonstrated
+# optimum — and this sandbox is a sensitivity check on one record, not a
+# calibration.
 #
 # *Method only · one manifested record · no claim of detector performance or
 # biological validity.*
