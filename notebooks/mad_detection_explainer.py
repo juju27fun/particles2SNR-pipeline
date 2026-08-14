@@ -27,7 +27,19 @@
 #
 # What it **does not do**: it produces no manifested artifact, no performance
 # metric, no detector comparison, and no biological claim. It explains a
-# method; it does not convert development evidence into validation.
+# method; it does not convert development evidence into validation. Every
+# figure below is bound by that same claim boundary: *method only, one
+# manifested record*.
+#
+# **What you need to run it.** Two different things, often confused:
+#
+# - *This notebook* loads its example record by ID through the workspace
+#   dataset registry and the frozen review queues — so it needs the internship
+#   workspace checkout. That machinery exists for **provenance of the
+#   examples**, not for the method.
+# - *The detector itself* needs none of that: `detector_trace(signal, config)`
+#   accepts any 1-D numpy array. The last section, "Running on your own
+#   data", shows the whole chain on a synthetic trace built from scratch.
 
 # %%
 import numpy as np
@@ -98,9 +110,6 @@ fig.plot_event_support(record.signal, config,
 # %% [markdown]
 # - The green span is the human-reviewed support: the target the detection
 #   chain must recover from the raw trace alone.
-#
-# *Method only · one manifested record · no claim of detector performance or
-# biological validity.*
 
 # %% [markdown]
 # ## 2 · ISOLATE — the band-pass filter
@@ -117,9 +126,6 @@ fig.plot_bandpass(record.signal, trace);
 # - The slow drift and high-frequency hash disappear; the oscillatory burst
 #   around 4 ms survives, unmoved.
 # - Everything downstream sees only this filtered trace.
-#
-# *Method only · one manifested record · no claim of detector performance or
-# biological validity.*
 
 # %% [markdown]
 # ## 3 · LOCALISE — the short-time Fourier transform
@@ -129,7 +135,19 @@ fig.plot_bandpass(record.signal, trace);
 # H = 512 − 384 = 128 samples, and takes an FFT per position: frequency content
 # *and* time.
 #
-# Symbols: frame index m, frequency bin k, window w, complex STFT X(k, m).
+# **Notation for the rest of the notebook** — every later symbol builds on
+# these:
+#
+# | Symbol | Meaning | Value here |
+# |---|---|---|
+# | fₛ | sampling frequency | 2 MHz |
+# | N | STFT window length | 512 samples (256 µs) |
+# | H | hop between windows | 128 samples (64 µs) |
+# | m | **frame** index — one window position, one column | 0 … 127 |
+# | k | **frequency bin** index — one row | 0 … n_bins−1, spaced fₛ/N ≈ 3.9 kHz |
+# | w | Hann window | — |
+# | X(k, m) | complex STFT value at bin k, frame m | (n_bins × n_frames) matrix |
+# | P(k, m) | power \|X(k, m)\|² | same shape, ≥ 0 |
 
 # %%
 fig.plot_stft_windows(trace, center=center);
@@ -140,23 +158,42 @@ fig.plot_stft_windows(trace, center=center);
 # is small) visible to neighbouring frames.
 
 # %%
-fig.plot_spectrogram(trace);
+fig.plot_spectrogram(trace, annotate=True);
 
 # %% [markdown]
-# - Time runs on x, frequency on y, colour is power |X(k, m)|².
+# - Time runs on x, frequency on y, colour is P(k, m) in dB. The dashed white
+#   column is **one frame m**; the dotted white row is **one bin k** — every
+#   quantity from here on is indexed by these two letters.
 # - The event appears as a localised bright patch below ~25 kHz; a single time
 #   slice can contain several frequency components at once.
-#
-# *Method only · one manifested record · no claim of detector performance or
-# biological validity.*
 
 # %% [markdown]
 # ## 4 · REFERENCE — the per-frequency Q25 baseline
 #
 # Each frequency has its own ordinary level: low frequencies carry more power
-# than high ones even in pure noise. The detector learns that level **per
-# row**: B_k = Q25_m(P(k, m)), the 25th percentile over time of each frequency
-# row, and keeps only the positive excess P⁺(k, m) = max(P − B_k, 0).
+# than high ones even in pure noise. So the reference cannot be one global
+# number — the detector learns it **per row**:
+#
+# - **B_k = Q25_m(P(k, m))** — for each bin k, the 25th percentile of its own
+#   row over time: the level this frequency sits at when nothing happens.
+# - **P⁺(k, m) = max(P(k, m) − B_k, 0)** — what remains above that level.
+#
+# Before the real signal, the whole idea on one toy row of 8 frames, where an
+# event brightens 2 frames out of 8:
+
+# %%
+row = np.array([4, 5, 3, 6, 40, 40, 5, 4], dtype=float)
+baseline_k = np.percentile(row, 25)
+excess_row = np.clip(row - baseline_k, 0.0, None)
+print(f"P(k, ·) one row over time : {row}")
+print(f"B_k = Q25 of that row     : {baseline_k}")
+print(f"P+  = max(P - B_k, 0)     : {excess_row}")
+
+# %% [markdown]
+# The 25th percentile sits at 4 — on the *quiet* level — even though a quarter
+# of the frames are lit by the event. The two event frames keep almost all
+# their power in P⁺; the quiet frames keep almost none. Now the same operation
+# on every row of the real record:
 
 # %%
 fig.plot_frequency_baseline(trace);
@@ -165,11 +202,9 @@ fig.plot_frequency_baseline(trace);
 # - Middle panel: one frequency row spends ~75 % of its time near its baseline;
 #   the event towers above it.
 # - Why Q25 and not the median: the baseline must estimate the *quiet* level,
-#   under the assumption that at least 75 % of frames are noise.
+#   under the assumption that at least 75 % of frames are noise. A median
+#   would already drift if the event covered close to half the record.
 # - Why clip at zero: a power *deficit* is not an event.
-#
-# *Method only · one manifested record · no claim of detector performance or
-# biological validity.*
 
 # %% [markdown]
 # ## 5 · AGGREGATE — the frame energy E[m]
@@ -201,9 +236,6 @@ Image(filename=str(failure_plot), width=900)
 # %% [markdown]
 # *The figure above is the manifested development artifact — it is displayed,
 # not regenerated, so its provenance stays intact.*
-#
-# *Method only · one manifested record · no claim of detector performance or
-# biological validity.*
 
 # %% [markdown]
 # ## 6 · NORMALISE — median and MAD ★
@@ -318,11 +350,41 @@ fig.plot_energy_and_z(trace);
 
 # %% [markdown]
 # - Top: E[m] with the median and the ± energy_scale band (now the scaled one).
-# - Bottom: the same curve in z units; the red dashed line is the activation
-#   threshold z = 3.5 used in section 8.
+# - Bottom: the same curve in z units. **Read z[m] as: "how many robust
+#   scales does this frame sit above the ordinary level of this trace?"**
+#   The red dashed line is the activation threshold z = 3.5 used in section 8.
 #
 # *Method only · one manifested record · no claim of detector performance or
 # biological validity.*
+
+# %% [markdown]
+# ## Running on your own data
+#
+# Everything above used the workspace machinery only to fetch a *manifested*
+# example. The method itself needs a plain 1-D array. The protocol:
+#
+# 1. A 1-D float array (any amplitude units — section 6e showed why gain does
+#    not matter).
+# 2. A `YeastDetectionConfig` whose `sampling_frequency_hz` matches your
+#    acquisition; every other field has the development default. The preset
+#    used here assumes 2 MHz.
+# 3. At least one STFT window of samples (N = 512 at the default settings).
+#
+# Below, a synthetic trace built from scratch — a 30 kHz burst in Gaussian
+# noise — goes through the identical chain:
+
+# %%
+rng = np.random.default_rng(42)
+t = np.arange(16384) / config.sampling_frequency_hz
+burst = np.exp(-0.5 * ((t - 4.0e-3) / 2.0e-4) ** 2) * np.sin(2 * np.pi * 30e3 * t)
+your_signal = (burst + 0.02 * rng.normal(size=t.size)).astype(np.float32)
+your_trace = detector_trace(your_signal, config)
+fig.plot_energy_and_z(your_trace);
+
+# %% [markdown]
+# No registry, no review queue, no workspace: one array, one config, the same
+# seven stages. Replace `your_signal` with your own acquisition and the whole
+# notebook's reasoning applies unchanged.
 #
 # ---
 # **Sections 7–11 (concentration, activation with interactive thresholds,

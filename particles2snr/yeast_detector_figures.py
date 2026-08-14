@@ -178,8 +178,14 @@ def plot_stft_windows(
     return ax
 
 
-def plot_spectrogram(trace: DetectorTrace, *, ax: Axes | None = None) -> Axes:
-    """Band-limited power spectrogram in dB."""
+def plot_spectrogram(
+    trace: DetectorTrace, *, annotate: bool = False, ax: Axes | None = None
+) -> Axes:
+    """Band-limited power spectrogram in dB.
+
+    With ``annotate=True``, one column and one row are outlined to anchor the
+    P(k, m) notation: a column is a frame m, a row is a frequency bin k.
+    """
     ax = _single_axis(ax)
     power_db = 10.0 * np.log10(trace.power + 1.0e-12)
     low, high = np.quantile(power_db, [0.05, 0.995])
@@ -194,6 +200,21 @@ def plot_spectrogram(trace: DetectorTrace, *, ax: Axes | None = None) -> Axes:
     ax.set_title(
         f"Spectrogram, detection band {config.low_freq_hz / 1000:.0f}–{config.high_freq_hz / 1000:.0f} kHz"
     )
+    if annotate:
+        x_ms = frame_axis_ms(trace)
+        frame = int(np.argmax(trace.frame_energy))
+        bin_index = int(np.argmax(trace.excess.sum(axis=1)))
+        ax.axvline(x_ms[frame], color="white", linestyle="--", linewidth=1.0, alpha=0.85)
+        ax.axhline(trace.frequencies[bin_index] / 1000.0, color="white",
+                   linestyle=":", linewidth=1.0, alpha=0.85)
+        ax.annotate(f"one column = one frame m (here m = {frame})",
+                    xy=(x_ms[frame], float(ax.get_ylim()[1])),
+                    xytext=(4, -2), textcoords="offset points",
+                    color="white", fontsize=9, va="top")
+        ax.annotate(f"one row = one frequency bin k (here {trace.frequencies[bin_index] / 1000:.1f} kHz)",
+                    xy=(float(x_ms[0]), trace.frequencies[bin_index] / 1000.0),
+                    xytext=(4, 4), textcoords="offset points",
+                    color="white", fontsize=9)
     return ax
 
 
