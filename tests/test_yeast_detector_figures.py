@@ -13,6 +13,7 @@ from particles2snr.yeast_detector_figures import (
     plot_activation,
     plot_bandpass,
     plot_concentration,
+    plot_detected_events,
     plot_concentration_toy,
     plot_energy_and_z,
     plot_event_support,
@@ -73,6 +74,8 @@ def test_every_helper_renders_and_returns_axes(example) -> None:
         plot_concentration(trace),
         plot_activation(trace),
         plot_activation(trace, z_threshold=2.0),
+        plot_robust_band(trace, both=True),
+        plot_detected_events(signal, [], config),
     ]
     for axes in produced:
         first = axes.flat[0] if isinstance(axes, np.ndarray) else axes
@@ -99,8 +102,19 @@ def test_count_active_runs_counts_contiguous_blocks() -> None:
 
 def test_activation_thresholds_reproduce_the_detector_mask(example) -> None:
     _signal, config, trace = example
-    axes = plot_activation(trace)
+    axis = plot_activation(trace)
     expected = int(trace.active.sum())
-    assert len(axes) == 2  # z and the activation line; no concentration panel
-    assert f"active frames: {expected} of" in axes[1].get_title()
+    # A single z panel: no concentration panel and no separate a[m] strip.
+    assert f"{expected} frames of" in axis.get_title()
+    plt.close("all")
+
+
+def test_detected_events_marks_accepted_and_rejected(example) -> None:
+    from particles2snr.yeast_events import detect_yeast_events
+
+    signal, config, _trace = example
+    events, _reason = detect_yeast_events(signal, config)
+    axis = plot_detected_events(signal, events, config, truth_spans_ms=[(3.9, 4.3)])
+    kept = sum(1 for event in events if event.quality in {"strict", "medium"})
+    assert f"{len(events)} interval(s), {kept} accepted" in axis.get_title()
     plt.close("all")

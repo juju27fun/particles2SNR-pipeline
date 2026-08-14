@@ -282,20 +282,37 @@ def plot_robust_band(
     trace: DetectorTrace,
     *,
     scaled: bool = False,
+    both: bool = False,
     ax: Axes | None = None,
 ) -> Axes:
-    """E[m] with its median and robust band (raw MAD, or the 1.4826-scaled one)."""
+    """E[m] with its median and robust band(s).
+
+    ``both=True`` draws the unscaled MAD band and the 1.4826-scaled one
+    together, which is the only place the two quantities can be told apart
+    by eye.
+    """
     ax = _single_axis(ax)
     x_ms = frame_axis_ms(trace)
-    half = trace.energy_scale if scaled else trace.raw_mad
-    label = "median ± 1.4826 MAD (= energy_scale)" if scaled else "median ± 1 raw MAD"
     ax.plot(x_ms, trace.frame_energy, color=BLUE, linewidth=1.1, label="E[m]")
     ax.axhline(trace.energy_median, color=GREEN, linewidth=1.4, label="median")
-    ax.axhspan(trace.energy_median - half, trace.energy_median + half,
-               color=PURPLE, alpha=0.18, label=label)
+    if both:
+        ax.axhspan(trace.energy_median - trace.energy_scale,
+                   trace.energy_median + trace.energy_scale,
+                   color=PURPLE, alpha=0.12, label="median ± energy_scale (1.4826 × MAD)")
+        ax.axhspan(trace.energy_median - trace.raw_mad,
+                   trace.energy_median + trace.raw_mad,
+                   color=PURPLE, alpha=0.30, label="median ± raw_mad")
+        ax.set_ylim(trace.energy_median - 4.0 * trace.energy_scale,
+                    trace.energy_median + 4.0 * trace.energy_scale)
+        ax.set_title("The two bands that have both been called \"the MAD\"")
+    else:
+        half = trace.energy_scale if scaled else trace.raw_mad
+        label = "median ± 1.4826 MAD (= energy_scale)" if scaled else "median ± 1 raw MAD"
+        ax.axhspan(trace.energy_median - half, trace.energy_median + half,
+                   color=PURPLE, alpha=0.18, label=label)
+        ax.set_title("The event exits the robust band by many band-widths")
     ax.set_xlabel("time [ms]")
     ax.set_ylabel("E[m]")
-    ax.set_title("The event exits the robust band by many band-widths")
     ax.legend(loc="upper right")
     return ax
 
@@ -349,32 +366,32 @@ def plot_activation(
     trace: DetectorTrace,
     *,
     z_threshold: float | None = None,
-    axes: np.ndarray | None = None,
-) -> np.ndarray:
-    """z[m] against its threshold, and the resulting active-frame line."""
+    ax: Axes | None = None,
+) -> Axes:
+    """z[m] against its threshold, with the frames it selects shaded."""
     config = trace.config
     z_threshold = config.active_snr_z if z_threshold is None else float(z_threshold)
-    axes = _stacked_axes(axes, 2, height=5.5)
+    ax = _single_axis(ax)
     x_ms = frame_axis_ms(trace)
     active = trace.energy_z >= z_threshold
-
-    axes[0].plot(x_ms, trace.energy_z, color=PURPLE, linewidth=1.1)
-    axes[0].axhline(z_threshold, color=RED, linestyle="--", linewidth=1.2)
-    axes[0].set_yscale("symlog", linthresh=1.0)
-    axes[0].set_ylabel("z[m]")
-    axes[0].set_title(f"unusual enough?  z >= {z_threshold:.2f}")
-
-    axes[1].fill_between(x_ms, 0, active.astype(float), step="mid",
-                         color=GREEN, alpha=0.85)
-    axes[1].set_ylim(-0.1, 1.3)
-    axes[1].set_yticks([])
-    axes[1].set_ylabel("a[m]")
-    axes[1].set_xlabel("time [ms]")
-    axes[1].set_title(
-        f"active frames: {int(active.sum())} of {active.size}, "
+    half_frame = 0.5 * trace.hop / config.sampling_frequency_hz * 1000.0
+    for index in np.flatnonzero(active):
+        ax.axvspan(x_ms[index] - half_frame, x_ms[index] + half_frame,
+                   color=PALE_GREEN, zorder=0)
+    ax.plot(x_ms, trace.energy_z, color=PURPLE, linewidth=1.2, zorder=3)
+    ax.plot(x_ms[active], trace.energy_z[active], linestyle="none", marker="o",
+            markersize=3.6, color=GREEN, zorder=4, label="selected frames")
+    ax.axhline(z_threshold, color=RED, linestyle="--", linewidth=1.2,
+               label=f"activation threshold z = {z_threshold:.2f}")
+    ax.set_yscale("symlog", linthresh=1.0)
+    ax.set_ylabel("z[m]")
+    ax.set_xlabel("time [ms]")
+    ax.set_title(
+        f"{int(active.sum())} frames of {active.size} selected, "
         f"in {count_active_runs(active)} contiguous run(s) before gap bridging"
     )
-    return axes
+    ax.legend(loc="upper right")
+    return ax
 
 
 def plot_detected_events(
@@ -426,14 +443,15 @@ def plot_legacy_vs_energy(
     *,
     replay: dict,
     truth_spans_ms: list[tuple[float, float]],
+    mad_events=(),
     axes: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Peak-first hypotheses and their cleaning fate, against the z[m] chain.
+    """The two pipelines' outputs on one trace, as bars over a shared axis.
 
     Top: filtered trace with the true event spans. Middle: every raw legacy
-    hypothesis as a bar — surviving boxes solid blue, cleaned-away ones faded
-    orange with the stage that removed them. Bottom: the energy chain's z[m],
-    which never created hypotheses to clean.
+    hypothesis — surviving boxes solid blue, cleaned-away ones faded orange
+    with the stage that removed them. Bottom: what the MAD chain returned,
+    green when accepted and orange when rejected.
     """
     axes = _stacked_axes(axes, 3, height=8.0)
     config = trace.config
@@ -470,15 +488,28 @@ def plot_legacy_vs_energy(
         f"→ {survivors} box(es) after five cleaning stages"
     )
 
-    frame_ms = frame_axis_ms(trace)
-    axes[2].plot(frame_ms, trace.frame_energy, color=BLUE, linewidth=1.1, label="E[m]")
-    axes[2].axhline(trace.energy_median, color=GREEN, linewidth=1.2,
-                    label="typical level (median)")
-    axes[2].set_yscale("log")
-    axes[2].set_ylabel("E[m]")
+    events = list(mad_events)
+    config = trace.config
+    for index, event in enumerate(events):
+        left = event.event_start / config.sampling_frequency_hz * 1000.0
+        right = event.event_end / config.sampling_frequency_hz * 1000.0
+        accepted = event.quality in {"strict", "medium"}
+        axes[2].plot([left, right], [len(events) - index] * 2,
+                     color=GREEN if accepted else ORANGE, linewidth=8,
+                     alpha=1.0 if accepted else 0.55, solid_capstyle="round")
+        axes[2].annotate(f"{event.quality} · z max {event.snr_proxy:.0f}",
+                         xy=(right, len(events) - index), xytext=(6, -2),
+                         textcoords="offset points", fontsize=8,
+                         color=GREEN if accepted else ORANGE)
+    axes[2].set_ylim(0.2, max(1, len(events)) + 0.8)
+    axes[2].set_yticks([])
+    axes[2].set_ylabel("MAD output")
     axes[2].set_xlabel("time [ms]")
-    axes[2].set_title("Energy chain: one bump per real event, no hypothesis to clean")
-    axes[2].legend(loc="upper left")
+    kept = sum(1 for event in events if event.quality in {"strict", "medium"})
+    axes[2].set_title(
+        f"MAD chain: no hypothesis was ever created to clean — "
+        f"{len(events)} interval(s) returned, {kept} accepted"
+    )
     return axes
 
 

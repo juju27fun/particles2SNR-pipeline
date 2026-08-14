@@ -331,14 +331,9 @@ fig.plot_frame_energy(demo);
 # %%
 replay_tone = replay_particles2snr_on_synthetic(
     tone_signal, truth_start=9200, truth_end=10800, frequency_hz=30e3)
-fig.plot_legacy_vs_energy(demo, replay=replay_tone, truth_spans_ms=[(4.6, 5.4)]);
-
-# %% [markdown]
-# And what the MAD chain finally returns on that same signal:
-
-# %%
 tone_events, _ = detect_yeast_events(tone_signal, config)
-fig.plot_detected_events(tone_signal, tone_events, config, truth_spans_ms=[(4.6, 5.4)]);
+fig.plot_legacy_vs_energy(demo, replay=replay_tone, truth_spans_ms=[(4.6, 5.4)],
+                          mad_events=tone_events);
 
 # %% [markdown]
 # - The tone spawns hypotheses all along the trace: **8 raw hypotheses for 1
@@ -368,16 +363,9 @@ slow_signal = (slow + fast + 0.02 * rng.normal(size=t.size)).astype(np.float32)
 slow_trace = detector_trace(slow_signal, config)
 replay_slow = replay_particles2snr_on_synthetic(
     slow_signal, truth_start=3400, truth_end=6600, frequency_hz=9e3)
-fig.plot_legacy_vs_energy(slow_trace, replay=replay_slow,
-                          truth_spans_ms=[(1.7, 3.3), (5.6, 6.4)]);
-
-# %% [markdown]
-# And the MAD chain's own output on the same signal:
-
-# %%
 slow_events, _ = detect_yeast_events(slow_signal, config)
-fig.plot_detected_events(slow_signal, slow_events, config,
-                         truth_spans_ms=[(1.7, 3.3), (5.6, 6.4)]);
+fig.plot_legacy_vs_energy(slow_trace, replay=replay_slow, mad_events=slow_events,
+                          truth_spans_ms=[(1.7, 3.3), (5.6, 6.4)]);
 
 # %% [markdown]
 # - The legacy pipeline *sees* the slow particle at the raw stage — then the
@@ -561,19 +549,19 @@ for label, factor in (("original", 1.0), ("gain x3", 3.0), ("gain /3", 1 / 3)):
 # itself.
 #
 # ### 6e · On the real signal
+#
+# Zoomed to the noise floor, because at full scale both bands are a single
+# line — the event's peak sits about **112 raw-MAD widths** above the median:
 
 # %%
-fig.plot_robust_band(trace);
+fig.plot_robust_band(trace, both=True);
 
 # %% [markdown]
-# - The purple band (median ± 1 raw MAD) hugs the noise floor so tightly it is
-#   barely visible at this scale — the event's peak sits about **112 raw-MAD
-#   widths** above the median.
-#
-# **Vocabulary, fixed once and for all:** this band uses `raw_mad`, the
-# unscaled median absolute deviation. The detector divides by
-# `energy_scale = 1.4826 × raw_mad`. Two quantities, two names — both have
-# historically been called "MAD", 48 % apart.
+# **Vocabulary, fixed once and for all.** The two purple bands are the two
+# quantities that have both been called "the MAD": the inner one is
+# `raw_mad`, the unscaled median absolute deviation; the outer one is
+# `energy_scale = 1.4826 × raw_mad`, the divisor the detector actually uses.
+# Two names, 48 % apart.
 #
 # ### 6f · Where 1.4826 comes from
 #
@@ -647,16 +635,22 @@ print(f"peak z: original = {trace.energy_z.max():.1f}   "
 # z[m] is the distance of E[m] to this trace's own baseline, in units of this
 # trace's own robust scale. Nothing more — and for thresholding, nothing less.
 #
-# ### 6i · Synthesis
+# ### 6i · Synthesis — what this buys, on the real record
+#
+# Everything since section 1 exists to make the following interval computable
+# without a human looking at the trace. This is the detector's actual output
+# on our record, back on the time series it came from:
 
 # %%
-fig.plot_energy_and_z(trace);
+record_events, _ = detect_yeast_events(record.signal, config)
+fig.plot_detected_events(record.signal, record_events, config,
+                         truth_spans_ms=[(event_start / 2e6 * 1000, event_end / 2e6 * 1000)]);
 
 # %% [markdown]
-# - Top: E[m] with the median and the ± energy_scale band (now the scaled one).
-# - Bottom: the *same* curve, divided by the scale — no new measurement, just
-#   a change of unit. The red dashed line is the activation threshold z = 3.5
-#   used in section 7, and it is only writable because of that change.
+# The green bar is the bounded event the notebook set out to produce, and it
+# lands on the human-reviewed support (pale green) it never saw. Sections 7
+# to 9 are how the z curve becomes that bar: which frames are selected, how
+# they are grouped, and how the boundaries are placed.
 #
 # *Method only · one manifested record · no claim of detector performance or
 # biological validity.*
@@ -670,8 +664,8 @@ fig.plot_energy_and_z(trace);
 fig.plot_activation(trace);
 
 # %% [markdown]
-# - Top: z[m] against its threshold. Bottom: the frames that pass — one
-#   contiguous run, which section 8 will turn into an event.
+# The shaded frames are the ones the threshold selects — a single contiguous
+# run, which section 8 turns into the interval 6i already showed.
 #
 # ### 7a · The sandbox
 #
@@ -703,8 +697,7 @@ def _explore(z_thr: float) -> None:
 # %% [markdown]
 # ## Running on your own data
 #
-# Everything above used the workspace machinery only to fetch a *manifested*
-# example. The method itself needs a plain 1-D array. The protocol:
+# Everything above used the workspace only to fetch a traceable example. The method itself needs a plain 1-D array. The protocol:
 #
 # 1. A 1-D float array (any amplitude units — section 6d showed why gain does
 #    not matter).
@@ -721,17 +714,8 @@ rng = np.random.default_rng(42)
 t = np.arange(16384) / config.sampling_frequency_hz
 burst = np.exp(-0.5 * ((t - 4.0e-3) / 2.0e-4) ** 2) * np.sin(2 * np.pi * 30e3 * t)
 your_signal = (burst + 0.02 * rng.normal(size=t.size)).astype(np.float32)
-your_trace = detector_trace(your_signal, config)
-fig.plot_energy_and_z(your_trace);
-
-# %% [markdown]
-# And the bounded interval the chain returns for it — the deliverable the
-# whole notebook was building towards:
-
-# %%
 your_events, _ = detect_yeast_events(your_signal, config)
-fig.plot_detected_events(your_signal, your_events, config,
-                         truth_spans_ms=[(3.6, 4.4)]);
+fig.plot_detected_events(your_signal, your_events, config, truth_spans_ms=[(3.6, 4.4)]);
 
 # %% [markdown]
 # No registry, no review queue, no workspace: one array, one config, the same
