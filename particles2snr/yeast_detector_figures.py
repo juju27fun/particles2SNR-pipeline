@@ -1,0 +1,306 @@
+"""Screen-density figures for the MAD detection explainer notebook.
+
+Same palette and colour semantics as the frozen v5 explainer deck, at screen
+density (11 x 4.5 in, 110 dpi) instead of projection density. Colour grammar:
+PURPLE = robust/MAD/z, GREEN = median and active frames, RED = threshold on z,
+ORANGE = threshold on C or rejection, BLUE = signal/energy, TEAL =
+concentration, GREY = raw trace, PALE_GREEN = detected support, PALE_BLUE =
+review context.
+
+Every helper draws into the axes it is given (``ax=`` / ``axes=``) so
+interactive cells can redraw without recreating figures; with the default
+``None`` it creates its own figure.
+"""
+
+from __future__ import annotations
+
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.axes import Axes
+
+from .yeast_events import DetectorTrace, YeastDetectionConfig
+
+NAVY = "#0A335C"
+GREY = "#5B6773"
+LIGHT_GREY = "#D9E1E7"
+BLUE = "#2F6FED"
+PURPLE = "#7651C8"
+TEAL = "#22A6A1"
+GREEN = "#0F8A70"
+ORANGE = "#D97706"
+RED = "#FF3654"
+PALE_GREEN = "#DDF2EC"
+PALE_BLUE = "#EAF1FD"
+
+FIGSIZE = (11.0, 4.5)
+DPI = 110
+
+plt.rcParams.update(
+    {
+        "figure.dpi": DPI,
+        "font.family": "DejaVu Sans",
+        "font.size": 11,
+        "axes.titlesize": 12,
+        "axes.labelsize": 11,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "mathtext.fontset": "cm",
+        "axes.edgecolor": NAVY,
+        "axes.labelcolor": NAVY,
+        "xtick.color": NAVY,
+        "ytick.color": NAVY,
+        "legend.frameon": False,
+    }
+)
+
+
+def time_axis_ms(n_samples: int, config: YeastDetectionConfig) -> np.ndarray:
+    return np.arange(n_samples) / config.sampling_frequency_hz * 1000.0
+
+
+def frame_axis_ms(trace: DetectorTrace) -> np.ndarray:
+    return trace.times * 1000.0
+
+
+def _single_axis(ax: Axes | None) -> Axes:
+    if ax is None:
+        _, ax = plt.subplots(figsize=FIGSIZE)
+    return ax
+
+
+def _stacked_axes(axes: np.ndarray | None, nrows: int, height: float = 6.5) -> np.ndarray:
+    if axes is None:
+        _, axes = plt.subplots(nrows, 1, figsize=(FIGSIZE[0], height), sharex=True)
+    return np.atleast_1d(np.asarray(axes))
+
+
+def plot_trace_overview(
+    signal: np.ndarray,
+    config: YeastDetectionConfig,
+    *,
+    zoom_center: int | None = None,
+    zoom_halfwidth: int = 25,
+    ax: Axes | None = None,
+) -> Axes:
+    """Full raw trace with an inset zoom showing individual samples."""
+    ax = _single_axis(ax)
+    x_ms = time_axis_ms(signal.size, config)
+    ax.plot(x_ms, signal, color=GREY, linewidth=0.6)
+    ax.set_xlabel("time [ms]")
+    ax.set_ylabel("amplitude [a.u.]")
+    ax.set_title(f"Raw trace — {signal.size} samples at {config.sampling_frequency_hz / 1e6:.0f} MHz")
+    center = signal.size // 2 if zoom_center is None else int(zoom_center)
+    lo = max(0, center - zoom_halfwidth)
+    hi = min(signal.size, center + zoom_halfwidth)
+    inset = ax.inset_axes([0.68, 0.60, 0.30, 0.32])
+    inset.plot(x_ms[lo:hi], signal[lo:hi], color=GREY, linewidth=0.9,
+               marker="o", markersize=2.4, markerfacecolor=NAVY)
+    inset.text(0.03, 0.06, f"{hi - lo} samples", transform=inset.transAxes, fontsize=8, color=NAVY)
+    inset.tick_params(labelsize=7)
+    ax.indicate_inset_zoom(inset, edgecolor=NAVY, alpha=0.6)
+    return ax
+
+
+def plot_event_support(
+    signal: np.ndarray,
+    config: YeastDetectionConfig,
+    *,
+    event_start: int,
+    event_end: int,
+    ax: Axes | None = None,
+) -> Axes:
+    """Raw trace with the reviewed event support highlighted."""
+    ax = _single_axis(ax)
+    x_ms = time_axis_ms(signal.size, config)
+    ax.plot(x_ms, signal, color=GREY, linewidth=0.6)
+    ax.axvspan(x_ms[event_start], x_ms[min(event_end, signal.size - 1)],
+               color=PALE_GREEN, zorder=0, label="event support")
+    width_ms = (event_end - event_start) / config.sampling_frequency_hz * 1000.0
+    ax.set_xlabel("time [ms]")
+    ax.set_ylabel("amplitude [a.u.]")
+    ax.set_title(f"The event occupies {width_ms:.2f} ms of the record")
+    ax.legend(loc="upper right")
+    return ax
+
+
+def plot_bandpass(
+    signal: np.ndarray,
+    trace: DetectorTrace,
+    *,
+    axes: np.ndarray | None = None,
+) -> np.ndarray:
+    """Raw versus band-passed trace, stacked with a shared time axis."""
+    axes = _stacked_axes(axes, 2, height=5.5)
+    config = trace.config
+    x_ms = time_axis_ms(signal.size, config)
+    axes[0].plot(x_ms, signal, color=GREY, linewidth=0.6)
+    axes[0].set_title("Before — raw trace")
+    axes[0].set_ylabel("amplitude [a.u.]")
+    axes[1].plot(x_ms, trace.filtered, color=BLUE, linewidth=0.6)
+    axes[1].set_title(
+        f"After — Butterworth order {config.filter_order}, "
+        f"{config.low_freq_hz / 1000:.0f}–{config.high_freq_hz / 1000:.0f} kHz, zero-phase (filtfilt)"
+    )
+    axes[1].set_xlabel("time [ms]")
+    axes[1].set_ylabel("amplitude [a.u.]")
+    return axes
+
+
+def plot_stft_windows(
+    trace: DetectorTrace,
+    *,
+    center: int,
+    n_windows: int = 5,
+    ax: Axes | None = None,
+) -> Axes:
+    """Sliding Hann windows over the filtered trace around ``center``."""
+    ax = _single_axis(ax)
+    config = trace.config
+    x_ms = time_axis_ms(trace.filtered.size, config)
+    n, hop = config.stft_nperseg, trace.hop
+    first = max(0, center - n // 2 - (n_windows // 2) * hop)
+    span = slice(max(0, first - n // 2), min(trace.filtered.size, first + n + n_windows * hop))
+    peak = float(np.max(np.abs(trace.filtered[span])) or 1.0)
+    ax.plot(x_ms[span], trace.filtered[span] / peak, color=LIGHT_GREY, linewidth=0.7)
+    hann = np.hanning(n)
+    for index in range(n_windows):
+        start = first + index * hop
+        if start + n > trace.filtered.size:
+            break
+        colour = plt.matplotlib.colors.to_rgba(BLUE, 0.35 + 0.5 * index / max(1, n_windows - 1))
+        ax.plot(x_ms[start : start + n], hann, color=colour, linewidth=1.4)
+    ax.set_xlabel("time [ms]")
+    ax.set_ylabel("normalised amplitude / window weight")
+    ax.set_title(
+        f"Hann windows of N = {n} samples, sliding by H = {hop} samples "
+        f"({hop / config.sampling_frequency_hz * 1e6:.0f} µs per frame)"
+    )
+    return ax
+
+
+def plot_spectrogram(trace: DetectorTrace, *, ax: Axes | None = None) -> Axes:
+    """Band-limited power spectrogram in dB."""
+    ax = _single_axis(ax)
+    power_db = 10.0 * np.log10(trace.power + 1.0e-12)
+    low, high = np.quantile(power_db, [0.05, 0.995])
+    mesh = ax.pcolormesh(
+        frame_axis_ms(trace), trace.frequencies / 1000.0, power_db,
+        shading="auto", cmap="magma", vmin=float(low), vmax=float(high),
+    )
+    ax.figure.colorbar(mesh, ax=ax, label="power [dB]")
+    ax.set_xlabel("time [ms]")
+    ax.set_ylabel("frequency [kHz]")
+    config = trace.config
+    ax.set_title(
+        f"Spectrogram, detection band {config.low_freq_hz / 1000:.0f}–{config.high_freq_hz / 1000:.0f} kHz"
+    )
+    return ax
+
+
+def plot_frequency_baseline(
+    trace: DetectorTrace,
+    *,
+    bin_index: int | None = None,
+    axes: np.ndarray | None = None,
+) -> np.ndarray:
+    """Measured power, one frequency row with its Q25 baseline, positive excess."""
+    axes = _stacked_axes(axes, 3, height=8.0)
+    x_ms = frame_axis_ms(trace)
+    if bin_index is None:
+        bin_index = int(np.argmax(trace.excess.sum(axis=1)))
+    power_db = 10.0 * np.log10(trace.power + 1.0e-12)
+    low, high = np.quantile(power_db, [0.05, 0.995])
+    axes[0].pcolormesh(x_ms, trace.frequencies / 1000.0, power_db,
+                       shading="auto", cmap="magma", vmin=float(low), vmax=float(high))
+    axes[0].set_ylabel("frequency [kHz]")
+    axes[0].set_title("Measured power P(k, m) [dB]")
+    # Linear scale: clipped-to-zero noise stays dark, only true excess lights up.
+    axes[2].pcolormesh(x_ms, trace.frequencies / 1000.0, trace.excess,
+                       shading="auto", cmap="magma", vmin=0.0,
+                       vmax=float(np.quantile(trace.excess, 0.999)))
+    axes[2].set_ylabel("frequency [kHz]")
+    axes[2].set_title(r"Positive excess $P^{+}(k, m) = \max(P - B_k, 0)$ [linear]")
+    axis = axes[1]
+    row = trace.power[bin_index]
+    axis.plot(x_ms, row, color=BLUE, linewidth=0.9,
+              label=f"P(k, m) at k = {trace.frequencies[bin_index] / 1000:.1f} kHz")
+    axis.axhline(float(trace.baseline[bin_index, 0]), color=GREEN, linewidth=1.4,
+                 label=r"$B_k$ = per-frequency Q25")
+    axis.set_yscale("log")
+    axis.set_ylabel("power")
+    axis.set_title("Each frequency row is referenced to its own ordinary level")
+    axis.legend(loc="upper right")
+    axes[2].set_xlabel("time [ms]")
+    return axes
+
+
+def plot_frame_energy(
+    trace: DetectorTrace,
+    *,
+    axes: np.ndarray | None = None,
+) -> np.ndarray:
+    """Positive-excess map collapsing into the one-dimensional E[m]."""
+    axes = _stacked_axes(axes, 2, height=6.0)
+    x_ms = frame_axis_ms(trace)
+    axes[0].pcolormesh(x_ms, trace.frequencies / 1000.0, trace.excess,
+                       shading="auto", cmap="magma", vmin=0.0,
+                       vmax=float(np.quantile(trace.excess, 0.999)))
+    axes[0].set_ylabel("frequency [kHz]")
+    axes[0].set_title(r"$P^{+}(k, m)$ [linear] — every frequency votes")
+    axes[1].plot(x_ms, trace.frame_energy, color=BLUE, linewidth=1.1)
+    axes[1].set_ylabel("E[m]")
+    axes[1].set_xlabel("time [ms]")
+    axes[1].set_title(
+        rf"$E[m] = \sum_k P^{{+}}(k, m)$, smoothed over {trace.config.smooth_frames} frames"
+        " — the problem is one-dimensional again"
+    )
+    return axes
+
+
+def plot_robust_band(
+    trace: DetectorTrace,
+    *,
+    scaled: bool = False,
+    ax: Axes | None = None,
+) -> Axes:
+    """E[m] with its median and robust band (raw MAD, or the 1.4826-scaled one)."""
+    ax = _single_axis(ax)
+    x_ms = frame_axis_ms(trace)
+    half = trace.energy_scale if scaled else trace.raw_mad
+    label = "median ± 1.4826 MAD (= energy_scale)" if scaled else "median ± 1 raw MAD"
+    ax.plot(x_ms, trace.frame_energy, color=BLUE, linewidth=1.1, label="E[m]")
+    ax.axhline(trace.energy_median, color=GREEN, linewidth=1.4, label="median")
+    ax.axhspan(trace.energy_median - half, trace.energy_median + half,
+               color=PURPLE, alpha=0.18, label=label)
+    ax.set_xlabel("time [ms]")
+    ax.set_ylabel("E[m]")
+    ax.set_title("The event exits the robust band by many band-widths")
+    ax.legend(loc="upper right")
+    return ax
+
+
+def plot_energy_and_z(
+    trace: DetectorTrace,
+    *,
+    axes: np.ndarray | None = None,
+) -> np.ndarray:
+    """Synthesis: E[m] with the scaled band on top, z[m] with its threshold below."""
+    axes = _stacked_axes(axes, 2, height=6.0)
+    x_ms = frame_axis_ms(trace)
+    axes[0].plot(x_ms, trace.frame_energy, color=BLUE, linewidth=1.1, label="E[m]")
+    axes[0].axhline(trace.energy_median, color=GREEN, linewidth=1.4, label="median")
+    axes[0].axhspan(trace.energy_median - trace.energy_scale,
+                    trace.energy_median + trace.energy_scale,
+                    color=PURPLE, alpha=0.18, label="median ± energy_scale")
+    axes[0].set_ylabel("E[m]")
+    axes[0].set_title("Energy, then its robust normalisation")
+    axes[0].legend(loc="upper right")
+    axes[1].plot(x_ms, trace.energy_z, color=PURPLE, linewidth=1.1,
+                 label="z[m] = (E − median) / energy_scale")
+    axes[1].axhline(trace.config.active_snr_z, color=RED, linewidth=1.2,
+                    linestyle="--", label=f"activation z = {trace.config.active_snr_z}")
+    axes[1].set_yscale("symlog", linthresh=1.0)
+    axes[1].set_ylabel("z[m]")
+    axes[1].set_xlabel("time [ms]")
+    axes[1].legend(loc="upper right")
+    return axes

@@ -5,6 +5,9 @@
 - This repo alone owns dataset generation, signal processing, and provenance.
   Put reusable logic in `particles2snr/` and thin CLIs in grouped `scripts/`;
   import installed `p0`, never restore flat scripts or inject paths.
+- `notebooks/` holds executable explainers as jupytext `.py:percent` sources
+  (`.ipynb` stays untracked); they import installed packages, contain no
+  detector mathematics, and never serve as manifested evidence.
 - Write data only to workspace `datasets/{interim,processed}`, register it with
   checksums, and never mutate a registered version.
 - Write manifested reports and runs under `artifacts/particles2SNR-pipeline/`.
