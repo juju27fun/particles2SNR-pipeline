@@ -323,7 +323,7 @@ def plot_concentration(trace: DetectorTrace, *, ax: Axes | None = None) -> Axes:
     """C[m] along the trace, against the configured floor."""
     ax = _single_axis(ax)
     x_ms = frame_axis_ms(trace)
-    floor = trace.config.medium_min_concentration
+    floor = trace.config.active_min_concentration
     ax.plot(x_ms, trace.concentration, color=TEAL, linewidth=1.1, label="C[m]")
     ax.axhline(floor, color=ORANGE, linestyle="--", linewidth=1.2,
                label=f"configured floor C = {floor}")
@@ -349,42 +349,67 @@ def plot_activation(
     trace: DetectorTrace,
     *,
     z_threshold: float | None = None,
-    c_threshold: float | None = None,
     axes: np.ndarray | None = None,
 ) -> np.ndarray:
-    """z[m], C[m] and the active-frame line for any pair of thresholds."""
+    """z[m] against its threshold, and the resulting active-frame line."""
     config = trace.config
     z_threshold = config.active_snr_z if z_threshold is None else float(z_threshold)
-    c_threshold = (
-        config.medium_min_concentration if c_threshold is None else float(c_threshold)
-    )
-    axes = _stacked_axes(axes, 3, height=7.0)
+    axes = _stacked_axes(axes, 2, height=5.5)
     x_ms = frame_axis_ms(trace)
-    active = (trace.energy_z >= z_threshold) & (trace.concentration >= c_threshold)
+    active = trace.energy_z >= z_threshold
 
     axes[0].plot(x_ms, trace.energy_z, color=PURPLE, linewidth=1.1)
     axes[0].axhline(z_threshold, color=RED, linestyle="--", linewidth=1.2)
     axes[0].set_yscale("symlog", linthresh=1.0)
     axes[0].set_ylabel("z[m]")
-    axes[0].set_title(f"unusual?  z >= {z_threshold:.2f}")
+    axes[0].set_title(f"unusual enough?  z >= {z_threshold:.2f}")
 
-    axes[1].plot(x_ms, trace.concentration, color=TEAL, linewidth=1.1)
-    axes[1].axhline(c_threshold, color=ORANGE, linestyle="--", linewidth=1.2)
-    axes[1].set_ylim(0.0, 1.05)
-    axes[1].set_ylabel("C[m]")
-    axes[1].set_title(f"structured?  C >= {c_threshold:.2f}")
-
-    axes[2].fill_between(x_ms, 0, active.astype(float), step="mid",
+    axes[1].fill_between(x_ms, 0, active.astype(float), step="mid",
                          color=GREEN, alpha=0.85)
-    axes[2].set_ylim(-0.1, 1.3)
-    axes[2].set_yticks([])
-    axes[2].set_ylabel("a[m]")
-    axes[2].set_xlabel("time [ms]")
-    axes[2].set_title(
+    axes[1].set_ylim(-0.1, 1.3)
+    axes[1].set_yticks([])
+    axes[1].set_ylabel("a[m]")
+    axes[1].set_xlabel("time [ms]")
+    axes[1].set_title(
         f"active frames: {int(active.sum())} of {active.size}, "
         f"in {count_active_runs(active)} contiguous run(s) before gap bridging"
     )
     return axes
+
+
+def plot_detected_events(
+    signal: np.ndarray,
+    events,
+    config: YeastDetectionConfig,
+    *,
+    truth_spans_ms: list[tuple[float, float]] | None = None,
+    ax: Axes | None = None,
+) -> Axes:
+    """The time series with the intervals the MAD chain actually returned."""
+    ax = _single_axis(ax)
+    x_ms = time_axis_ms(np.asarray(signal).size, config)
+    for start_ms, end_ms in truth_spans_ms or []:
+        ax.axvspan(start_ms, end_ms, color=PALE_GREEN, zorder=0)
+    ax.plot(x_ms, signal, color=GREY, linewidth=0.6)
+    span = float(np.max(np.abs(signal))) or 1.0
+    for index, event in enumerate(events):
+        left = event.event_start / config.sampling_frequency_hz * 1000.0
+        right = event.event_end / config.sampling_frequency_hz * 1000.0
+        colour = GREEN if event.quality in {"strict", "medium"} else ORANGE
+        ax.plot([left, right], [-1.15 * span] * 2, color=colour, linewidth=9,
+                solid_capstyle="butt")
+        ax.annotate(f"{event.quality} · z max {event.snr_proxy:.0f}",
+                    xy=((left + right) / 2.0, -1.15 * span), xytext=(0, 9),
+                    textcoords="offset points", ha="center", fontsize=8.5, color=colour)
+    ax.set_ylim(-1.45 * span, 1.2 * span)
+    ax.set_xlabel("time [ms]")
+    ax.set_ylabel("amplitude [a.u.]")
+    kept = sum(1 for event in events if event.quality in {"strict", "medium"})
+    ax.set_title(
+        f"MAD chain output: {len(events)} interval(s), {kept} accepted"
+        + (" — true events in green" if truth_spans_ms else "")
+    )
+    return ax
 
 
 _DROP_STAGE_LABELS = {

@@ -21,6 +21,10 @@ class YeastDetectionConfig:
     boundary_snr_z: float = 1.5
     medium_min_snr: float = 3.0
     strict_min_snr: float = 5.0
+    # Frame-level spectral-concentration floor. Set to 0.0 to deactivate the
+    # test: it then admits every frame and activation is decided by z alone.
+    # Independent of the event-level concentration used at qualification.
+    active_min_concentration: float = 0.08
     medium_min_concentration: float = 0.08
     strict_min_concentration: float = 0.12
     strict_min_phase_coherence: float = 0.0
@@ -38,11 +42,18 @@ def review_calibrated_detection_config_v1() -> YeastDetectionConfig:
 
     This preset is a development result. It must be evaluated on records that
     were not present in the v5 candidate-window or full-trace review queues.
+
+    ``active_min_concentration`` is 0.0: the frame-level concentration test is
+    off. An ablation over 1316 traces of yeast-hf-10-5-20260610@v1 and 600
+    traces of the bead development corpus produced byte-identical detections
+    with and without it, so activation is stated in terms of z alone rather
+    than carrying a term that never changes an outcome.
     """
     return YeastDetectionConfig(
         boundary_snr_z=1.5,
         medium_min_snr=12.0,
         strict_min_snr=12.0,
+        active_min_concentration=0.0,
         cluster_gap_ms=0.128,
         max_width_ms=2.0,
         max_events_per_signal=5,
@@ -176,9 +187,9 @@ def detector_trace(signal: np.ndarray, config: YeastDetectionConfig) -> Detector
     top_count = min(5, excess.shape[0])
     top_power = np.partition(excess, excess.shape[0] - top_count, axis=0)[-top_count:].sum(axis=0)
     concentration = top_power / (power.sum(axis=0) + 1.0e-12)
-    active = (energy_z >= config.active_snr_z) & (
-        concentration >= config.medium_min_concentration
-    )
+    active = energy_z >= config.active_snr_z
+    if config.active_min_concentration > 0.0:
+        active = active & (concentration >= config.active_min_concentration)
     return DetectorTrace(
         config=config,
         filtered=filtered,

@@ -72,7 +72,7 @@ def test_every_helper_renders_and_returns_axes(example) -> None:
                                 "flat": np.full(6, 14.0 / 6.0)}),
         plot_concentration(trace),
         plot_activation(trace),
-        plot_activation(trace, z_threshold=2.0, c_threshold=0.0),
+        plot_activation(trace, z_threshold=2.0),
     ]
     for axes in produced:
         first = axes.flat[0] if isinstance(axes, np.ndarray) else axes
@@ -101,5 +101,6 @@ def test_activation_thresholds_reproduce_the_detector_mask(example) -> None:
     _signal, config, trace = example
     axes = plot_activation(trace)
     expected = int(trace.active.sum())
-    assert f"active frames: {expected} of" in axes[2].get_title()
+    assert len(axes) == 2  # z and the activation line; no concentration panel
+    assert f"active frames: {expected} of" in axes[1].get_title()
     plt.close("all")

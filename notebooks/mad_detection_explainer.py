@@ -12,45 +12,27 @@
 # ---
 
 # %% [markdown]
-# # MAD detection — from a raw trace to a bounded event
+# # MAD detection — from a time series to a bounded event
 #
-# *MAD stands for **median absolute deviation**: a way of measuring how much
-# a signal normally fluctuates that a rare large event cannot distort. It is
-# what lets the detector say "this is unusually high" without anyone fixing a
-# value by hand. Section 6 builds it from nothing; sections 1–5 are what has
-# to happen before it can be applied.*
+# **How does a time series become a bounded training example?** — bounded
+# meaning we know where the event starts and ends, which is what a
+# self-supervised (SSL) model needs as input.
 #
-# **Central question: how does a raw acoustic trace become a bounded training
-# example?** — bounded meaning *we know where the event starts and ends*, which
-# is what a self-supervised learning (SSL) model needs as input.
 # This notebook retraces the yeast event detector
-# (`particles2snr.yeast_events`) stage by stage on one manifested record,
-# following the same chain as the frozen explainer deck
-# ([Yeast detector explainer v5](../../artifacts/cross-project/presentations/yeast-detector-explainer-v5/render-r1/Yeast_detector_explainer_v5.pdf)):
+# (`particles2snr.yeast_events`) stage by stage on one reviewed record. The
+# detector decides what counts as an event using the **median absolute
+# deviation (MAD)** — a measure of how much a signal ordinarily fluctuates
+# that a rare large event cannot distort. Section 6 builds it from nothing;
+# sections 1–5 are what has to happen before it can be applied. The chain
+# follows the frozen
+# [v5 explainer deck](../../artifacts/cross-project/presentations/yeast-detector-explainer-v5/render-r1/Yeast_detector_explainer_v5.pdf):
 #
 # `ISOLATE → LOCALISE → REFERENCE → AGGREGATE → NORMALISE → GROUP → CROP`
 #
-# What this notebook **does**: expose every intermediate quantity of the
-# detector on a real record, with the exact development configuration.
-# *Manifested* record, below, means one whose origin is recorded in the
-# workspace registry — you can trace which acquisition it came from and which
-# human reviewed it.
-#
-# What it **does not do**: it produces no manifested artifact, no performance
-# metric, no detector comparison, and no biological claim. It explains a
-# method; it does not convert development evidence into validation. Every
-# figure below is bound by that same claim boundary: *method only, one
-# manifested record*.
-#
-# **What you need to run it.** Two different things, often confused:
-#
-# - *This notebook* loads its example record by ID through the workspace
-#   dataset registry and the frozen review queues — so it needs the internship
-#   workspace checkout. That machinery exists for **provenance of the
-#   examples**, not for the method.
-# - *The detector itself* needs none of that: `detector_trace(signal, config)`
-#   accepts any 1-D numpy array. The last section, "Running on your own
-#   data", shows the whole chain on a synthetic trace built from scratch.
+# It explains a method on one record: no performance metric, no biological
+# claim. The detector itself only needs a 1-D array — the workspace calls
+# below just fetch a traceable example, and the last section runs the same
+# chain on a signal built from scratch.
 
 # %%
 import matplotlib.pyplot as plt
@@ -59,6 +41,7 @@ from IPython.display import Image
 from internship_workspace.config import Workspace
 
 from particles2snr.yeast_events import (
+    detect_yeast_events,
     detector_trace,
     review_calibrated_detection_config_v1,
 )
@@ -97,7 +80,7 @@ print(f"{EVENT_ID}: {record.signal.size} samples, "
 # | Filter | Butterworth order 4, zero-phase |
 # | STFT | N = 512, overlap 384 → hop H = 128 samples (64 µs) |
 # | Smoothing | 3 frames |
-# | Activation | z ≥ 3.5 **and** C ≥ 0.08 |
+# | Activation | z ≥ 3.5 |
 # | Boundaries | extend while z ≥ 1.5, pad 0.04 ms |
 # | Grouping | bridge gaps ≤ 0.128 ms (2 frames) |
 # | Qualification | width 0.06–2.0 ms, max z ≥ 12, ≤ 5 events per trace |
@@ -206,7 +189,7 @@ fig.plot_event_support(record.signal, config,
 
 # %% [markdown]
 # - The green span is the human-reviewed support: the target the detection
-#   chain must recover from the raw trace alone.
+#   chain must recover from the time series alone.
 
 # %% [markdown]
 # ## 2 · ISOLATE — the band-pass filter
@@ -351,9 +334,18 @@ replay_tone = replay_particles2snr_on_synthetic(
 fig.plot_legacy_vs_energy(demo, replay=replay_tone, truth_spans_ms=[(4.6, 5.4)]);
 
 # %% [markdown]
+# And what the MAD chain finally returns on that same signal:
+
+# %%
+tone_events, _ = detect_yeast_events(tone_signal, config)
+fig.plot_detected_events(tone_signal, tone_events, config, truth_spans_ms=[(4.6, 5.4)]);
+
+# %% [markdown]
 # - The tone spawns hypotheses all along the trace: **8 raw hypotheses for 1
 #   real event**. The cleaning cascade has to execute every spurious one —
 #   here six fall to the box-width gate and one to peak evidence.
+# - The MAD chain returns **one interval, accepted**, on the real burst and
+#   nothing on the tone.
 # - The final answer is right *on this toy*, but only because two of the
 #   cascade's gates happened to fire on the right hypotheses. The
 #   introduction's yeast record is what happens when the same cascade meets
@@ -380,20 +372,28 @@ fig.plot_legacy_vs_energy(slow_trace, replay=replay_slow,
                           truth_spans_ms=[(1.7, 3.3), (5.6, 6.4)]);
 
 # %% [markdown]
+# And the MAD chain's own output on the same signal:
+
+# %%
+slow_events, _ = detect_yeast_events(slow_signal, config)
+fig.plot_detected_events(slow_signal, slow_events, config,
+                         truth_spans_ms=[(1.7, 3.3), (5.6, 6.4)]);
+
+# %% [markdown]
 # - The legacy pipeline *sees* the slow particle at the raw stage — then the
 #   **box-width gate deletes it** (its fitted box is longer than 1.5 ms), and
-#   the final output contains only the fast particle. A real event was
-#   removed by a threshold calibrated on typical ones.
-# - The energy chain produces a clear bump for **both** events, the slow one
-#   included: no gate on speed, width or peak shape was consulted to see it.
-#   Turning a bump into a decision still needs a rule — that rule is exactly
-#   what section 6 builds.
+#   the final output contains only the fast particle: one box, no trace of
+#   the other event.
+# - The MAD chain **returns both intervals** — and marks the slow one
+#   `reject`, because at 2.39 ms it exceeds the 2.0 ms qualification cap.
+#   Read that honestly: the energy chain does **not** rescue the atypical
+#   particle either. What differs is the bookkeeping. The legacy hypothesis
+#   vanished inside a cascade; here the event is localised, scored
+#   (z max ≈ 1.6·10³) and rejected by **one named cap** you can read, argue
+#   with, or change — instead of by the interaction of five gates.
 # - Honesty notes: this is a constructed illustration, not a prevalence
-#   claim — how often real acquisitions contain such atypical events is an
-#   open question. And the MAD chain's own qualification (section 8) also
-#   carries width limits (0.06–2.0 ms), wider but real: the argument is
-#   about *where* selectivity lives — in a statistical contrast, or in a
-#   stack of proxy gates — not about the energy chain having no limits.
+#   claim. And the width cap is a proxy gate too — it is simply the only one
+#   left, applied after the event exists rather than before it can form.
 
 # %% [markdown]
 # ## 5 · AGGREGATE — the frame energy E[m]
@@ -665,14 +665,6 @@ fig.plot_energy_and_z(trace);
 # ## 7 · ACTIVATE — turning z into a decision ★
 #
 # A frame is **active** when it is unusual enough: a[m] = 1 if z[m] ≥ 3.5.
-#
-# *Implementation note, for anyone reading the source: the activation line
-# carries a second term, a spectral-concentration floor C[m] ≥ 0.08, and the
-# bead detector has the same term set to 0. It is a guard against a frame
-# whose energy is spread flat across the band. It is not discussed further
-# here because it never changes an outcome: removing it leaves every
-# decision identical on the 1 316 yeast traces and 600 bead traces
-# examined. The figures below show the rule that actually decides.*
 
 # %%
 fig.plot_activation(trace);
@@ -680,8 +672,6 @@ fig.plot_activation(trace);
 # %% [markdown]
 # - Top: z[m] against its threshold. Bottom: the frames that pass — one
 #   contiguous run, which section 8 will turn into an event.
-# - The middle panel is the inert C term, shown once for completeness: it
-#   sits far above its floor everywhere on this trace.
 #
 # ### 7a · The sandbox
 #
@@ -735,9 +725,18 @@ your_trace = detector_trace(your_signal, config)
 fig.plot_energy_and_z(your_trace);
 
 # %% [markdown]
+# And the bounded interval the chain returns for it — the deliverable the
+# whole notebook was building towards:
+
+# %%
+your_events, _ = detect_yeast_events(your_signal, config)
+fig.plot_detected_events(your_signal, your_events, config,
+                         truth_spans_ms=[(3.6, 4.4)]);
+
+# %% [markdown]
 # No registry, no review queue, no workspace: one array, one config, the same
-# seven stages. Replace `your_signal` with your own acquisition and the whole
-# notebook's reasoning applies unchanged.
+# seven stages, one bounded event. Replace `your_signal` with your own
+# acquisition and the whole notebook's reasoning applies unchanged.
 #
 # ---
 # **Sections 8–10 (grouping, SSL crop, multi-record sandbox) and the

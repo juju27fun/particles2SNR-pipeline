@@ -96,11 +96,33 @@ def test_trace_shape_contract_and_mad_scaling() -> None:
     assert trace.active.dtype == np.bool_
     assert trace.hop == config.stft_nperseg - config.stft_noverlap
     assert trace.energy_scale == max(1.4826 * trace.raw_mad, 1.0e-12)
-    np.testing.assert_array_equal(
-        trace.active,
-        (trace.energy_z >= config.active_snr_z)
-        & (trace.concentration >= config.medium_min_concentration),
+    # The preset disables the frame-level concentration floor.
+    assert config.active_min_concentration == 0.0
+    np.testing.assert_array_equal(trace.active, trace.energy_z >= config.active_snr_z)
+
+
+def test_activation_concentration_floor_is_optional() -> None:
+    signal = _synthetic_event()
+    off = review_calibrated_detection_config_v1()
+    on = YeastDetectionConfig(
+        boundary_snr_z=off.boundary_snr_z,
+        medium_min_snr=off.medium_min_snr,
+        strict_min_snr=off.strict_min_snr,
+        active_min_concentration=0.08,
+        cluster_gap_ms=off.cluster_gap_ms,
+        max_width_ms=off.max_width_ms,
+        max_events_per_signal=off.max_events_per_signal,
     )
+    trace_off = detector_trace(signal, off)
+    trace_on = detector_trace(signal, on)
+    np.testing.assert_array_equal(trace_off.active, trace_off.energy_z >= off.active_snr_z)
+    np.testing.assert_array_equal(
+        trace_on.active,
+        (trace_on.energy_z >= on.active_snr_z) & (trace_on.concentration >= 0.08),
+    )
+    # A floor above every observed value must remove every active frame.
+    strict = YeastDetectionConfig(active_min_concentration=1.01)
+    assert not detector_trace(signal, strict).active.any()
 
 
 def test_trace_rejects_signal_shorter_than_one_window() -> None:
