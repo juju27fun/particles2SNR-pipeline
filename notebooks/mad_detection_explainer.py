@@ -43,11 +43,17 @@
 
 # %%
 import numpy as np
+from IPython.display import Image
 from internship_workspace.config import Workspace
 
 from particles2snr.yeast_events import (
     detector_trace,
     review_calibrated_detection_config_v1,
+)
+from particles2snr.yeast_particles2snr_comparison import (
+    assert_reference_replay_contract,
+    render_particles2snr_failure_plot,
+    replay_particles2snr_dual_clean,
 )
 from particles2snr.yeast_review_records import load_reviewed_event
 from particles2snr import yeast_detector_figures as fig
@@ -85,6 +91,41 @@ print(f"{EVENT_ID}: {record.signal.size} samples, "
 #
 # *These values are a development choice validated on a review campaign, not a
 # demonstrated optimum.*
+
+# %% [markdown]
+# ## Why energy first — the particles2SNR lesson
+#
+# The legacy pipeline (particles2SNR) reasons **peak-first**: every local
+# Doppler maximum becomes a particle hypothesis, fitted as t₀ ± 2.5τ, then
+# cleaned and merged. That works as long as one particle produces one Doppler
+# crest. But a yeast passage can produce **several exact Doppler crests for a
+# single particle** — and a peak-first pipeline has no way of knowing those
+# crests belong to the same object. If the method cannot abstract away from
+# "one Doppler peak = one particle", it can never segment these events.
+#
+# The cell below **replays that exact failure** on this notebook's record. The
+# replay is contract-checked: it refuses to render if the replayed legacy
+# pipeline drifts from the reference stage counts, so the figure stays bound
+# to the audited result.
+
+# %%
+failure_png = workspace.root / ".cache/notebooks/particles2snr-multi-doppler-failure-en.png"
+replay, legacy_filtered = replay_particles2snr_dual_clean(record.signal, record.row)
+assert_reference_replay_contract(replay)
+render_particles2snr_failure_plot(signal=record.signal, filtered=legacy_filtered,
+                                  replay=replay, destination=failure_png, language="en")
+Image(filename=str(failure_png), width=980)
+
+# %% [markdown]
+# - One human-reviewed passage (green span), two exact Doppler crests — but
+#   **five** local P0 frequency hypotheses.
+# - After every cleaning stage (filtered evidence, dual-clean, NMS), still
+#   **two boxes for one single event**: the merge fails at IoU 0.399 < 0.400.
+#
+# This failure is the motivation for the whole chain that follows: aggregate
+# the energy across frequencies *first*, decide activity on the resulting 1-D
+# curve, and only afterwards describe Doppler peaks as diagnostics. The
+# detector never counts peaks to count particles.
 
 # %% [markdown]
 # ## 1 · The trace and the event support
@@ -219,23 +260,9 @@ fig.plot_frame_energy(trace);
 # %% [markdown]
 # - The excess map is dark everywhere except the event: the sum over
 #   frequencies concentrates all of it into one clean 1-D curve.
-#
-# Why aggregate energy *before* detecting, instead of detecting spectral peaks
-# first? The peak-first variant was tried and fragmented multi-Doppler events
-# (deck slides 7–8). The manifested failure figure:
-
-# %%
-from IPython.display import Image
-
-failure_plot = (workspace.artifacts_root
-                / "particles2SNR-pipeline/reports"
-                / "yeast-detector-pipeline-board-m2-r10"
-                / "plots/particles2snr-multi-doppler-failure.png")
-Image(filename=str(failure_plot), width=900)
-
-# %% [markdown]
-# *The figure above is the manifested development artifact — it is displayed,
-# not regenerated, so its provenance stays intact.*
+# - This sum is exactly the answer to the introduction's failure: every
+#   Doppler crest of one passage pours into the *same* bump of E[m], so
+#   crests can no longer be counted as separate particles.
 
 # %% [markdown]
 # ## 6 · NORMALISE — median and MAD ★

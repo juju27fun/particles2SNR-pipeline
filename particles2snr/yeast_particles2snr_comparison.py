@@ -278,13 +278,67 @@ def assert_reference_replay_contract(replay: dict[str, Any]) -> None:
         raise RuntimeError("Reference trace unexpectedly contains unsafe intervals")
 
 
+_FAILURE_TEXT = {
+    "fr": {
+        "peak_low": "pic Doppler bas exact",
+        "peak_high": "pic Doppler haut exact",
+        "crest_low": " · crête basse",
+        "crest_high": " · crête haute",
+        "extra_max": " · maximum supplémentaire",
+        "kept": " · gardée",
+        "removed": " · supprimée",
+        "kept_word": "gardée",
+        "removed_word": "supprimée",
+        "human_bar": "1 événement complet · revue humaine + pipeline yeast",
+        "ytick_truth": "vérité événementielle",
+        "not_merged": "Non fusionnées : IoU = {iou:.3f} < 0,400 · écart des centres = {gap:.3f} ms",
+        "ylab_signal": "signal filtré\nnormalisé",
+        "ylab_stft": "STFT actuelle\nfréquence (kHz)",
+        "ylab_raw": "hypothèses P0\navant dual-clean",
+        "ylab_final": "décision\névénementielle",
+        "xlabel": "temps dans la trace (ms)",
+        "title_signal": "La zone verte est un seul passage humain complet",
+        "title_stft": "Deux crêtes Doppler exactes — mais cinq hypothèses fréquentielles P0 locales",
+        "title_raw": "Chaque maximum devient d’abord une particule ajustée : t₀ ± 2,5τ",
+        "title_final": "Après filtered + dual-clean + NMS : encore 2 boîtes pour 1 seul événement",
+        "suptitle": "Pourquoi particles2SNR_F dual-clean fragmente ce yeast multi-Doppler",
+    },
+    "en": {
+        "peak_low": "exact low Doppler peak",
+        "peak_high": "exact high Doppler peak",
+        "crest_low": " · low crest",
+        "crest_high": " · high crest",
+        "extra_max": " · extra maximum",
+        "kept": " · kept",
+        "removed": " · removed",
+        "kept_word": "kept",
+        "removed_word": "removed",
+        "human_bar": "1 complete event · human review + yeast pipeline",
+        "ytick_truth": "event ground truth",
+        "not_merged": "Not merged: IoU = {iou:.3f} < 0.400 · centre gap = {gap:.3f} ms",
+        "ylab_signal": "filtered signal\nnormalised",
+        "ylab_stft": "current STFT\nfrequency (kHz)",
+        "ylab_raw": "P0 hypotheses\nbefore dual-clean",
+        "ylab_final": "event\ndecision",
+        "xlabel": "time in trace (ms)",
+        "title_signal": "The green span is one single complete human passage",
+        "title_stft": "Two exact Doppler crests — but five local P0 frequency hypotheses",
+        "title_raw": "Each maximum first becomes a fitted particle: t₀ ± 2.5τ",
+        "title_final": "After filtered + dual-clean + NMS: still 2 boxes for 1 single event",
+        "suptitle": "Why particles2SNR_F dual-clean fragments this multi-Doppler yeast",
+    },
+}
+
+
 def render_particles2snr_failure_plot(
     *,
     signal: np.ndarray,
     filtered: np.ndarray,
     replay: dict[str, Any],
     destination: Path,
+    language: str = "fr",
 ) -> None:
+    text = _FAILURE_TEXT[language]
     human = replay["human"]
     raw = replay["raw_local"]
     final = replay["final"]
@@ -336,8 +390,8 @@ def render_particles2snr_failure_plot(
         axis.grid(True, color="#d9e0e6", linewidth=0.5, alpha=0.55)
 
     peak_specs = (
-        ("pic Doppler bas exact", float(human["doppler_low_khz"])),
-        ("pic Doppler haut exact", float(human["doppler_high_khz"])),
+        (text["peak_low"], float(human["doppler_low_khz"])),
+        (text["peak_high"], float(human["doppler_high_khz"])),
     )
     for index, (label, frequency) in enumerate(peak_specs):
         stft_axis.hlines(
@@ -389,12 +443,12 @@ def render_particles2snr_failure_plot(
         )
         label = f"P{index + 1}"
         if index == low_match:
-            label += " · crête basse"
+            label += text["crest_low"]
         elif index == high_match:
-            label += " · crête haute"
+            label += text["crest_high"]
         else:
-            label += " · maximum supplémentaire"
-        label += " · gardée" if row["survives_final"] else " · supprimée"
+            label += text["extra_max"]
+        label += text["kept"] if row["survives_final"] else text["removed"]
         stft_axis.annotate(
             label,
             xy=(row["t0_ms"], row["frequency_khz"]),
@@ -431,7 +485,7 @@ def render_particles2snr_failure_plot(
         [
             (
                 f"P{index + 1} · {row['frequency_khz']:.2f} kHz · "
-                f"{'gardée' if row['survives_final'] else 'supprimée'}"
+                f"{text['kept_word'] if row['survives_final'] else text['removed_word']}"
             )
             for index, row in enumerate(raw)
         ],
@@ -472,7 +526,7 @@ def render_particles2snr_failure_plot(
     final_axis.text(
         (human_start + human_end) / 2.0,
         0.17,
-        "1 événement complet · revue humaine + pipeline yeast",
+        text["human_bar"],
         color="#08745f",
         fontsize=9,
         fontweight="bold",
@@ -480,7 +534,7 @@ def render_particles2snr_failure_plot(
     )
     final_axis.set_yticks(
         [0.0, 1.1, 2.1],
-        ["vérité événementielle", "dual-clean B", "dual-clean A"],
+        [text["ytick_truth"], "dual-clean B", "dual-clean A"],
     )
     final_axis.set_ylim(-0.45, 2.65)
 
@@ -488,10 +542,7 @@ def render_particles2snr_failure_plot(
     final_axis.text(
         0.99,
         0.96,
-        (
-            f"Non fusionnées : IoU = {pair['iou']:.3f} < 0,400 · "
-            f"écart des centres = {pair['center_gap_ms']:.3f} ms"
-        ),
+        text["not_merged"].format(iou=pair["iou"], gap=pair["center_gap_ms"]),
         transform=final_axis.transAxes,
         ha="right",
         va="top",
@@ -506,34 +557,20 @@ def render_particles2snr_failure_plot(
         },
     )
 
-    signal_axis.set_ylabel("signal filtré\nnormalisé")
+    signal_axis.set_ylabel(text["ylab_signal"])
     signal_axis.tick_params(labelbottom=False)
-    stft_axis.set_ylabel("STFT actuelle\nfréquence (kHz)")
+    stft_axis.set_ylabel(text["ylab_stft"])
     stft_axis.tick_params(labelbottom=False)
-    raw_axis.set_ylabel("hypothèses P0\navant dual-clean")
+    raw_axis.set_ylabel(text["ylab_raw"])
     raw_axis.tick_params(labelbottom=False)
-    final_axis.set_ylabel("décision\névénementielle")
-    final_axis.set_xlabel("temps dans la trace (ms)")
-    signal_axis.set_title(
-        "La zone verte est un seul passage humain complet", loc="left", fontweight="bold"
-    )
-    stft_axis.set_title(
-        "Deux crêtes Doppler exactes — mais cinq hypothèses fréquentielles P0 locales",
-        loc="left",
-        fontweight="bold",
-    )
-    raw_axis.set_title(
-        "Chaque maximum devient d’abord une particule ajustée : t₀ ± 2,5τ",
-        loc="left",
-        fontweight="bold",
-    )
-    final_axis.set_title(
-        "Après filtered + dual-clean + NMS : encore 2 boîtes pour 1 seul événement",
-        loc="left",
-        fontweight="bold",
-    )
+    final_axis.set_ylabel(text["ylab_final"])
+    final_axis.set_xlabel(text["xlabel"])
+    signal_axis.set_title(text["title_signal"], loc="left", fontweight="bold")
+    stft_axis.set_title(text["title_stft"], loc="left", fontweight="bold")
+    raw_axis.set_title(text["title_raw"], loc="left", fontweight="bold")
+    final_axis.set_title(text["title_final"], loc="left", fontweight="bold")
     figure.suptitle(
-        "Pourquoi particles2SNR_F dual-clean fragmente ce yeast multi-Doppler",
+        text["suptitle"],
         fontsize=16,
         fontweight="bold",
         color="#17212b",
