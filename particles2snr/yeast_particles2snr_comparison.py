@@ -197,7 +197,33 @@ def replay_particles2snr_dual_clean(
         final_iou = None
         center_gap_ms = None
 
+    def _dropped_at(particle: dict[str, Any]) -> str | None:
+        def in_stage(rows: list[dict[str, Any]]) -> bool:
+            return any(
+                abs(float(row["t0"]) - float(particle["t0"])) < 1.0e-9
+                and abs(float(row["frequency"]) - float(particle["frequency"])) < 1.0e-6
+                for row in rows
+            )
+
+        for stage_rows, label in (
+            (final, None),
+            (dual_clean, "nms"),
+            (filtered_evidence, "dual_clean"),
+            (width, "filtered_evidence"),
+            (passage, "width"),
+        ):
+            if in_stage(stage_rows):
+                return label
+        return "passage_time"
+
+    raw_all_rows = []
+    for particle in sorted(raw, key=lambda row: float(row["t0"])):
+        serialized = _serializable_particle(post, particle, len(values))
+        serialized["dropped_at"] = _dropped_at(particle)
+        raw_all_rows.append(serialized)
+
     replay = {
+        "raw_all": raw_all_rows,
         "config": {
             "sampling_rate_hz": FS,
             "bandpass_hz": [7_000.0, 80_000.0],
@@ -253,6 +279,32 @@ def replay_particles2snr_dual_clean(
         },
     }
     return replay, np.asarray(filtered, dtype=np.float32)
+
+
+def replay_particles2snr_on_synthetic(
+    signal: np.ndarray,
+    *,
+    truth_start: int,
+    truth_end: int,
+    frequency_hz: float,
+) -> dict[str, Any]:
+    """Replay the legacy pipeline on a synthetic trace with known ground truth.
+
+    The reviewed-row metadata normally comes from a manual review queue; for a
+    synthetic demonstration the caller supplies the constructed truth instead.
+    """
+    reviewed = {
+        "event_id": "synthetic",
+        "event_start": str(int(truth_start)),
+        "event_end": str(int(truth_end)),
+        "width_ms": str((int(truth_end) - int(truth_start)) / FS * 1000.0),
+        "doppler_low_hz": str(float(frequency_hz)),
+        "doppler_high_hz": str(float(frequency_hz)),
+        "review_event_present": "yes",
+        "review_full_event_visible": "yes",
+    }
+    replay, _filtered = replay_particles2snr_dual_clean(signal, reviewed)
+    return replay
 
 
 def assert_reference_replay_contract(replay: dict[str, Any]) -> None:

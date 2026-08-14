@@ -14,6 +14,7 @@ from particles2snr.yeast_detector_figures import (
     plot_event_support,
     plot_frame_energy,
     plot_frequency_baseline,
+    plot_legacy_vs_energy,
     plot_robust_band,
     plot_spectrogram,
     plot_stft_windows,
@@ -43,6 +44,14 @@ def example():
 def test_every_helper_renders_and_returns_axes(example) -> None:
     signal, config, trace = example
     center = signal.size // 2
+    fake_replay = {
+        "raw_all": [
+            {"start_ms": 3.6, "end_ms": 4.6, "t0_ms": 4.1, "frequency_khz": 22.0,
+             "dropped_at": None},
+            {"start_ms": 1.0, "end_ms": 2.9, "t0_ms": 1.9, "frequency_khz": 18.0,
+             "dropped_at": "width"},
+        ]
+    }
     produced = [
         plot_trace_overview(signal, config, zoom_center=center),
         plot_event_support(signal, config, event_start=7800, event_end=8600),
@@ -54,6 +63,7 @@ def test_every_helper_renders_and_returns_axes(example) -> None:
         plot_robust_band(trace),
         plot_robust_band(trace, scaled=True),
         plot_energy_and_z(trace),
+        plot_legacy_vs_energy(trace, replay=fake_replay, truth_spans_ms=[(3.9, 4.3)]),
     ]
     for axes in produced:
         first = axes.flat[0] if isinstance(axes, np.ndarray) else axes

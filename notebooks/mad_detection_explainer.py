@@ -54,6 +54,7 @@ from particles2snr.yeast_particles2snr_comparison import (
     assert_reference_replay_contract,
     render_particles2snr_failure_plot,
     replay_particles2snr_dual_clean,
+    replay_particles2snr_on_synthetic,
 )
 from particles2snr.yeast_review_records import load_reviewed_event
 from particles2snr import yeast_detector_figures as fig
@@ -288,7 +289,8 @@ rng = np.random.default_rng(3)
 t = np.arange(16384) / config.sampling_frequency_hz
 tone = 0.25 * np.sin(2 * np.pi * 18e3 * t)
 burst = np.exp(-0.5 * ((t - 5.0e-3) / 2.0e-4) ** 2) * np.sin(2 * np.pi * 30e3 * t)
-demo = detector_trace((tone + burst + 0.02 * rng.normal(size=t.size)).astype(np.float32), config)
+tone_signal = (tone + burst + 0.02 * rng.normal(size=t.size)).astype(np.float32)
+demo = detector_trace(tone_signal, config)
 tone_bin = int(np.argmin(np.abs(demo.frequencies - 18e3)))
 print(f"baseline at the 18 kHz bin: {demo.baseline[tone_bin, 0]:.2e}   "
       f"median baseline elsewhere: {float(np.median(demo.baseline)):.2e}")
@@ -304,6 +306,59 @@ fig.plot_energy_and_z(demo);
 # - The honest limit: the detection band (7–80 kHz) itself remains a hard
 #   gate. A particle slow enough to fall below 7 kHz is lost to both
 #   approaches; the robustness argument starts only inside the band.
+#
+# ### The same trace through the peak-first pipeline
+#
+# What does particles2SNR do with the tone? The replay below runs the full
+# legacy cascade on the identical synthetic trace:
+
+# %%
+replay_tone = replay_particles2snr_on_synthetic(
+    tone_signal, truth_start=9200, truth_end=10800, frequency_hz=30e3)
+fig.plot_legacy_vs_energy(demo, replay=replay_tone, truth_spans_ms=[(4.6, 5.4)]);
+
+# %% [markdown]
+# - The tone spawns hypotheses all along the trace: **8 raw hypotheses for 1
+#   real event**. The cleaning cascade has to execute every spurious one —
+#   here six fall to the box-width gate and one to peak evidence.
+# - The final answer is right *on this toy*, but it is right because five
+#   filters agreed. The introduction's yeast record is what happens when the
+#   cascade meets a case its thresholds cannot arbitrate.
+# - The energy chain (bottom) never created the problem: the tone lives in
+#   the baseline, so there was nothing to clean.
+#
+# ### The other side of the gate — a real but atypical particle
+#
+# Those cleaning gates are calibrated for *typical* particles: fitted boxes
+# t₀ ± 2.5τ must fall within 0.08–1.5 ms, passage times within 0.07–0.65 ms.
+# Now a toy with an unusually **slow, weak particle** (9 kHz, long envelope)
+# next to a normal fast one:
+
+# %%
+rng = np.random.default_rng(5)
+slow = 0.35 * np.exp(-0.5 * ((t - 2.5e-3) / 4.0e-4) ** 2) * np.sin(2 * np.pi * 9e3 * t)
+fast = np.exp(-0.5 * ((t - 6.0e-3) / 2.0e-4) ** 2) * np.sin(2 * np.pi * 30e3 * t)
+slow_signal = (slow + fast + 0.02 * rng.normal(size=t.size)).astype(np.float32)
+slow_trace = detector_trace(slow_signal, config)
+replay_slow = replay_particles2snr_on_synthetic(
+    slow_signal, truth_start=3400, truth_end=6600, frequency_hz=9e3)
+fig.plot_legacy_vs_energy(slow_trace, replay=replay_slow,
+                          truth_spans_ms=[(1.7, 3.3), (5.6, 6.4)]);
+
+# %% [markdown]
+# - The legacy pipeline *sees* the slow particle at the raw stage — then the
+#   **box-width gate deletes it** (its fitted box is longer than 1.5 ms), and
+#   the final output contains only the fast particle. A real event was
+#   removed by a threshold calibrated on typical ones.
+# - The energy chain activates on both: the slow event sits at z ≈ 1.5·10³,
+#   three orders of magnitude above the 3.5 threshold. No gate on speed,
+#   width or peak shape was consulted to *detect* it.
+# - Honesty notes: this is a constructed illustration, not a prevalence
+#   claim — how often real acquisitions contain such atypical events is an
+#   open question. And the MAD chain's own qualification (section 9) also
+#   carries width limits (0.06–2.0 ms), wider but real: the argument is
+#   about *where* selectivity lives — in a statistical contrast, or in a
+#   stack of proxy gates — not about the energy chain having no limits.
 
 # %% [markdown]
 # ## 5 · AGGREGATE — the frame energy E[m]

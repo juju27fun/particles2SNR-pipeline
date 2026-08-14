@@ -300,6 +300,79 @@ def plot_robust_band(
     return ax
 
 
+_DROP_STAGE_LABELS = {
+    "passage_time": "dropped: passage time",
+    "width": "dropped: box width",
+    "filtered_evidence": "dropped: peak evidence",
+    "dual_clean": "dropped: dual-clean",
+    "nms": "dropped: NMS",
+}
+
+
+def plot_legacy_vs_energy(
+    trace: DetectorTrace,
+    *,
+    replay: dict,
+    truth_spans_ms: list[tuple[float, float]],
+    axes: np.ndarray | None = None,
+) -> np.ndarray:
+    """Peak-first hypotheses and their cleaning fate, against the z[m] chain.
+
+    Top: filtered trace with the true event spans. Middle: every raw legacy
+    hypothesis as a bar — surviving boxes solid blue, cleaned-away ones faded
+    orange with the stage that removed them. Bottom: the energy chain's z[m],
+    which never created hypotheses to clean.
+    """
+    axes = _stacked_axes(axes, 3, height=8.0)
+    config = trace.config
+    x_ms = time_axis_ms(trace.filtered.size, config)
+    for axis in axes:
+        for start_ms, end_ms in truth_spans_ms:
+            axis.axvspan(start_ms, end_ms, color=PALE_GREEN, zorder=0)
+    axes[0].plot(x_ms, trace.filtered, color=GREY, linewidth=0.6)
+    axes[0].set_ylabel("filtered [a.u.]")
+    axes[0].set_title("The trace — true events in green")
+
+    hypotheses = replay["raw_all"]
+    survivors = sum(1 for row in hypotheses if row["dropped_at"] is None)
+    for index, row in enumerate(hypotheses):
+        y = len(hypotheses) - index
+        survives = row["dropped_at"] is None
+        axes[1].plot(
+            [row["start_ms"], row["end_ms"]], [y, y],
+            color=BLUE if survives else ORANGE,
+            alpha=1.0 if survives else 0.4,
+            linewidth=8, solid_capstyle="round",
+        )
+        note = f"{row['frequency_khz']:.1f} kHz"
+        if not survives:
+            note += f" · {_DROP_STAGE_LABELS[row['dropped_at']]}"
+        axes[1].annotate(note, xy=(row["end_ms"], y), xytext=(6, -2),
+                         textcoords="offset points", fontsize=8,
+                         color=NAVY if survives else ORANGE)
+    axes[1].set_ylim(0.2, len(hypotheses) + 0.8)
+    axes[1].set_yticks([])
+    axes[1].set_ylabel("hypotheses")
+    axes[1].set_title(
+        f"particles2SNR (peak-first): {len(hypotheses)} hypotheses "
+        f"→ {survivors} box(es) after five cleaning stages"
+    )
+
+    frame_ms = frame_axis_ms(trace)
+    axes[2].plot(frame_ms, trace.energy_z, color=PURPLE, linewidth=1.1, label="z[m]")
+    axes[2].axhline(config.active_snr_z, color=RED, linestyle="--", linewidth=1.2,
+                    label=f"activation z = {config.active_snr_z}")
+    active = trace.active.astype(bool)
+    axes[2].scatter(frame_ms[active], np.full(int(active.sum()), -0.5),
+                    s=14, color=GREEN, marker="s", label="active frames", zorder=4)
+    axes[2].set_yscale("symlog", linthresh=1.0)
+    axes[2].set_ylabel("z[m]")
+    axes[2].set_xlabel("time [ms]")
+    axes[2].set_title("Energy chain: no hypothesis was ever created to clean")
+    axes[2].legend(loc="upper left")
+    return axes
+
+
 def plot_energy_and_z(
     trace: DetectorTrace,
     *,
