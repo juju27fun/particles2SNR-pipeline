@@ -716,7 +716,8 @@ for event_id in ("9459e76ce29342debc90:00", "214f4ce4967af98a954c:00",
 # %% [markdown]
 # On all four manifested records, **deleting the C test would change
 # nothing**: the two right-hand columns are identical. At 0.08, C is not
-# selecting anything — it is a *guard* that never had to fire.
+# selecting anything — it is a *guard* that never had to fire. Section 7c
+# repeats this over 1 316 traces and both detectors, with controls.
 #
 # There is a structural reason. The 7–80 kHz band holds only 19 STFT bins, so
 # "the top 5" is already 26 % of the band by construction; C is bounded well
@@ -750,17 +751,53 @@ for event_id in ("9459e76ce29342debc90:00", "214f4ce4967af98a954c:00",
 # — every frame passes. Across both pipelines the *value* of the threshold,
 # not the presence of the code, says what C is doing:
 #
-# | Setting | Where | Role of C |
-# |---|---|---|
-# | 0.0 | beads, main activation | **off** — easy beads give unambiguous events; a structure test only adds a way to lose one |
-# | 0.08 | yeast activation | **guard** — costs nothing, fires only on a pathologically diffuse frame (never, on these four records) |
-# | 0.08 | beads, event acceptance | guard, moved from the frame level to the event level |
-# | 0.80 – 0.90 | beads, rescue and deblend paths | **selector** — these paths deliberately lower z to reach hard cases, and demand strong structure in exchange |
+# | Setting | Where |
+# |---|---|
+# | 0.0 | beads, main activation |
+# | 0.08 | yeast activation (this notebook) |
+# | 0.08 | beads, event acceptance |
+# | 0.80 – 0.90 | beads, rescue and deblend paths |
 #
-# The last row is the honest reading of C: it becomes a real decision only
-# when it is set high, in the regimes that go looking for difficult events.
-# Same code, three regimes, each argued from the population rather than
-# tuned in the abstract.
+# The natural story is that C is off for easy beads, a cheap guard for yeast,
+# and a genuine selector in the rescue paths that deliberately lower z to
+# reach hard cases. **Measured, that last claim is false.** An ablation —
+# same detector, same data, every C threshold set to 0 — was run over:
+#
+# | Corpus | Scope | Traces where removing C changes the outcome |
+# |---|---|---|
+# | yeast `yeast-hf-10-5-20260610@v1` | 1 316 traces, 2 449 detected events | **0** |
+# | beads `…dual-clean-c1-yolo-4class@v2` | 600 traces, deblend + unified rescue enabled | **0** |
+#
+# The bead rescue path is not dormant — it fires on 116 of those 600 traces
+# and adds 73 events. It simply never rejects anything *because of C*. And
+# the ablation is not blind: as positive controls, relaxing the rescue
+# bandwidth limit changes 4 traces in 300 and lowering the rescue z from 7.0
+# to 4.0 changes 6, so the method does detect a constraint that binds.
+#
+# C is not dead code either — tightening the rescue thresholds to 0.99
+# changes 66 traces in 300. The test is evaluated, it is reachable, and it
+# *can* bind. It simply sits far below everything the data produces: on yeast
+# the lowest per-event C is 0.57 against thresholds of 0.08 and 0.12.
+#
+# **So should C be deleted?** The measurements say removing it would be free
+# on every trace examined; they do not say it is useless. Two things to weigh:
+#
+# - C is **insurance against a failure mode this data does not contain** — a
+#   frame with high total energy spread evenly across the band (a knock, a
+#   saturation transient). Note that the bead corpus had saturation
+#   *repaired upstream* on 213 traces before the detector ever sees it, which
+#   plausibly removes the very cases C exists to catch.
+# - What must not be claimed is that these thresholds are *tuned*. Any value
+#   below roughly 0.5 gives bit-identical output. 0.08 is not an optimum, it
+#   is a floor no observed frame has ever approached.
+#
+# Keeping a zero-cost guard is defensible; presenting it as a calibrated
+# discriminator is not. That distinction is the honest content of this
+# section.
+#
+# *This ablation is a development observation run offline over the corpora
+# named above — it is not a manifested analysis run, and it says nothing
+# about detection quality against ground truth.*
 #
 # ### 7d · One word, two quantities
 #
