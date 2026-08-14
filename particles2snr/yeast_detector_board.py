@@ -8,11 +8,9 @@ from typing import Any
 
 import numpy as np
 from matplotlib.figure import Figure
-from scipy.ndimage import uniform_filter1d
-from scipy.signal import spectrogram
 
 from .yeast_events import (
-    bandpass_yeast_signal,
+    detector_trace,
     review_calibrated_detection_config_v1,
 )
 from .yeast_particles2snr_comparison import build_particles2snr_legacy_section
@@ -71,54 +69,6 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def _detector_diagnostics(signal: np.ndarray) -> dict[str, np.ndarray]:
-    config = review_calibrated_detection_config_v1()
-    filtered = bandpass_yeast_signal(signal, config)
-    frequencies, times, complex_values = spectrogram(
-        filtered - float(np.mean(filtered)),
-        fs=config.sampling_frequency_hz,
-        nperseg=config.stft_nperseg,
-        noverlap=config.stft_noverlap,
-        window="hann",
-        mode="complex",
-    )
-    frequency_mask = (frequencies >= config.low_freq_hz) & (
-        frequencies <= config.high_freq_hz
-    )
-    band_frequencies = frequencies[frequency_mask]
-    band_complex = complex_values[frequency_mask]
-    power = np.square(np.abs(band_complex)).astype(np.float64)
-    baseline = np.percentile(power, 25, axis=1, keepdims=True)
-    excess = np.clip(power - baseline, 0.0, None)
-    frame_energy = excess.sum(axis=0)
-    frame_energy = uniform_filter1d(
-        frame_energy, size=config.smooth_frames, mode="nearest"
-    )
-    median = float(np.median(frame_energy))
-    mad = float(np.median(np.abs(frame_energy - median))) * 1.4826
-    energy_z = (frame_energy - median) / max(mad, 1.0e-12)
-    top_count = min(5, excess.shape[0])
-    top_power = np.partition(
-        excess, excess.shape[0] - top_count, axis=0
-    )[-top_count:].sum(axis=0)
-    concentration = top_power / (power.sum(axis=0) + 1.0e-12)
-    active = (energy_z >= config.active_snr_z) & (
-        concentration >= config.medium_min_concentration
-    )
-    return {
-        "filtered": filtered,
-        "frequencies": band_frequencies,
-        "times": times,
-        "magnitude": np.abs(band_complex),
-        "frame_energy": frame_energy,
-        "energy_median": np.asarray(median),
-        "energy_mad": np.asarray(mad),
-        "energy_z": energy_z,
-        "concentration": concentration,
-        "active": active,
-    }
-
-
 def _normalized(values: np.ndarray) -> np.ndarray:
     centered = np.asarray(values, dtype=np.float64) - float(np.median(values))
     scale = float(np.quantile(np.abs(centered), 0.995))
@@ -141,7 +91,7 @@ def _render_case_plot(
     destination: Path,
 ) -> None:
     config = review_calibrated_detection_config_v1()
-    diagnostics = _detector_diagnostics(signal)
+    trace = detector_trace(signal, config)
     center = int(reviewed["center_index"])
     half = 4096
     crop_start = max(0, center - half)
@@ -149,7 +99,7 @@ def _render_case_plot(
     samples = np.arange(crop_start, crop_end)
     x_ms = (samples - center) / config.sampling_frequency_hz * 1000.0
     relative_stft_ms = (
-        diagnostics["times"] - center / config.sampling_frequency_hz
+        trace.times - center / config.sampling_frequency_hz
     ) * 1000.0
 
     figure = Figure(figsize=(13.2, 10.2), constrained_layout=True)
@@ -172,25 +122,25 @@ def _render_case_plot(
     )
     filtered_axis.plot(
         x_ms,
-        _normalized(diagnostics["filtered"][crop_start:crop_end]),
+        _normalized(trace.filtered[crop_start:crop_end]),
         color="#17212b",
         linewidth=0.75,
     )
-    magnitude_db = 20.0 * np.log10(diagnostics["magnitude"] + 1.0e-12)
+    magnitude_db = 20.0 * np.log10(np.abs(trace.complex_stft) + 1.0e-12)
     low, high = np.quantile(magnitude_db, [0.05, 0.995])
     spectrum_axis.pcolormesh(
         relative_stft_ms,
-        diagnostics["frequencies"] / 1000.0,
+        trace.frequencies / 1000.0,
         magnitude_db,
         shading="auto",
         cmap="magma",
         vmin=float(low),
         vmax=float(high),
     )
-    energy_median = float(diagnostics["energy_median"])
-    energy_mad = float(diagnostics["energy_mad"])
+    energy_median = trace.energy_median
+    energy_scale = trace.energy_scale
     median_denominator = max(energy_median, 1.0e-12)
-    relative_energy = diagnostics["frame_energy"] / median_denominator
+    relative_energy = trace.frame_energy / median_denominator
     energy_axis.plot(
         relative_stft_ms,
         relative_energy,
@@ -206,15 +156,15 @@ def _render_case_plot(
         label="médiane : bruit typique",
     )
     energy_axis.axhspan(
-        max(0.0, (energy_median - energy_mad) / median_denominator),
-        (energy_median + energy_mad) / median_denominator,
+        max(0.0, (energy_median - energy_scale) / median_denominator),
+        (energy_median + energy_scale) / median_denominator,
         color="#9aa7b2",
         alpha=0.16,
-        label="± 1 MAD",
+        label="± 1.4826 MAD",
     )
     robust_axis.plot(
         relative_stft_ms,
-        diagnostics["energy_z"],
+        trace.energy_z,
         color="#6f42c1",
         linewidth=1.15,
         label="score robuste z",
@@ -226,7 +176,7 @@ def _render_case_plot(
         linewidth=0.9,
         label="activation z = 3,5",
     )
-    active = diagnostics["active"].astype(bool)
+    active = trace.active.astype(bool)
     robust_axis.scatter(
         relative_stft_ms[active],
         np.full(int(np.count_nonzero(active)), -0.55),
@@ -328,7 +278,7 @@ def _render_case_plot(
                     "pad": 1.5,
                 },
             )
-        energy_peak_index = int(np.argmax(diagnostics["frame_energy"]))
+        energy_peak_index = int(np.argmax(trace.frame_energy))
         energy_axis.annotate(
             "Σ sur les fréquences\n⇒ une seule courbe E[m]",
             xy=(

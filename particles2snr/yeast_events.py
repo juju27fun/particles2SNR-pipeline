@@ -103,10 +103,100 @@ def crop_around_index(signal: np.ndarray, center_index: int, length: int) -> np.
     return output
 
 
-def _robust_scale(values: np.ndarray, epsilon: float = 1.0e-12) -> tuple[float, float]:
-    median = float(np.median(values))
-    mad = float(np.median(np.abs(values - median))) * 1.4826
-    return median, max(mad, epsilon)
+class DetectionBandError(ValueError):
+    """Raised when the configured detection band contains no STFT bins."""
+
+
+@dataclass(frozen=True)
+class DetectorTrace:
+    """Every intermediate stage of detect_yeast_events, in pipeline order.
+
+    ``raw_mad`` is the unscaled median absolute deviation; ``energy_scale`` is
+    the Gaussian-consistent scale ``max(1.4826 * raw_mad, 1e-12)`` actually
+    used to normalise ``energy_z``. They are exposed separately because both
+    have been called "MAD" elsewhere and differ by the 1.4826 factor.
+    """
+
+    config: YeastDetectionConfig
+    # ISOLATE
+    filtered: np.ndarray            # (n_samples,)
+    # LOCALISE
+    frequencies: np.ndarray         # (n_bins,) restricted to the detection band
+    times: np.ndarray               # (n_frames,) seconds
+    complex_stft: np.ndarray        # (n_bins, n_frames) complex
+    power: np.ndarray               # (n_bins, n_frames) |X|^2
+    hop: int                        # stft_nperseg - stft_noverlap
+    # REFERENCE
+    baseline: np.ndarray            # (n_bins, 1) per-bin Q25
+    excess: np.ndarray              # (n_bins, n_frames) positive excess
+    # AGGREGATE
+    frame_energy: np.ndarray        # (n_frames,) smoothed
+    # NORMALISE
+    energy_median: float
+    raw_mad: float
+    energy_scale: float
+    energy_z: np.ndarray            # (n_frames,)
+    # STRUCTURE
+    concentration: np.ndarray       # (n_frames,) top-5 excess / total band power
+    # ACTIVATE
+    active: np.ndarray              # (n_frames,) bool
+
+
+def detector_trace(signal: np.ndarray, config: YeastDetectionConfig) -> DetectorTrace:
+    """Run the detector front-end and return every intermediate stage."""
+    raw = ensure_1d_signal(signal)
+    if raw.size < config.stft_nperseg:
+        raise ValueError(
+            f"signal shorter than one STFT window: {raw.size} < {config.stft_nperseg}"
+        )
+    filtered = bandpass_yeast_signal(raw, config)
+    frequencies, times, complex_values = spectrogram(
+        filtered - float(np.mean(filtered)),
+        fs=config.sampling_frequency_hz,
+        nperseg=config.stft_nperseg,
+        noverlap=config.stft_noverlap,
+        window="hann",
+        mode="complex",
+    )
+    frequency_mask = (frequencies >= config.low_freq_hz) & (frequencies <= config.high_freq_hz)
+    if not np.any(frequency_mask):
+        raise DetectionBandError("no STFT bins inside the detection band")
+    band_frequencies = frequencies[frequency_mask].astype(np.float32)
+    band_complex = complex_values[frequency_mask]
+    power = np.square(np.abs(band_complex)).astype(np.float64)
+    baseline = np.percentile(power, 25, axis=1, keepdims=True)
+    excess = np.clip(power - baseline, 0.0, None)
+    frame_energy = excess.sum(axis=0)
+    if config.smooth_frames > 1:
+        frame_energy = uniform_filter1d(frame_energy, size=config.smooth_frames, mode="nearest")
+    energy_median = float(np.median(frame_energy))
+    raw_mad = float(np.median(np.abs(frame_energy - energy_median)))
+    energy_scale = max(1.4826 * raw_mad, 1.0e-12)
+    energy_z = (frame_energy - energy_median) / energy_scale
+    top_count = min(5, excess.shape[0])
+    top_power = np.partition(excess, excess.shape[0] - top_count, axis=0)[-top_count:].sum(axis=0)
+    concentration = top_power / (power.sum(axis=0) + 1.0e-12)
+    active = (energy_z >= config.active_snr_z) & (
+        concentration >= config.medium_min_concentration
+    )
+    return DetectorTrace(
+        config=config,
+        filtered=filtered,
+        frequencies=band_frequencies,
+        times=times,
+        complex_stft=band_complex,
+        power=power,
+        hop=config.stft_nperseg - config.stft_noverlap,
+        baseline=baseline,
+        excess=excess,
+        frame_energy=frame_energy,
+        energy_median=energy_median,
+        raw_mad=raw_mad,
+        energy_scale=energy_scale,
+        energy_z=energy_z,
+        concentration=concentration,
+        active=active,
+    )
 
 
 def _group_active_frames(active: np.ndarray, max_gap_frames: int) -> list[tuple[int, int]]:
@@ -204,38 +294,20 @@ def detect_yeast_events(
     if raw.size < config.stft_nperseg:
         return [], "signal_too_short"
     try:
-        filtered = bandpass_yeast_signal(raw, config)
-        frequencies, _, complex_values = spectrogram(
-            filtered - float(np.mean(filtered)),
-            fs=config.sampling_frequency_hz,
-            nperseg=config.stft_nperseg,
-            noverlap=config.stft_noverlap,
-            window="hann",
-            mode="complex",
-        )
+        trace = detector_trace(raw, config)
+    except DetectionBandError:
+        return [], "detection_band_empty"
     except Exception as exc:
         return [], f"time_frequency_failed:{type(exc).__name__}"
 
-    frequency_mask = (frequencies >= config.low_freq_hz) & (frequencies <= config.high_freq_hz)
-    if not np.any(frequency_mask):
-        return [], "detection_band_empty"
-    band_frequencies = frequencies[frequency_mask].astype(np.float32)
-    band_complex = complex_values[frequency_mask]
-    power = np.square(np.abs(band_complex)).astype(np.float64)
-    baseline = np.percentile(power, 25, axis=1, keepdims=True)
-    excess = np.clip(power - baseline, 0.0, None)
-    frame_energy = excess.sum(axis=0)
-    if config.smooth_frames > 1:
-        frame_energy = uniform_filter1d(frame_energy, size=config.smooth_frames, mode="nearest")
-    energy_median, energy_scale = _robust_scale(frame_energy)
-    energy_z = (frame_energy - energy_median) / energy_scale
-    top_count = min(5, excess.shape[0])
-    top_power = np.partition(excess, excess.shape[0] - top_count, axis=0)[-top_count:].sum(axis=0)
-    concentration_by_frame = top_power / (power.sum(axis=0) + 1.0e-12)
-    active = (energy_z >= config.active_snr_z) & (
-        concentration_by_frame >= config.medium_min_concentration
-    )
-    hop = config.stft_nperseg - config.stft_noverlap
+    band_frequencies = trace.frequencies
+    band_complex = trace.complex_stft
+    excess = trace.excess
+    frame_energy = trace.frame_energy
+    energy_median = trace.energy_median
+    energy_z = trace.energy_z
+    active = trace.active
+    hop = trace.hop
     max_gap = max(
         0,
         int(round(config.cluster_gap_ms / 1000.0 * config.sampling_frequency_hz / hop)),
