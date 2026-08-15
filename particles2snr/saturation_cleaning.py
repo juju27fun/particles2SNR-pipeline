@@ -22,6 +22,21 @@ SATURATION_REPAIR_METHODS = {
 }
 
 
+def proposal_center_inside_intervals(start_sample, end_sample, intervals):
+    """Return the proposal midpoint and its first inclusive interval match.
+
+    This is the public form of the frozen z8v2 hard-veto geometry.  It uses
+    proposal bounds, not a detector-provided peak, so every caller applies the
+    same decision rule.
+    """
+    center_sample = (float(start_sample) + float(end_sample)) / 2.0
+    for index, interval in enumerate(intervals):
+        left, right = (int(value) for value in interval)
+        if left <= center_sample <= right:
+            return center_sample, index, (left, right)
+    return center_sample, None, None
+
+
 def butter_bandpass_filter(signal, fs=2_000_000, fmin=7000, fmax=80000,
                            order=4):
     """Apply the same zero-phase Butterworth used by the dual-clean generator."""

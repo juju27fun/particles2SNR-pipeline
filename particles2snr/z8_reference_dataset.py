@@ -10,6 +10,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from .saturation_cleaning import proposal_center_inside_intervals
+
 
 CLASS_NAMES = {0: "2um", 1: "4um", 2: "10um"}
 SAMPLING_FREQUENCY_HZ = 2_000_000.0
@@ -141,14 +143,11 @@ def _center_inside_repair(
     a detector-provided centre field so that strict and rescue proposals use the
     exact same decision rule.
     """
-    center_sample = (
-        (float(annotation["start"]) + float(annotation["end"])) / 2.0
-    ) * length
-    for index, interval in enumerate(intervals):
-        left, right = interval
-        if left <= center_sample <= right:
-            return center_sample, index, interval
-    return center_sample, None, None
+    return proposal_center_inside_intervals(
+        float(annotation["start"]) * length,
+        float(annotation["end"]) * length,
+        intervals,
+    )
 
 
 def _saturation_veto_exclusion(

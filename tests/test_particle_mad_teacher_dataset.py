@@ -5,10 +5,13 @@ from dataclasses import replace
 from particles2snr.particle_events import ParticleDetectionConfig
 from particles2snr.particle_mad_teacher_dataset import (
     AUDIT_SEED,
+    CHANGE_AUDIT_SEED,
     interval_iou,
     match_events,
     select_audit_cases,
+    select_change_audit_cases,
 )
+from particles2snr.saturation_cleaning import proposal_center_inside_intervals
 
 
 def _addition(index: int, class_name: str, split: str, empty: bool = False) -> dict:
@@ -93,3 +96,49 @@ def test_active_frames_only_configuration_is_explicit() -> None:
     assert config.boundary_expansion_enabled is False
     assert config.boundary_pad_ms == 0.0
     assert config.active_min_concentration == 0.0
+
+
+def test_z8_veto_uses_proposal_bounds_midpoint_not_detector_peak() -> None:
+    center, index, interval = proposal_center_inside_intervals(
+        100, 300, [(190, 210)]
+    )
+    assert center == 200.0
+    assert index == 0
+    assert interval == (190, 210)
+    center, index, interval = proposal_center_inside_intervals(
+        100, 300, [(201, 250)]
+    )
+    assert center == 200.0
+    assert index is None
+    assert interval is None
+
+
+def test_source_correction_audit_is_deterministic_and_stratified() -> None:
+    diff_rows = []
+    for index in range(80):
+        row = _addition(index, "10um" if index % 2 else "2um", "test" if index % 5 == 0 else "train")
+        row["status"] = "added" if index % 3 else "lost"
+        if row["status"] == "lost":
+            row["old_event_id"] = f"old-{index}"
+            row["new_event_id"] = ""
+        diff_rows.append(row)
+    veto_rows = [
+        {
+            "veto_id": f"veto-{index}",
+            "source_id": f"source-{index}",
+            "source_class": "10um",
+            "output_split": "val" if index % 2 else "train",
+            "event_start": 100 + index,
+        }
+        for index in range(20)
+    ]
+    first = select_change_audit_cases(diff_rows, veto_rows)
+    second = select_change_audit_cases(list(reversed(diff_rows)), list(reversed(veto_rows)))
+    assert len(first) == 60
+    assert [row["case_id"] for row in first] == [row["case_id"] for row in second]
+    assert {row["change_kind"] for row in first} == {
+        "added",
+        "lost",
+        "saturation_center_vetoed",
+    }
+    assert {row["selection_seed"] for row in first} == {CHANGE_AUDIT_SEED}

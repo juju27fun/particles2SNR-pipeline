@@ -21,12 +21,15 @@ from .particle_events import (
     config_fingerprint,
     detect_particle_events,
 )
+from .particle_candidate_dataset import read_repair_regions
+from .saturation_cleaning import proposal_center_inside_intervals
 
 
 CLASS_IDS = {"2um": 0, "4um": 1, "10um": 2}
 SIGNAL_LENGTH = 16_384
 ROI_LENGTH = 6_144
 AUDIT_SEED = "particle-mad-v2-admissions-audit60-v1"
+CHANGE_AUDIT_SEED = "particle-mad-v2.1-source-correction-audit60-v1"
 
 
 def sha256_file(path: Path) -> str:
@@ -231,6 +234,91 @@ def select_audit_cases(additions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def select_change_audit_cases(
+    diff_rows: list[dict[str, Any]],
+    veto_rows: list[dict[str, Any]],
+    *,
+    quota: int = 60,
+) -> list[dict[str, Any]]:
+    """Select a deterministic, stratified audit of source-driven changes."""
+    changes: list[dict[str, Any]] = [
+        {**row, "change_kind": row["status"]}
+        for row in diff_rows
+        if row["status"] in {"added", "lost"}
+    ]
+    changes.extend(
+        {
+            **row,
+            "status": "saturation_center_vetoed",
+            "change_kind": "saturation_center_vetoed",
+        }
+        for row in veto_rows
+    )
+    if len(changes) < quota:
+        raise ValueError(
+            f"change audit quota {quota} exceeds population {len(changes)}"
+        )
+    strata: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in changes:
+        strata[
+            (
+                str(row["change_kind"]),
+                str(row["source_class"]),
+                str(row["output_split"]),
+            )
+        ].append(row)
+    for key, members in strata.items():
+        members.sort(
+            key=lambda row: hashlib.sha256(
+                (
+                    f"{CHANGE_AUDIT_SEED}:{key}:"
+                    f"{row.get('new_event_id') or row.get('old_event_id') or row.get('veto_id')}"
+                ).encode()
+            ).hexdigest()
+        )
+    selected: list[dict[str, Any]] = []
+    keys = sorted(strata)
+    while len(selected) < quota:
+        progressed = False
+        for key in keys:
+            if strata[key] and len(selected) < quota:
+                selected.append(strata[key].pop(0))
+                progressed = True
+        if not progressed:
+            raise RuntimeError("change audit sampler exhausted unexpectedly")
+    ordered = sorted(
+        selected,
+        key=lambda row: (
+            row["output_split"] != "test",
+            row["change_kind"],
+            row["source_class"],
+            row["source_id"],
+            int(
+                row.get("new_event_start")
+                or row.get("old_event_start")
+                or row.get("event_start")
+                or 0
+            ),
+        ),
+    )
+    result = []
+    for index, row in enumerate(ordered):
+        identity = (
+            row.get("new_event_id")
+            or row.get("old_event_id")
+            or row.get("veto_id")
+        )
+        result.append(
+            {
+                **row,
+                "audit_order": index + 1,
+                "case_id": f"mad-v2.1-change-{identity}",
+                "selection_seed": CHANGE_AUDIT_SEED,
+            }
+        )
+    return result
+
+
 def _tree_files(root: Path) -> list[Path]:
     return sorted(
         path for path in root.rglob("*") if path.is_file() and path.name != "dataset-manifest.json"
@@ -256,19 +344,78 @@ def build_mad_teacher_dataset(
     source_manifest_sha256: str,
     config: ParticleDetectionConfig,
     expected: dict[str, Any] | None = None,
+    source_manifest_path: Path | None = None,
+    repair_manifest: Path | None = None,
+    saturation_center_veto: bool = False,
+    audit_mode: str = "v2_admissions",
 ) -> dict[str, Any]:
     workspace_root = workspace_root.resolve()
     source_dataset_root = source_dataset_root.resolve()
     predecessor_root = predecessor_root.resolve()
     output_dir = output_dir.resolve()
-    for path in (source_dataset_root, predecessor_root, output_dir.parent):
+    optional_inputs = tuple(
+        path.resolve()
+        for path in (source_manifest_path, repair_manifest)
+        if path is not None
+    )
+    for path in (
+        source_dataset_root,
+        predecessor_root,
+        output_dir.parent,
+        *optional_inputs,
+    ):
         _portable(path, workspace_root)
     if output_dir.exists():
         raise FileExistsError(f"refusing to overwrite immutable dataset: {output_dir}")
     predecessor_manifest_path = predecessor_root / "dataset-manifest.json"
     predecessor_manifest = json.loads(predecessor_manifest_path.read_text(encoding="utf-8"))
+    if source_manifest_path is not None:
+        if source_manifest_path.resolve() != (
+            source_dataset_root / "source_manifest.csv"
+        ).resolve():
+            raise ValueError("corrected source manifest must belong to its source dataset")
+        source_dataset_manifest = source_dataset_root / "dataset-manifest.json"
+        if not source_dataset_manifest.is_file():
+            raise FileNotFoundError(source_dataset_manifest)
+        if sha256_file(source_dataset_manifest) != source_manifest_sha256:
+            raise ValueError("corrected source dataset manifest hash mismatch")
+    if saturation_center_veto and repair_manifest is not None:
+        if repair_manifest.resolve() != (
+            source_dataset_root / "saturation_repair_manifest.csv"
+        ).resolve():
+            raise ValueError("saturation veto manifest must belong to its source dataset")
     old_config = ParticleDetectionConfig(**predecessor_manifest["config"])
-    source_rows = _read_csv(predecessor_root / "source_manifest.csv")
+    predecessor_source_rows = _read_csv(predecessor_root / "source_manifest.csv")
+    source_rows = _read_csv(source_manifest_path) if source_manifest_path else predecessor_source_rows
+    predecessor_by_id = {row["source_id"]: row for row in predecessor_source_rows}
+    if set(predecessor_by_id) != {row["source_id"] for row in source_rows}:
+        raise ValueError("corrected source population differs from predecessor")
+    for source in source_rows:
+        predecessor_source = predecessor_by_id[source["source_id"]]
+        for field in (
+            "source_id",
+            "output_stem",
+            "source_path",
+            "source_class",
+            "class_id",
+            "source_split",
+            "output_split",
+        ):
+            if source[field] != predecessor_source[field]:
+                raise ValueError(
+                    f"corrected source identity drift for {source['source_id']}: {field}"
+                )
+    repair_regions = read_repair_regions(repair_manifest)
+    if saturation_center_veto and repair_manifest is None:
+        raise ValueError("saturation center veto requires a repair manifest")
+    for source in source_rows:
+        expected_repairs = int(source.get("repair_region_count", 0))
+        observed_repairs = len(repair_regions.get(f"{source['source_id']}.npy", ()))
+        if expected_repairs != observed_repairs:
+            raise ValueError(
+                f"repair interval count mismatch for {source['source_id']}: "
+                f"{expected_repairs} != {observed_repairs}"
+            )
     old_events_by_stem: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in _read_csv(predecessor_root / "events.csv"):
         old_events_by_stem[row["output_stem"]].append(row)
@@ -280,6 +427,7 @@ def build_mad_teacher_dataset(
         output_sources: list[dict[str, Any]] = []
         diff_rows: list[dict[str, Any]] = []
         additions: list[dict[str, Any]] = []
+        veto_rows: list[dict[str, Any]] = []
         class_widths: dict[str, list[int]] = defaultdict(list)
         for source in source_rows:
             source_path = source_dataset_root / source["source_path"]
@@ -290,13 +438,68 @@ def build_mad_teacher_dataset(
             signal = np.asarray(np.load(source_path, allow_pickle=False)).squeeze()
             if signal.size != SIGNAL_LENGTH:
                 raise ValueError(f"unexpected signal length for {source['source_id']}: {signal.size}")
-            new_candidates, _ = detect_particle_events(signal, config)
-            old_candidates, _ = detect_particle_events(signal, old_config)
-            retained = [
-                _candidate_row(candidate, source=source, dataset_id=dataset_id)
-                for candidate in new_candidates
-                if candidate.quality == "retained"
-            ]
+            filename = f"{source['source_id']}.npy"
+            regions = repair_regions.get(filename, ())
+            new_candidates, _ = detect_particle_events(
+                signal, config, repair_regions=regions
+            )
+            predecessor_source = predecessor_by_id[source["source_id"]]
+            old_signal_path = (
+                predecessor_root
+                / predecessor_source["output_split"]
+                / "signals"
+                / f"{predecessor_source['output_stem']}.npy"
+            )
+            if sha256_file(old_signal_path) != predecessor_source["output_signal_sha256"]:
+                raise ValueError(f"predecessor signal hash drift: {source['source_id']}")
+            old_signal = np.asarray(
+                np.load(old_signal_path, allow_pickle=False)
+            ).squeeze()
+            old_candidates, _ = detect_particle_events(old_signal, old_config)
+            retained = []
+            source_vetoes = 0
+            for candidate in new_candidates:
+                if candidate.quality != "retained":
+                    continue
+                center_sample, repair_index, repair_interval = (
+                    proposal_center_inside_intervals(
+                        candidate.event_start,
+                        candidate.event_end,
+                        regions,
+                    )
+                )
+                if saturation_center_veto and repair_interval is not None:
+                    veto_id = (
+                        f"mad-veto-{hashlib.sha256((dataset_id + ':' + source['source_id'] + ':' + str(candidate.candidate_index) + ':' + str(candidate.event_start) + ':' + str(candidate.event_end)).encode()).hexdigest()[:20]}"
+                    )
+                    veto_rows.append(
+                        {
+                            "veto_id": veto_id,
+                            "source_id": source["source_id"],
+                            "output_stem": source["output_stem"],
+                            "source_path": source["source_path"],
+                            "source_sha256": source["source_sha256"],
+                            "source_class": source["source_class"],
+                            "class_id": int(source["class_id"]),
+                            "output_split": source["output_split"],
+                            "candidate_index": candidate.candidate_index,
+                            "event_start": candidate.event_start,
+                            "event_end": candidate.event_end,
+                            "center_sample": center_sample,
+                            "repair_index": repair_index,
+                            "expanded_start_sample": repair_interval[0],
+                            "expanded_end_sample": repair_interval[1],
+                            "robust_energy_z": candidate.robust_energy_z,
+                            "repair_overlap": candidate.repair_overlap,
+                            "repair_overlap_fraction": candidate.repair_overlap_fraction,
+                            "reason": "z8_center_inside_saturation_repair",
+                        }
+                    )
+                    source_vetoes += 1
+                    continue
+                retained.append(
+                    _candidate_row(candidate, source=source, dataset_id=dataset_id)
+                )
             old_retained = old_events_by_stem.get(source["output_stem"], [])
             matches = match_events(old_retained, retained)
             matched_old = {old_index for old_index, _, _ in matches}
@@ -422,16 +625,48 @@ def build_mad_teacher_dataset(
                     "retained_events": len(retained),
                     "rejected_candidates": sum(candidate.quality != "retained" for candidate in new_candidates),
                     "empty_mad_label": len(retained) == 0,
+                    "repair_region_count": len(regions),
+                    "saturation_center_vetoed": source_vetoes,
                     "output_signal_sha256": sha256_file(output_signal),
                     "output_label_sha256": sha256_file(output_label),
                 }
             )
 
-        audit_cases = select_audit_cases(additions)
+        if audit_mode == "v2_admissions":
+            audit_cases = select_audit_cases(additions)
+        elif audit_mode == "source_correction_changes":
+            audit_cases = select_change_audit_cases(diff_rows, veto_rows)
+        else:
+            raise ValueError(f"unknown audit mode: {audit_mode}")
         _write_csv(temporary / "source_manifest.csv", output_sources)
         _write_csv(temporary / "events.csv", event_rows)
         _write_csv(temporary / "event_diff_v1_v2.csv", diff_rows)
         _write_csv(temporary / "audit_sample_60.csv", audit_cases)
+        _write_csv(
+            temporary / "saturation_veto_exclusions.csv",
+            veto_rows,
+            fields=(
+                "veto_id",
+                "source_id",
+                "output_stem",
+                "source_path",
+                "source_sha256",
+                "source_class",
+                "class_id",
+                "output_split",
+                "candidate_index",
+                "event_start",
+                "event_end",
+                "center_sample",
+                "repair_index",
+                "expanded_start_sample",
+                "expanded_end_sample",
+                "robust_energy_z",
+                "repair_overlap",
+                "repair_overlap_fraction",
+                "reason",
+            ),
+        )
 
         counts = {
             "traces_total": len(output_sources),
@@ -445,6 +680,8 @@ def build_mad_teacher_dataset(
             "additions_by_split": dict(Counter(row["output_split"] for row in additions)),
             "losses": sum(row["status"] == "lost" for row in diff_rows),
             "audit_cases": len(audit_cases),
+            "saturation_center_vetoed": len(veto_rows),
+            "repaired_traces": sum(int(row.get("repair_region_count", 0)) > 0 for row in output_sources),
         }
         for class_name in CLASS_IDS:
             counts[f"events_{class_name}"] = counts["events_by_class"].get(class_name, 0)
@@ -472,11 +709,13 @@ def build_mad_teacher_dataset(
                 "events.csv": "one retained MAD event",
                 "event_diff_v1_v2.csv": "one matched, added, or lost event identity",
                 "audit_sample_60.csv": "one descriptively reviewed new admission",
+                "saturation_veto_exclusions.csv": "one retained MAD proposal excluded by the frozen z8v2 centre rule",
             },
             "keys": {
                 "source_manifest.csv": ["source_id"],
                 "events.csv": ["event_id"],
                 "audit_sample_60.csv": ["case_id"],
+                "saturation_veto_exclusions.csv": ["veto_id"],
             },
             "units": {
                 "event_start": "sample, inclusive",
@@ -493,6 +732,12 @@ def build_mad_teacher_dataset(
             "duplicate_policy": "source_id, event_id, and case_id duplicates are forbidden",
             "label_policy": "MAD retained supports become YOLO boxes; acquisition folder supplies class only after detection",
             "audit_policy": "descriptive only; audit decisions never mutate dataset labels",
+            "saturation_policy": (
+                "signals are repaired before annotation; retained proposals whose bounds midpoint "
+                "falls inclusively inside an expanded repair interval are excluded"
+                if saturation_center_veto
+                else "no saturation center veto"
+            ),
         }
         # Keep the workspace-standard hyphenated contract and the explicit
         # experiment-interface spelling. They are byte-identical by design.
@@ -514,10 +759,19 @@ def build_mad_teacher_dataset(
                 "mad_config_sha256": config_fingerprint(config),
                 "class_source": "registered acquisition class folder",
                 "negative_policy": "zero retained MAD proposals yields an empty YOLO label",
+                "saturation_center_veto": saturation_center_veto,
+                "saturation_center_veto_rule": (
+                    "inclusive midpoint of proposal bounds within expanded repair interval"
+                    if saturation_center_veto
+                    else None
+                ),
             },
             "provenance": {
                 "parent_dataset_id": source_dataset_id,
                 "parent_manifest_sha256": source_manifest_sha256,
+                "repair_manifest_sha256": (
+                    sha256_file(repair_manifest) if repair_manifest else None
+                ),
                 "predecessor_dataset_id": predecessor_manifest["dataset_id"],
                 "predecessor_manifest_sha256": sha256_file(predecessor_manifest_path),
             },
@@ -535,7 +789,19 @@ def build_mad_teacher_dataset(
             "predecessor_manifest_sha256": sha256_file(predecessor_manifest_path),
             "config": asdict(config),
             "config_sha256": config_fingerprint(config),
-            "audit_selection_seed": AUDIT_SEED,
+            "audit_selection_seed": (
+                AUDIT_SEED
+                if audit_mode == "v2_admissions"
+                else CHANGE_AUDIT_SEED
+            ),
+            "audit_mode": audit_mode,
+            "repair_manifest": (
+                _portable(repair_manifest, workspace_root) if repair_manifest else None
+            ),
+            "repair_manifest_sha256": (
+                sha256_file(repair_manifest) if repair_manifest else None
+            ),
+            "saturation_center_veto": saturation_center_veto,
             "counts": counts,
             "expected_invariants": expected,
             "payload_digest_sha256": digest,
