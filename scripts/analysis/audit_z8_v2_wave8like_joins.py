@@ -128,7 +128,7 @@ def main() -> None:
         "git_revision": git_states,
     }
     fingerprint = computation_fingerprint(provenance)
-    command = Path(__file__).relative_to(workspace.root).as_posix()
+    command = Path(__file__).resolve().relative_to(workspace.root).as_posix()
     run_payload = {
         "schema_version": 1,
         "run_id": run_id,

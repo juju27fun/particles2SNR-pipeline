@@ -217,7 +217,7 @@ def main() -> None:
         "reference",
         "particles2SNR-pipeline",
         "ground-truth-adjudication-overlay",
-        Path(__file__).relative_to(workspace.root).as_posix(),
+        Path(__file__).resolve().relative_to(workspace.root).as_posix(),
     )
     output_record = register_record(
         workspace,
@@ -227,7 +227,7 @@ def main() -> None:
         "reference",
         "particles2SNR-pipeline",
         "yolo-1d-missing-gt-candidate",
-        Path(__file__).relative_to(workspace.root).as_posix(),
+        Path(__file__).resolve().relative_to(workspace.root).as_posix(),
     )
 
     run_dir.mkdir(parents=True)
@@ -239,7 +239,7 @@ def main() -> None:
         "created_at": created_at,
         "status": "complete_reference_candidates",
         "dataset": f"{OVERLAY_KEY} + {OUTPUT_KEY}",
-        "command": Path(__file__).relative_to(workspace.root).as_posix(),
+        "command": Path(__file__).resolve().relative_to(workspace.root).as_posix(),
         "repositories": {
             "workspace": git_state(workspace.root),
             "particles2SNR-pipeline": git_state(

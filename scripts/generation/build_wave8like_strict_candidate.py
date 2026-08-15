@@ -113,7 +113,7 @@ def main() -> None:
         "reference",
         "particles2SNR-pipeline",
         "yolo-1d-long-sequence-strict-candidate",
-        Path(__file__).relative_to(workspace.root).as_posix(),
+        Path(__file__).resolve().relative_to(workspace.root).as_posix(),
     )
     created_at = datetime.now(timezone.utc).isoformat()
     run_root.mkdir(parents=True)
@@ -125,7 +125,7 @@ def main() -> None:
         "created_at": created_at,
         "status": "complete_reference_candidate_pending_model_evaluation",
         "dataset": OUTPUT_KEY,
-        "command": Path(__file__).relative_to(workspace.root).as_posix(),
+        "command": Path(__file__).resolve().relative_to(workspace.root).as_posix(),
         "repositories": {
             "workspace": git_state(workspace.root),
             "particles2SNR-pipeline": git_state(

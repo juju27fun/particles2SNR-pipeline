@@ -199,7 +199,7 @@ def main() -> None:
         "inputs": {"baseline_events_sha256": sha256_file(baseline_root / "events.csv"), "baseline_raw_sha256": sha256_file(baseline_root / "signals_raw_4096.npy"), "targets_metrics_manifest_sha256": sha256_file(targets_root / "metrics_manifest.json"), "method": method},
         "parameters": {"seed": args.seed, "event_count": len(candidate_rows), "batch_size": args.batch_size, "paired_frozen_fields": list(frozen), "conditional_formula": "u5|u1:4 from partitioned 5D correlation", "support_policy": "rejection within observed transformed retained support"},
         "metric_definitions": {"maximum_snr_error_db": "max absolute requested-minus-realized RMS SNR", "maximum_absolute_5d_correlation_delta": "max off-diagonal absolute realized-minus-target correlation among u1-u5"},
-        "code": {"entrypoint": Path(__file__).relative_to(workspace.root).as_posix(), "entrypoint_sha256": sha256_file(Path(__file__).resolve()), "module_sha256": sha256_file(workspace.root / "particles2SNR-pipeline/particles2snr/z8_asymmetry_generation.py")},
+        "code": {"entrypoint": Path(__file__).resolve().relative_to(workspace.root).as_posix(), "entrypoint_sha256": sha256_file(Path(__file__).resolve()), "module_sha256": sha256_file(workspace.root / "particles2SNR-pipeline/particles2snr/z8_asymmetry_generation.py")},
         "git_revision": git_revision(workspace.root),
     }
     fingerprint = computation_fingerprint(provenance)

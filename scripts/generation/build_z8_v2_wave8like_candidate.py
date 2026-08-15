@@ -211,7 +211,7 @@ def main() -> None:
         "status": "complete_candidate_awaiting_visual_join_audit",
         "dataset": output_key,
         "command": (
-            f"{Path(__file__).relative_to(workspace.root).as_posix()} "
+            f"{Path(__file__).resolve().relative_to(workspace.root).as_posix()} "
             f"--candidate-version {args.candidate_version}"
         ),
         "repositories": {
