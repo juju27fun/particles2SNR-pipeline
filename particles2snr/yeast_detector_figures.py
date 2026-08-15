@@ -359,31 +359,6 @@ def plot_activation(
 
 
 
-def plot_box_and_crop(
-    signal: np.ndarray,
-    *,
-    center_index: int,
-    box: tuple[int, int],
-    crop: tuple[int, int],
-    crop_length: int,
-    title: str,
-    ax: Axes | None = None,
-) -> Axes:
-    """A detection box against the fixed-length view the classifier reads."""
-    ax = _single_axis(ax)
-    values = np.asarray(signal).reshape(-1)
-    ax.plot(np.arange(values.size), values, color=NAVY, linewidth=0.65, zorder=3)
-    ax.axvspan(crop[0], crop[1], color=PALE_BLUE, zorder=0,
-               label=f"classifier crop · {crop_length} samples")
-    ax.axvspan(box[0], box[1], color=PALE_GREEN, zorder=1, label="MAD box")
-    ax.axvline(center_index, color=GREEN, linestyle="--", linewidth=1.2,
-               label="recorded energy centre")
-    ax.set_xlabel("sample")
-    ax.set_ylabel("amplitude [a.u.]")
-    ax.set_title(title)
-    ax.legend(loc="upper right", fontsize=9)
-    return ax
-
 
 def plot_ssl_crop(
     signal: np.ndarray,

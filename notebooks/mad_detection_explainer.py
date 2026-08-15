@@ -35,22 +35,12 @@
 # chain on a signal built from scratch.
 
 # %%
-import csv
 import json
 
 import matplotlib.pyplot as plt
 import numpy as np
 from IPython.display import Image
 from internship_workspace.config import Workspace
-from internship_workspace.mad_conv1dgap_training import (
-    INPUT_LENGTH,
-    RAW_CROP_LENGTH,
-    centered_reflect_crop,
-    crop_limits,
-    prepare_event_signal,
-    resolve_registered_dataset,
-)
-
 from particles2snr.yeast_events import (
     detect_yeast_events,
     detector_trace,
@@ -158,19 +148,9 @@ Image(filename=str(failure_png), width=980)
 # hypothesis exists, and Doppler peaks are measured afterwards as
 # descriptors, never as the unit of counting.
 #
-# Two bounded pieces of development context (beads, not yeast):
+# One more structural cost, before the numbers:
 #
-# - On the frozen 87-event human ledger of the bead development corpus, the
-#   MAD v2.1 chain recovered **77/87 confirmed events against 41/87** for Z8v2
-#   (the historical peak-first detector), and returned the *right number* of
-#   events on all seven frozen two-particle loci. The v2.1 metric is recomputed
-#   from its 3 618 supports below; it is not inherited from the 3 749-box v1
-#   audit.
-#   *Development evidence on one acquisition family, on beads. The audit also
-#   reports a localisation score (average precision at IoU 0.5) but only over
-#   the 11 events whose human boundaries were reliable — it is not a
-#   corpus-wide performance figure.*
-# - A peak threshold is also a **hard gate on a proxy**: a persistent
+# - A peak threshold is a **hard gate on a proxy**: a persistent
 #   nuisance oscillation *is* a Doppler-like peak, so peak-first has to
 #   threshold it away — and the same threshold can delete a real but
 #   atypical particle, for example an unusually slow one with a weak crest.
@@ -179,49 +159,35 @@ Image(filename=str(failure_png), width=980)
 #   a candidate in the first place.
 
 # %% [markdown]
-# ### The bounded comparison: MAD v2.1 versus P2SNR
+# ### Bonus — the nail in the coffin
 #
-# “MAD works better” has a precise, narrower meaning here. On the same frozen
-# bead audit, MAD v2.1 is the admissible operating point that preserves both
-# trace-level cleanliness and two-particle cardinality. It does **not** have the
-# highest raw recall: the maximal-recall P2SNR setting reaches 86/87, but it
-# activates seven reviewed-empty traces and returns exactly two boxes on only
-# one of seven joined-particle loci.
+# Everything above argues about *representation*. Here is the empirical close,
+# read from the manifested comparison on the frozen 87-event bead audit.
 #
-# The cell reads the manifested comparison rather than copying numbers into a
-# second calculation. It refuses the old MAD v1 row.
+# P2SNR **can** out-recall MAD. The question is what it costs.
 
 # %%
-comparison_run = (
-    workspace.root
-    / "artifacts/cross-project/analysis/particle-p2-noise-tradeoff-evidence-analysis-r5"
-)
-comparison = json.loads((comparison_run / "tradeoff_comparison.json").read_text())
-assert comparison["mad_dataset_id"] == (
-    "particles2snr-beads-mad-teacher-detection-development@v2.1"
-)
+comparison = json.loads((
+    workspace.root / "artifacts/cross-project/analysis"
+    / "particle-p2-noise-tradeoff-evidence-analysis-r5/tradeoff_comparison.json"
+).read_text())
+assert comparison["mad_dataset_id"].endswith("@v2.1")
+print(f"{'':<30}{'recall':>10}{'boxes':>8}{'empty lit':>12}{'2-particle':>12}")
 for row in comparison["rows"]:
-    print(
-        f"{row['label']:<34} rappel={row['recall']:>2}/87  "
-        f"propositions={row['global_predictions']:>4}  "
-        f"vides={row['verified_empty_active']:>2}/22  "
-        f"artefacts={row['artifact_active']}/6  "
-        f"deux-particules exacts={row['joined_exact']}/7"
-    )
-
-# %%
-comparison_figure = (
-    workspace.root
-    / "artifacts/cross-project/reviews/particle-p2-noise-pareto-closure-result-r6"
-    / "assets/capture-01/source.png"
-)
-Image(filename=str(comparison_figure), width=1100)
+    print(f"{row['label']:<30}{row['recall']:>7}/87{row['global_predictions']:>8}"
+          f"{row['verified_empty_active']:>9}/22{row['joined_exact']:>10}/7")
 
 # %% [markdown]
-# The comparison is retrospective and limited to one acquisition family. The
-# human labels establish the number of particles in each joined locus, not
-# sample-precise child boundaries. It therefore supports choosing MAD as the
-# pseudo-label detector; it is not an independent-generalisation claim.
+# Read the last two columns. To gain nine events over MAD, the maximal-recall
+# setting proposes **89 % more boxes**, lights up **seven traces a human
+# verified as empty**, and resolves **one of seven** two-particle loci instead
+# of seven. It does not find events better; it finds everything, and the
+# cleaning cascade of the previous figure is what has to sort it out
+# afterwards.
+#
+# *Retrospective, one acquisition family, on beads. The human labels fix the
+# number of particles per joined locus, not sample-precise boundaries — this
+# supports choosing MAD as the pseudo-label detector, nothing wider.*
 
 # %% [markdown]
 # ## 1 · The trace and the event support
@@ -872,62 +838,6 @@ fig.plot_ssl_crop(record.signal, record_events[0], config);
 #
 # *Method only · one reviewed record · no claim of detector performance or
 # biological validity.*
-
-# %% [markdown]
-# ### Boxes and classifier crops in MAD v2.1
-#
-# The v2.1 dataset stores complete 16 384-sample traces. Its YOLO label is the
-# active-frame support itself; the classifier crop is a downstream view and
-# cannot change that box. Conv1DGAP-S centres 4 096 samples on the event's
-# recorded energy centre (`center_index`), reflect-pads beyond a trace edge,
-# then averages non-overlapping groups of eight samples to obtain 512 inputs.
-# The cell calls the trainer's own preprocessing functions so this explanation
-# cannot silently drift from the experiment.
-
-# %%
-_, mad_v21_root = resolve_registered_dataset(workspace)
-with (mad_v21_root / "events.csv").open(newline="", encoding="utf-8") as handle:
-    mad_events = list(csv.DictReader(handle))
-
-development_events = [
-    row for row in mad_events if row["output_split"] in {"train", "val"}
-]
-inside = lambda row: (crop_limits(int(row["center_index"]))[0] <= int(row["event_start"])
-                      and int(row["event_end"]) <= crop_limits(int(row["center_index"]))[1])
-edge_padded = [row for row in development_events
-               if crop_limits(int(row["center_index"]))[0] < 0
-               or crop_limits(int(row["center_index"]))[1] > 16_384]
-print(f"{len(development_events)} train/val events · "
-      f"{len(edge_padded)} crops completed by reflection")
-
-# %%
-example = next(row for row in development_events
-               if row["output_split"] == "val" and inside(row)
-               and 0 <= crop_limits(int(row["center_index"]))[0]
-               and crop_limits(int(row["center_index"]))[1] <= 16_384)
-center_index = int(example["center_index"])
-signal = np.load(mad_v21_root / example["output_split"] / "signals"
-                 / f"{example['output_stem']}.npy")
-assert centered_reflect_crop(signal, center_index).shape == (RAW_CROP_LENGTH,)
-assert prepare_event_signal(signal, center_index, noise_snr_db=None).shape == (INPUT_LENGTH,)
-
-fig.plot_box_and_crop(
-    signal, center_index=center_index,
-    box=(int(example["event_start"]), int(example["event_end"])),
-    crop=crop_limits(center_index), crop_length=RAW_CROP_LENGTH,
-    title=f"{example['source_id']} · box and classifier view, from v2.1");
-
-# %% [markdown]
-# - Green is the v2.1 detection box; blue is the exact 4 096-sample view read
-#   by Conv1DGAP-S. The dashed line is `center_index`, not the box midpoint.
-# - Reflection preserves the requested crop length at trace edges without
-#   moving its centre. This happens for 747 of the 2 921 train/validation
-#   events.
-# - The event shown is one whose box fits entirely inside its crop; a support
-#   approaching 4 096 samples with an off-centre energy peak need not.
-#
-# This section reads development metadata and one validation signal only. The
-# sealed test payload is not opened.
 
 # %% [markdown]
 # ## Running on your own data
