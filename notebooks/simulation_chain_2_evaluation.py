@@ -2362,6 +2362,12 @@ print(f"{'shuffled parents (floor)':<44} {'—':>7} {2.0:9.1f} % {50.0:7.1f} %")
 
 # %%
 DECIMATED_HZ = SAMPLING_HZ / 8
+# The descriptor's band grid is invariant to window *length* at a fixed rate,
+# not to the rate itself: it is defined as the in-band bins a reference window
+# produces. These signals are decimated by 8, so the reference window has to
+# shrink by 8 as well for the 37 bands to land on the same physical frequencies
+# as the coverage chain — 250 kHz / 128 = 2 MHz / 1024. Verified identical grid.
+DECIMATED_REFERENCE_WINDOW = 128
 
 
 def morphology_of(indices):
@@ -2369,6 +2375,7 @@ def morphology_of(indices):
         morphology_features(
             np.asarray(roundtrip_signals[indices[start : start + 512]]),
             sampling_frequency_hz=DECIMATED_HZ,
+            reference_window=DECIMATED_REFERENCE_WINDOW,
         )
         for start in range(0, len(indices), 512)
     ])
@@ -2423,9 +2430,20 @@ for name, values, _ in SPACES:
           f"q50 {100 * values['q50_relative_rank']:5.1f} %")
 
 # %% [markdown]
-# **The physics-grounded space wins, and not narrowly**: Recall@5 more than
-# doubles, from 11.0 % to 23.3 %, and the median parent rank halves, from 9.5 %
-# to 5.2 %.
+# **The physics-grounded space wins, and not narrowly**: Recall@5 rises from
+# 11.0 % to 17.7 % — a 61 % relative gain — and the median parent rank falls
+# from 9.5 % to 7.9 %.
+#
+# Those numbers moved once, and the reason is worth keeping. An earlier run of
+# this section measured 23.3 % and 5.2 %, on a descriptor whose spectral half
+# had 149 bins because the window's own FFT resolution was used directly. The
+# alignment that made the descriptor window-invariant replaced that with the
+# fixed 37-band grid the coverage chain uses, and the number fell. So the finer
+# spectrum was genuinely carrying identity information, and the alignment costs
+# some of it — a real trade, not a rounding change. The figure below reports the
+# **aligned** descriptor, because comparing to the coverage section is the whole
+# point of the comparison; the unaligned variant is the more discriminative one
+# and belongs in the record.
 #
 # The explanation is not mysterious, and it is the sharpest objection answered in
 # advance. The Conv1D-GAP latent is the penultimate layer of a classifier trained
