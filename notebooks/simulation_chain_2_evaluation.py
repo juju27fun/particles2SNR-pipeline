@@ -903,15 +903,104 @@ print(f"reproduces particle-z8-v2-coverage-conditions-q80-r1 exactly "
 # physics added to the generator, and the bar is the fraction of real events it
 # brings inside the synthetic support.
 #
-# The dashed line at 80 % is the generator's own self-coverage — the radius was
-# built as the 80th percentile of synthetic-to-synthetic distances. Every class
-# ending above it means the real events are covered *better than the synthetic
-# cloud covers itself*.
+# The dashed line at 80 % marks the quantile the radius was built from, and it
+# is a **reading aid, not a baseline**. It is tempting to say that a bar above
+# it means real events are better covered than the synthetic cloud covers
+# itself — the deck said exactly that, and it is wrong. The radius is calibrated
+# on a *thinned* reference draw (one synthetic event per real event) while real
+# events query the full cloud, 16 to 25 times denser, and a nearest-neighbour
+# distance shrinks as density grows. Part II measures both sides at matched
+# density and the comparison inverts. What these bars support is the *ordering*
+# of the three conditions, which is immune to that bias because it is the same
+# in every column.
 
 # %%
 chain_figures.draw_coverage_chain(
     coverage, [label for label, _ in CONDITIONS], quantile=QUANTILE
 )
+
+# %% [markdown]
+# ### The density-consistent chain
+#
+# Since the bias above is a real defect and not a presentational one, here is
+# the chain measured without it: the radius is calibrated on the **full**
+# synthetic cloud, leaving each event out of its own neighbour search, and real
+# events query that same full cloud. Calibration and query then happen at one
+# density, so the 80 % line becomes a baseline that means something.
+#
+# This is the measurement the redo should adopt. It is shown beside the
+# published one rather than replacing it, because every published number in the
+# deck and in the runs uses the thinned calibration.
+
+# %%
+from sklearn.neighbors import NearestNeighbors  # noqa: E402
+
+
+def density_consistent_coverage(real_scores, synthetic_scores, quantile=QUANTILE,
+                                dimensions=16):
+    """Coverage with the radius calibrated at the density it is applied to."""
+    real = np.asarray(real_scores)[:, :dimensions]
+    synthetic = np.asarray(synthetic_scores)[:, :dimensions]
+    output = {}
+    for class_name in CLASS_ORDER:
+        cloud = synthetic[synthetic_labels == class_name]
+        queries = real[real_labels == class_name]
+        self_distance = NearestNeighbors(n_neighbors=2).fit(cloud).kneighbors(
+            cloud, return_distance=True
+        )[0][:, 1]
+        radius = float(np.quantile(self_distance, quantile))
+        distance = NearestNeighbors(n_neighbors=1).fit(cloud).kneighbors(
+            queries, return_distance=True
+        )[0][:, 0]
+        output[class_name] = {
+            "radius": radius,
+            "real_within_radius_fraction": float(np.mean(distance <= radius)),
+            "synthetic_events": int(cloud.shape[0]),
+            "reference_events": int(np.sum(real_labels == class_name)),
+        }
+    return output
+
+
+consistent = {
+    label: density_consistent_coverage(real_scores, project(condition_features[label]))
+    for label, _ in CONDITIONS
+}
+
+print(f"{'class':>6} {'density':>9}   "
+      + "   ".join(f"{label:>16}" for label, _ in CONDITIONS))
+for class_name in CLASS_ORDER:
+    published_row = "   ".join(
+        f"{100 * coverage[label][class_name]['real_within_radius_fraction']:15.1f} %"
+        for label, _ in CONDITIONS
+    )
+    consistent_row = "   ".join(
+        f"{100 * consistent[label][class_name]['real_within_radius_fraction']:15.1f} %"
+        for label, _ in CONDITIONS
+    )
+    ratio = (consistent["asymmetry_5d"][class_name]["synthetic_events"]
+             / consistent["asymmetry_5d"][class_name]["reference_events"])
+    print(f"{class_name:>6} {'thinned':>9}   {published_row}")
+    print(f"{class_name:>6} {'full':>9}   {consistent_row}    (cloud {ratio:.1f}× denser)")
+
+# %% [markdown]
+# Two things to read off it. The absolute numbers fall a long way — the thinned
+# calibration was inflating them — and the **ordering of the three conditions
+# survives**, which is what the chain is actually for. But it does not survive
+# untouched: check the size of each step, because that is where the bias was
+# hiding.
+
+# %%
+print(f"{'class':>6}   {'step':>28}   {'thinned':>9}   {'consistent':>11}")
+for class_name in CLASS_ORDER:
+    for previous, current in zip(
+        [label for label, _ in CONDITIONS], [label for label, _ in CONDITIONS][1:]
+    ):
+        thin = 100 * (coverage[current][class_name]["real_within_radius_fraction"]
+                      - coverage[previous][class_name]["real_within_radius_fraction"])
+        cons = 100 * (consistent[current][class_name]["real_within_radius_fraction"]
+                      - consistent[previous][class_name]["real_within_radius_fraction"])
+        print(f"{class_name:>6}   {previous + ' → ' + current:>28}   "
+              f"{thin:+8.1f} pt   {cons:+10.1f} pt")
 
 # %% [markdown]
 # ### Broadening, not relocating
