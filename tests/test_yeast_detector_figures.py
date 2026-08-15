@@ -13,7 +13,6 @@ from particles2snr.yeast_detector_figures import (
     plot_activation,
     plot_bandpass,
     plot_detected_events,
-    plot_event_support,
     plot_frame_energy,
     plot_frequency_baseline,
     plot_legacy_vs_energy,
@@ -56,12 +55,13 @@ def test_every_helper_renders_and_returns_axes(example) -> None:
     }
     produced = [
         plot_trace_overview(signal, config, zoom_center=center),
-        plot_event_support(signal, config, event_start=7800, event_end=8600),
+        plot_trace_overview(signal, config, support=(7800, 8600)),
         plot_bandpass(signal, trace),
         plot_stft_windows(trace, center=center),
         plot_spectrogram(trace),
         plot_frequency_baseline(trace),
         plot_frame_energy(trace),
+        plot_frame_energy(trace, show_map=False),
         plot_robust_band(trace),
         plot_robust_band(trace, scaled=True),
         plot_legacy_vs_energy(trace, replay=fake_replay, truth_spans_ms=[(3.9, 4.3)]),
@@ -111,3 +111,15 @@ def test_detected_events_marks_accepted_and_rejected(example) -> None:
     kept = sum(1 for event in events if event.quality in {"strict", "medium"})
     assert f"{len(events)} interval(s), {kept} accepted" in axis.get_title()
     plt.close("all")
+
+
+def test_activation_shading_matches_the_grouped_interval(example) -> None:
+    """The shaded run must be the samples grouping will assign, not m +- hop/2."""
+    from particles2snr.yeast_detector_figures import _runs
+    from particles2snr.yeast_events import event_bounds
+
+    _signal, config, trace = example
+    (left, right), = _runs(trace.active)
+    bounds, = event_bounds(trace, 16384)
+    assert bounds.group == (left, right)
+    assert bounds.group_samples == (left * trace.hop, right * trace.hop + config.stft_nperseg)

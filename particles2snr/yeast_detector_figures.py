@@ -2,9 +2,11 @@
 
 Same palette and colour semantics as the frozen v5 explainer deck, at screen
 density (11 x 4.5 in, 110 dpi) instead of projection density. Colour grammar:
-PURPLE = robust/MAD/z, GREEN = median and active frames, RED = threshold on z,
-ORANGE = rejection, BLUE = signal/energy, GREY = raw trace, PALE_GREEN = detected support, PALE_BLUE =
-review context.
+PURPLE = robust/MAD/z, GREEN = median and detector output, RED = threshold on
+z, ORANGE = rejection, BLUE = signal/energy, GREY = raw trace. Span tints obey
+one rule everywhere: PALE_BLUE = a span that was GIVEN (reviewed support,
+declared truth, a context window), PALE_GREEN = a span the chain COMPUTED
+(active run, detected interval, MAD box).
 
 Every helper draws into the axes it is given (``ax=`` / ``axes=``) so
 interactive cells can redraw without recreating figures; with the default
@@ -79,11 +81,18 @@ def plot_trace_overview(
     *,
     zoom_center: int | None = None,
     zoom_halfwidth: int = 25,
+    support: tuple[int, int] | None = None,
     ax: Axes | None = None,
 ) -> Axes:
-    """Full raw trace with an inset zoom showing individual samples."""
+    """Full raw trace, an inset zoom on samples, optionally a given span."""
     ax = _single_axis(ax)
     x_ms = time_axis_ms(signal.size, config)
+    if support is not None:
+        start, end = support
+        width_ms = (end - start) / config.sampling_frequency_hz * 1000.0
+        ax.axvspan(x_ms[start], x_ms[min(end, signal.size - 1)], color=PALE_BLUE,
+                   zorder=0, label=f"reviewed support · {width_ms:.2f} ms")
+        ax.legend(loc="upper left")
     ax.plot(x_ms, signal, color=GREY, linewidth=0.6)
     ax.set_xlabel("time [ms]")
     ax.set_ylabel("amplitude [a.u.]")
@@ -100,49 +109,30 @@ def plot_trace_overview(
     return ax
 
 
-def plot_event_support(
-    signal: np.ndarray,
-    config: YeastDetectionConfig,
-    *,
-    event_start: int,
-    event_end: int,
-    ax: Axes | None = None,
-) -> Axes:
-    """Raw trace with the reviewed event support highlighted."""
-    ax = _single_axis(ax)
-    x_ms = time_axis_ms(signal.size, config)
-    ax.plot(x_ms, signal, color=GREY, linewidth=0.6)
-    ax.axvspan(x_ms[event_start], x_ms[min(event_end, signal.size - 1)],
-               color=PALE_GREEN, zorder=0, label="event support")
-    width_ms = (event_end - event_start) / config.sampling_frequency_hz * 1000.0
-    ax.set_xlabel("time [ms]")
-    ax.set_ylabel("amplitude [a.u.]")
-    ax.set_title(f"The event occupies {width_ms:.2f} ms of the record")
-    ax.legend(loc="upper right")
-    return ax
 
 
 def plot_bandpass(
     signal: np.ndarray,
     trace: DetectorTrace,
     *,
-    axes: np.ndarray | None = None,
-) -> np.ndarray:
-    """Raw versus band-passed trace, stacked with a shared time axis."""
-    axes = _stacked_axes(axes, 2, height=5.5)
+    ax: Axes | None = None,
+) -> Axes:
+    """Band-passed trace over the raw one, on a single shared axis."""
+    ax = _single_axis(ax)
     config = trace.config
     x_ms = time_axis_ms(signal.size, config)
-    axes[0].plot(x_ms, signal, color=GREY, linewidth=0.6)
-    axes[0].set_title("Before — raw trace")
-    axes[0].set_ylabel("amplitude [a.u.]")
-    axes[1].plot(x_ms, trace.filtered, color=BLUE, linewidth=0.6)
-    axes[1].set_title(
-        f"After — Butterworth order {config.filter_order}, "
-        f"{config.low_freq_hz / 1000:.0f}–{config.high_freq_hz / 1000:.0f} kHz, zero-phase (filtfilt)"
+    ax.plot(x_ms, signal, color=GREY, linewidth=0.6, alpha=0.45, label="raw")
+    ax.plot(x_ms, trace.filtered, color=BLUE, linewidth=0.6,
+            label=f"band-passed {config.low_freq_hz / 1000:.0f}\u2013"
+                  f"{config.high_freq_hz / 1000:.0f} kHz")
+    ax.set_xlabel("time [ms]")
+    ax.set_ylabel("amplitude [a.u.]")
+    ax.set_title(
+        f"Butterworth order {config.filter_order}, zero-phase (filtfilt): "
+        "the burst survives, unmoved"
     )
-    axes[1].set_xlabel("time [ms]")
-    axes[1].set_ylabel("amplitude [a.u.]")
-    return axes
+    ax.legend(loc="upper right")
+    return ax
 
 
 def plot_stft_windows(
@@ -223,24 +213,18 @@ def plot_frequency_baseline(
     bin_index: int | None = None,
     axes: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Measured power, one frequency row with its Q25 baseline, positive excess."""
-    axes = _stacked_axes(axes, 3, height=8.0)
+    """One frequency row with its Q25 baseline, then the positive excess."""
+    axes = _stacked_axes(axes, 2, height=6.0)
     x_ms = frame_axis_ms(trace)
     if bin_index is None:
         bin_index = int(np.argmax(trace.excess.sum(axis=1)))
-    power_db = 10.0 * np.log10(trace.power + 1.0e-12)
-    low, high = np.quantile(power_db, [0.05, 0.995])
-    axes[0].pcolormesh(x_ms, trace.frequencies / 1000.0, power_db,
-                       shading="auto", cmap="magma", vmin=float(low), vmax=float(high))
-    axes[0].set_ylabel("frequency [kHz]")
-    axes[0].set_title("Measured power P(k, m) [dB]")
     # Linear scale: clipped-to-zero noise stays dark, only true excess lights up.
-    axes[2].pcolormesh(x_ms, trace.frequencies / 1000.0, trace.excess,
+    axes[1].pcolormesh(x_ms, trace.frequencies / 1000.0, trace.excess,
                        shading="auto", cmap="magma", vmin=0.0,
                        vmax=float(np.quantile(trace.excess, 0.999)))
-    axes[2].set_ylabel("frequency [kHz]")
-    axes[2].set_title(r"Positive excess $P^{+}(k, m) = \max(P - B_k, 0)$ [linear]")
-    axis = axes[1]
+    axes[1].set_ylabel("frequency [kHz]")
+    axes[1].set_title(r"Positive excess $P^{+}(k, m) = \max(P - B_k, 0)$ [linear]")
+    axis = axes[0]
     row = trace.power[bin_index]
     axis.plot(x_ms, row, color=BLUE, linewidth=0.9,
               label=f"P(k, m) at k = {trace.frequencies[bin_index] / 1000:.1f} kHz")
@@ -248,31 +232,33 @@ def plot_frequency_baseline(
                  label=r"$B_k$ = per-frequency Q25")
     axis.set_yscale("log")
     axis.set_ylabel("power")
-    axis.set_title("Each frequency row is referenced to its own ordinary level")
+    axis.set_title("One row of the section-3 spectrogram, against its own ordinary level")
     axis.legend(loc="upper right")
-    axes[2].set_xlabel("time [ms]")
+    axes[1].set_xlabel("time [ms]")
     return axes
 
 
 def plot_frame_energy(
     trace: DetectorTrace,
     *,
+    show_map: bool = True,
     axes: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Positive-excess map collapsing into the one-dimensional E[m]."""
-    axes = _stacked_axes(axes, 2, height=6.0)
+    """E[m], optionally under the positive-excess map it sums."""
+    axes = _stacked_axes(axes, 2 if show_map else 1, height=6.0 if show_map else 3.6)
     x_ms = frame_axis_ms(trace)
-    axes[0].pcolormesh(x_ms, trace.frequencies / 1000.0, trace.excess,
-                       shading="auto", cmap="magma", vmin=0.0,
-                       vmax=float(np.quantile(trace.excess, 0.999)))
-    axes[0].set_ylabel("frequency [kHz]")
-    axes[0].set_title(r"$P^{+}(k, m)$ [linear] — every frequency votes")
-    axes[1].plot(x_ms, trace.frame_energy, color=BLUE, linewidth=1.1)
-    axes[1].set_ylabel("E[m]")
-    axes[1].set_xlabel("time [ms]")
-    axes[1].set_title(
+    if show_map:
+        axes[0].pcolormesh(x_ms, trace.frequencies / 1000.0, trace.excess,
+                           shading="auto", cmap="magma", vmin=0.0,
+                           vmax=float(np.quantile(trace.excess, 0.999)))
+        axes[0].set_ylabel("frequency [kHz]")
+        axes[0].set_title(r"$P^{+}(k, m)$ [linear]")
+    curve = axes[-1]
+    curve.plot(x_ms, trace.frame_energy, color=BLUE, linewidth=1.1)
+    curve.set_ylabel("E[m]")
+    curve.set_xlabel("time [ms]")
+    curve.set_title(
         rf"$E[m] = \sum_k P^{{+}}(k, m)$, smoothed over {trace.config.smooth_frames} frames"
-        " — the problem is one-dimensional again"
     )
     return axes
 
@@ -301,9 +287,19 @@ def plot_robust_band(
         ax.axhspan(trace.energy_median - trace.raw_mad,
                    trace.energy_median + trace.raw_mad,
                    color=PURPLE, alpha=0.30, label="median ± raw_mad")
-        ax.set_ylim(trace.energy_median - 4.0 * trace.energy_scale,
-                    trace.energy_median + 4.0 * trace.energy_scale)
+        top = trace.energy_median + 4.0 * trace.energy_scale
+        ax.set_ylim(0.0, top)
+        peak_z = float(trace.energy_z.max())
+        peak_ms = float(frame_axis_ms(trace)[int(np.argmax(trace.energy_z))])
+        ax.annotate(f"peak continues off-axis, to z = {peak_z:.1f}",
+                    xy=(peak_ms, top), xytext=(14, -30), textcoords="offset points",
+                    ha="left", va="top", color=NAVY, fontsize=9,
+                    arrowprops={"arrowstyle": "->", "color": NAVY})
         ax.set_title("The two bands that have both been called \"the MAD\"")
+        ax.set_xlabel("time [ms]")
+        ax.set_ylabel("E[m]")
+        ax.legend(loc="upper left", fontsize=9)
+        return ax
     else:
         half = trace.energy_scale if scaled else trace.raw_mad
         label = "median ± 1.4826 MAD (= energy_scale)" if scaled else "median ± 1 raw MAD"
@@ -316,6 +312,13 @@ def plot_robust_band(
     return ax
 
 
+
+
+def _runs(active: np.ndarray) -> list[tuple[int, int]]:
+    flags = np.asarray(active, dtype=bool).astype(np.int8)
+    starts = np.flatnonzero(np.diff(np.concatenate(([0], flags))) == 1)
+    ends = np.flatnonzero(np.diff(np.concatenate((flags, [0]))) == -1)
+    return list(zip(starts.tolist(), ends.tolist()))
 
 
 def count_active_runs(active: np.ndarray) -> int:
@@ -338,10 +341,13 @@ def plot_activation(
     ax = _single_axis(ax)
     x_ms = frame_axis_ms(trace)
     active = trace.energy_z >= z_threshold
-    half_frame = 0.5 * trace.hop / config.sampling_frequency_hz * 1000.0
-    for index in np.flatnonzero(active):
-        ax.axvspan(x_ms[index] - half_frame, x_ms[index] + half_frame,
-                   color=PALE_GREEN, zorder=0)
+    # Shade each run over the exact samples grouping will assign to it:
+    # left*hop .. right*hop + N, so this figure and the interval agree.
+    for left, right in _runs(active):
+        start_ms = left * trace.hop / config.sampling_frequency_hz * 1000.0
+        end_ms = ((right * trace.hop + config.stft_nperseg)
+                  / config.sampling_frequency_hz * 1000.0)
+        ax.axvspan(start_ms, end_ms, color=PALE_GREEN, zorder=0)
     ax.plot(x_ms, trace.energy_z, color=PURPLE, linewidth=1.2, zorder=3)
     ax.plot(x_ms[active], trace.energy_z[active], linestyle="none", marker="o",
             markersize=3.6, color=GREEN, zorder=4, label="selected frames")
@@ -366,7 +372,6 @@ def plot_ssl_crop(
     config: YeastDetectionConfig,
     *,
     crop_length: int = 8192,
-    downsample_factor: int = 2,
     ax: Axes | None = None,
 ) -> Axes:
     """The detected interval inside the fixed-length crop handed to the model."""
@@ -393,10 +398,10 @@ def plot_ssl_crop(
                label="energy-weighted centre")
     ax.set_xlabel("time relative to the event centre [ms]")
     ax.set_ylabel("amplitude [a.u.]")
-    output_length = crop_length // downsample_factor
     ax.set_title(
-        f"One SSL example: {crop_length} samples cropped, downsampled x{downsample_factor} "
-        f"→ {output_length} points at {config.sampling_frequency_hz / downsample_factor / 1e6:.0f} MHz"
+        f"The training window: {crop_length} samples "
+        f"({crop_length / config.sampling_frequency_hz * 1000:.3f} ms) "
+        "centred on the energy-weighted centre"
     )
     ax.legend(loc="upper right", fontsize=9)
     return ax
@@ -414,7 +419,7 @@ def plot_detected_events(
     ax = _single_axis(ax)
     x_ms = time_axis_ms(np.asarray(signal).size, config)
     for start_ms, end_ms in truth_spans_ms or []:
-        ax.axvspan(start_ms, end_ms, color=PALE_GREEN, zorder=0)
+        ax.axvspan(start_ms, end_ms, color=PALE_BLUE, zorder=0)
     ax.plot(x_ms, signal, color=GREY, linewidth=0.6)
     span = float(np.max(np.abs(signal))) or 1.0
     for index, event in enumerate(events):
@@ -423,7 +428,7 @@ def plot_detected_events(
         colour = GREEN if event.quality in {"strict", "medium"} else ORANGE
         ax.plot([left, right], [-1.15 * span] * 2, color=colour, linewidth=9,
                 solid_capstyle="butt")
-        ax.annotate(f"{event.quality} · z max {event.snr_proxy:.0f}",
+        ax.annotate(f"{event.quality} · z max {event.snr_proxy:.1f}",
                     xy=((left + right) / 2.0, -1.15 * span), xytext=(0, 9),
                     textcoords="offset points", ha="center", fontsize=8.5, color=colour)
     ax.set_ylim(-1.45 * span, 1.2 * span)
@@ -432,7 +437,7 @@ def plot_detected_events(
     kept = sum(1 for event in events if event.quality in {"strict", "medium"})
     ax.set_title(
         f"MAD chain output: {len(events)} interval(s), {kept} accepted"
-        + (" — true events in green" if truth_spans_ms else "")
+        + (" — the given span in blue" if truth_spans_ms else "")
     )
     return ax
 
@@ -466,10 +471,10 @@ def plot_legacy_vs_energy(
     x_ms = time_axis_ms(trace.filtered.size, config)
     for axis in axes:
         for start_ms, end_ms in truth_spans_ms:
-            axis.axvspan(start_ms, end_ms, color=PALE_GREEN, zorder=0)
+            axis.axvspan(start_ms, end_ms, color=PALE_BLUE, zorder=0)
     axes[0].plot(x_ms, trace.filtered, color=GREY, linewidth=0.6)
     axes[0].set_ylabel("filtered [a.u.]")
-    axes[0].set_title("The trace — true events in green")
+    axes[0].set_title("The trace — declared true events in blue")
 
     hypotheses = replay["raw_all"]
     survivors = sum(1 for row in hypotheses if row["dropped_at"] is None)
