@@ -77,12 +77,18 @@
 # analyses from drifting apart.
 
 # %%
+# The inline backend has to be requested explicitly: without it a headless
+# execution runs every plotting cell and silently keeps the figures to itself.
+%matplotlib inline
+
 import csv
 import json
 import time
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+plt.rcParams["figure.dpi"] = 110
 
 from internship_workspace import notebook_evidence
 from internship_workspace.config import Workspace, WorkspaceError
