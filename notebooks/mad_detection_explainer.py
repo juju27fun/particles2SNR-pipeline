@@ -35,12 +35,20 @@
 # chain on a signal built from scratch.
 
 # %%
+import csv
 import json
 
 import matplotlib.pyplot as plt
 import numpy as np
 from IPython.display import Image
 from internship_workspace.config import Workspace
+from internship_workspace.mad_conv1dgap_training import (
+    INPUT_LENGTH,
+    RAW_CROP_LENGTH,
+    centered_reflect_crop,
+    prepare_event_signal,
+    resolve_registered_dataset,
+)
 
 from particles2snr.yeast_events import (
     detect_yeast_events,
@@ -199,6 +207,13 @@ for row in comparison["rows"]:
         f"artefacts={row['artifact_active']}/6  "
         f"deux-particules exacts={row['joined_exact']}/7"
     )
+
+comparison_figure = (
+    workspace.root
+    / "artifacts/cross-project/reviews/particle-p2-noise-pareto-closure-result-r6"
+    / "assets/capture-01/source.png"
+)
+Image(filename=str(comparison_figure), width=1100)
 
 # %% [markdown]
 # The comparison is retrospective and limited to one acquisition family. The
@@ -769,22 +784,12 @@ def _explore(z_thr: float) -> None:
 # `right × hop + N`: a frame is a 512-sample window, not an instant, so the
 # last frame contributes its whole window.
 #
-# **3 · Pad.** `boundary_pad_ms = 0.04 ms` = **80 samples** on each side.
-#
-# > **A stage that used to sit here, and no longer does.** The detector once
-# > grew each interval outwards while z stayed above a second, lower threshold
-# > (1.5 against 3.5 for detection), on the reasoning that an event's quiet
-# > tails are still the event. Review `yeast-boundary-expansion-review-r2` put
-# > that to a human: on **76 of 76** reviewed events the extended region was
-# > judged `extension_margin` — margin, not signal — and never once
-# > `extension_signal`. The stage is off. It remains reachable behind
-# > `boundary_expansion_enabled` so the comparison that produced the verdict
-# > can be re-run, but nothing in the shipped preset uses it.
+# **3 · Pad.** `boundary_pad_ms = 0.04 ms` = **80 samples** on each side in
+# this yeast preset.
 #
 # **Bead dataset v2.1.** Its production profile is stricter than the yeast
-# preset illustrated here: `boundary_expansion_enabled=False` and
-# `boundary_pad_ms=0.0`. Its YOLO box is exactly the support of the active MAD
-# frames after grouping — no lower-z tail and no fixed padding are appended.
+# preset illustrated here: `boundary_pad_ms=0.0`. Its YOLO box is exactly the
+# support of the active MAD frames after grouping.
 
 # %%
 bounds, = event_bounds(trace, record.signal.size)
@@ -825,11 +830,8 @@ print(f"detector output: [{record_events[0].event_start:5d}, {record_events[0].e
 # localised, and explained by a single named cap.
 #
 # *Event concentration is the share of the event's own excess held by its five
-# strongest bins — a post-localisation qualification descriptor. It does not
-# participate in frame activation: activation is z alone
-# (`active_min_concentration = 0.0`). The distinction matters because the bead
-# v2.1 manifest still records `acceptance_min_concentration=0.08`; saying that
-# concentration has disappeared everywhere would not reproduce the dataset.*
+# strongest bins. It is evaluated only after localisation, as one of the
+# candidate qualification tests shown in the table.*
 
 # %% [markdown]
 # ## 9 · CROP — the bounded event becomes a training example
@@ -872,32 +874,100 @@ fig.plot_ssl_crop(record.signal, record_events[0], config);
 # %% [markdown]
 # ### Boxes and classifier crops in MAD v2.1
 #
-# The v2.1 dataset stores complete 16 384-sample traces. Its label is the
-# active-frame support itself; a crop is a downstream model view and cannot
-# change that box. The current Conv1DGAP-S experiment centres a 4 096-sample
-# crop on the v2.1 box midpoint, shifts it at trace edges to preserve its full
-# length, then averages non-overlapping groups of eight samples to obtain 512
-# inputs. Rebuilding v2.1 therefore updates both the box and every derived crop
-# centre without baking crops into the dataset.
+# The v2.1 dataset stores complete 16 384-sample traces. Its YOLO label is the
+# active-frame support itself; the classifier crop is a downstream view and
+# cannot change that box. Conv1DGAP-S centres 4 096 samples on the event's
+# recorded energy centre (`center_index`), reflect-pads beyond a trace edge,
+# then averages non-overlapping groups of eight samples to obtain 512 inputs.
+# The cell calls the trainer's own preprocessing functions so this explanation
+# cannot silently drift from the experiment.
 
 # %%
-mad_v21_root = (
-    workspace.root
-    / "datasets/interim/particles2SNR-pipeline/particles2snr-beads-mad-teacher-detection-development/v2.1"
-)
-events = np.genfromtxt(
-    mad_v21_root / "events.csv", delimiter=",", names=True, dtype=None, encoding="utf-8"
-)
-example = events[len(events) // 2]
-box_start, box_end = int(example["event_start"]), int(example["event_end"])
-crop_length = 4096
-crop_start = min(max(0, (box_start + box_end) // 2 - crop_length // 2), 16384 - crop_length)
-crop_end = crop_start + crop_length
-assert crop_start <= box_start < box_end <= crop_end
+_, mad_v21_root = resolve_registered_dataset(workspace)
+with (mad_v21_root / "events.csv").open(newline="", encoding="utf-8") as handle:
+    mad_events = list(csv.DictReader(handle))
+
+development_events = [
+    row for row in mad_events if row["output_split"] in {"train", "val"}
+]
+
+def _crop_limits(row):
+    crop_center = int(row["center_index"])
+    return (
+        crop_center - RAW_CROP_LENGTH // 2,
+        crop_center + RAW_CROP_LENGTH // 2,
+    )
+
+boxes_outside_crop = [
+    row
+    for row in development_events
+    if not (
+        _crop_limits(row)[0]
+        <= int(row["event_start"])
+        < int(row["event_end"])
+        <= _crop_limits(row)[1]
+    )
+]
+edge_padded_crops = [
+    row
+    for row in development_events
+    if _crop_limits(row)[0] < 0 or _crop_limits(row)[1] > 16_384
+]
 print(
-    f"{example['source_id']}: box=[{box_start}, {box_end}), "
-    f"crop=[{crop_start}, {crop_end}) → 512 pooled samples"
+    f"{len(development_events)} événements train/val · "
+    f"{len(edge_padded_crops)} crops complétés par réflexion · "
+    f"{len(boxes_outside_crop)} boîtes pas entièrement contenues"
 )
+
+example = next(
+    row
+    for row in development_events
+    if row["output_split"] == "val"
+    and _crop_limits(row)[0] >= 0
+    and _crop_limits(row)[1] <= 16_384
+    and row not in boxes_outside_crop
+)
+signal = np.load(
+    mad_v21_root
+    / example["output_split"]
+    / "signals"
+    / f"{example['output_stem']}.npy"
+)
+center_index = int(example["center_index"])
+raw_crop = centered_reflect_crop(signal, center_index)
+model_input = prepare_event_signal(signal, center_index, noise_snr_db=None)
+assert raw_crop.shape == (RAW_CROP_LENGTH,)
+assert model_input.shape == (INPUT_LENGTH,)
+
+box_start, box_end = int(example["event_start"]), int(example["event_end"])
+crop_start, crop_end = _crop_limits(example)
+figure, axis = plt.subplots(figsize=(11, 3.2))
+axis.plot(np.arange(signal.size), signal, color="#17324D", linewidth=0.65)
+axis.axvspan(crop_start, crop_end, color="#00A6D6", alpha=0.12,
+            label=f"crop Conv1DGAP-S · {RAW_CROP_LENGTH} échantillons")
+axis.axvspan(box_start, box_end, color="#2E9D68", alpha=0.24,
+            label="boîte MAD v2.1")
+axis.axvline(center_index, color="#2E9D68", linestyle="--", linewidth=1.2,
+             label="centre énergétique enregistré")
+axis.set(xlabel="échantillon", ylabel="amplitude [u.a.]",
+         title=f"{example['source_id']} · boîte et vue classifieur issues de v2.1")
+axis.legend(loc="upper right")
+figure.tight_layout()
+
+# %% [markdown]
+# - Green is the v2.1 detection box; blue is the exact 4 096-sample view read
+#   by Conv1DGAP-S. The dashed line is `center_index`, not the box midpoint.
+# - Reflection preserves the requested crop length at trace edges without
+#   moving its centre. This happens for 747 of the 2 921 train/validation
+#   events.
+# - **Measured limit:** 22 train/validation boxes extend partly outside their
+#   classifier crop because the energy centre is asymmetric inside a support
+#   close to 4 096 samples. The dataset boxes remain correct; only these model
+#   views truncate part of the labelled support. The notebook exposes that
+#   mismatch rather than claiming that every crop contains its full box.
+#
+# This section reads development metadata and one validation signal only. The
+# sealed test payload is not opened.
 
 # %% [markdown]
 # ## Running on your own data
