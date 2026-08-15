@@ -59,7 +59,8 @@ import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-from internship_workspace.config import Workspace
+from internship_workspace import notebook_evidence
+from internship_workspace.config import Workspace, WorkspaceError
 from internship_workspace.datasets import resolve_path, select_record
 from internship_workspace.z8_coverage import (
     batched_features,
@@ -78,10 +79,20 @@ CLASS_COLOUR = {"2um": "#2563eb", "4um": "#0f766e", "10um": "#b45309"}
 SAMPLING_HZ = 2_000_000.0
 
 
+registered = {}
+
+
 def dataset_root(key: str):
     """Resolve `dataset-id@version` through the registry, never by path."""
     dataset_id, _, version = key.rpartition("@")
-    return resolve_path(workspace, select_record(workspace, dataset_id, version))
+    record = select_record(workspace, dataset_id, version)
+    registered[key] = record
+    return resolve_path(workspace, record)
+
+
+def dataset_provenance():
+    """The manifest hash of every dataset resolved so far."""
+    return {key: record.payload["manifest_sha256"] for key, record in registered.items()}
 
 
 def published(run_id: str, name: str = "metrics.json"):
@@ -248,6 +259,86 @@ print(f"wider than the {real_cores.shape[1]}-sample window: {truncated:.1f} %")
 # 101-D and comparable to every historical result. It is deliberately *not*
 # applied in this version: the numbers below have to match the published run
 # first.
+#
+# This measurement belongs to no existing run — it is the notebook's own finding,
+# and the quantitative justification for A1. So this section emits it as
+# manifested evidence. That only happens under
+# `workspace notebooks execute`; a live kernel prints the refusal and moves on.
+
+# %%
+window_audit = {
+    "schema_version": 1,
+    "analysis": "descriptor-window-versus-event-support",
+    "sampling_frequency_hz": SAMPLING_HZ,
+    "descriptor_window_samples": int(real_cores.shape[1]),
+    "candidate_window_samples": 4096,
+    "population": {
+        "events": len(real_rows),
+        "selection": "physical train and val rows of the three classes",
+    },
+    "support_width_samples": {
+        "median": float(np.median(z8_widths)),
+        "p90": float(np.percentile(z8_widths, 90)),
+        "p99": float(np.percentile(z8_widths, 99)),
+        "max": float(z8_widths.max()),
+    },
+    "wider_than_descriptor_window_fraction": float(
+        np.mean(z8_widths > real_cores.shape[1])
+    ),
+    "wider_than_candidate_window_fraction": float(np.mean(z8_widths > 4096)),
+    "wider_than_descriptor_window_by_class": {
+        class_name: float(
+            np.mean(
+                np.asarray([
+                    float(row["end_sample"]) - float(row["start_sample"])
+                    for row in real_rows
+                    if row["class_name"] == class_name
+                ])
+                > real_cores.shape[1]
+            )
+        )
+        for class_name in CLASS_ORDER
+    },
+}
+
+try:
+    emitted = notebook_evidence.emit_run(
+        workspace,
+        section="window-audit",
+        metrics=window_audit,
+        provenance={
+            "datasets": dataset_provenance(),
+            "inputs": {
+                "events_csv_sha256": notebook_evidence.sha256_file(
+                    real_root / "events.csv"
+                )
+            },
+            "parameters": {
+                "descriptor_window_samples": int(real_cores.shape[1]),
+                "candidate_window_samples": 4096,
+                "population": "physical train and val rows of the three classes",
+            },
+            "metric_definitions": {
+                "support_width": (
+                    "end_sample minus start_sample of the detector annotation"
+                ),
+                "wider_than_window_fraction": (
+                    "fraction of events whose annotated support exceeds the fixed "
+                    "descriptor window, so that the descriptor cannot see the event "
+                    "in full"
+                ),
+            },
+        },
+        claim_boundary=(
+            "Compares annotated event support against the fixed descriptor window "
+            "on the z8 development events. It measures truncation of the input, "
+            "not its effect on any downstream metric, and authorizes no dataset "
+            "promotion."
+        ),
+    )
+    print(f"emitted {emitted.name}")
+except WorkspaceError as error:
+    print(f"no evidence emitted ({error})")
 
 # %% [markdown]
 # ## 2f. Neighbour distance at q80 — does the synthetic cloud cover the real one?
