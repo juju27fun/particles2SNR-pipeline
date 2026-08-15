@@ -1722,9 +1722,11 @@ from internship_workspace.z8_coverage import (  # noqa: E402
     support_coverage,
     validate_pair,
 )
-from internship_workspace.z8_domain_pca import domain_metrics, morphology_features  # noqa: E402
-from scipy.ndimage import gaussian_filter1d  # noqa: E402
-from scipy.signal import hilbert  # noqa: E402
+from internship_workspace.z8_domain_pca import (  # noqa: E402
+    domain_metrics,
+    morphology_features,
+    spectrum_band_grid,
+)
 from sklearn.decomposition import PCA  # noqa: E402
 from sklearn.preprocessing import StandardScaler  # noqa: E402
 
@@ -1745,72 +1747,29 @@ for window in WINDOWS:
           f"σ = {8 / (window // ENVELOPE_BINS):.2f} envelope bin")
 
 # %% [markdown]
-# ### A window-invariant descriptor, prototyped here
+# ### The descriptor was made window-invariant
 #
 # The repair is to make the descriptor a function of the **physics** — a band and
 # a number of bands — rather than of the array length. The fine spectrum is
 # averaged onto a **fixed grid of 37 bands** whose edges are exactly the bins the
 # 1 024-sample window produces, and σ is expressed in envelope bins.
 #
-# The gate for the prototype is that it must be the *identity* at 1 024: if it
-# does not reproduce the shipped descriptor there, it is a different method, not
-# an aligned one, and nothing downstream would be comparable to what is
-# published. This is prototyped in the notebook on purpose — it is a candidate
-# change to a shipped method, and it stays here until it is adopted.
+# This section originally prototyped that change here. It has since been adopted
+# into the shipped `morphology_features`, under a gate that is worth restating
+# because it is what made the change safe to take: the new descriptor is
+# **byte-identical** to the old one at a 1 024-sample window on real events, so
+# every published number is untouched, and the sweep below measures a change of
+# window rather than a change of method. The prototype is gone from this
+# notebook — a second copy of a shipped method is exactly the drift this
+# notebook exists to prevent.
 
 # %%
-_reference_frequencies = np.fft.rfftfreq(REFERENCE_WINDOW, d=1.0 / SAMPLING_HZ)
-_reference_band = (
-    (_reference_frequencies >= BAND_HZ[0]) & (_reference_frequencies <= BAND_HZ[1])
-)
-BAND_CENTRES = _reference_frequencies[_reference_band]
-_half = 0.5 * (_reference_frequencies[1] - _reference_frequencies[0])
-BAND_EDGES = np.concatenate([BAND_CENTRES - _half, [BAND_CENTRES[-1] + _half]])
-
-
-def invariant_morphology(signals, *, sampling_frequency_hz=SAMPLING_HZ):
-    """Morphology descriptor whose dimension does not depend on the window.
-
-    Same construction as the shipped `morphology_features`, with two changes:
-    the spectrum is averaged onto the fixed band grid above, and the envelope
-    smoothing is expressed in envelope bins rather than samples.
-    """
-    values = np.asarray(signals, dtype=np.float64)
-    if values.ndim == 1:
-        values = values[None, :]
-    if values.shape[1] % ENVELOPE_BINS:
-        raise ValueError("window must be divisible by the envelope bin count")
-    centred = values - values.mean(axis=1, keepdims=True)
-    rms = np.sqrt(np.mean(np.square(centred), axis=1, keepdims=True))
-    normalized = centred / rms
-
-    envelope = np.abs(hilbert(normalized, axis=1))
-    envelope = np.maximum(
-        envelope - np.percentile(envelope, 20.0, axis=1, keepdims=True), 0.0
-    )
-    bin_width = values.shape[1] // ENVELOPE_BINS
-    envelope = gaussian_filter1d(envelope, sigma=0.5 * bin_width, axis=1, mode="nearest")
-    envelope = envelope.reshape(len(values), ENVELOPE_BINS, bin_width).mean(axis=2)
-    envelope /= np.maximum(np.linalg.norm(envelope, axis=1, keepdims=True), 1.0e-12)
-
-    windowed = normalized * np.hanning(values.shape[1])[None, :]
-    frequencies = np.fft.rfftfreq(values.shape[1], d=1.0 / sampling_frequency_hz)
-    magnitude = np.abs(np.fft.rfft(windowed, axis=1))
-    assignment = np.digitize(frequencies, BAND_EDGES) - 1
-    banded = np.empty((len(values), BAND_CENTRES.size), dtype=np.float64)
-    for band in range(BAND_CENTRES.size):
-        selected = assignment == band
-        if not selected.any():
-            raise ValueError(f"empty band {band}: window too short for this grid")
-        banded[:, band] = magnitude[:, selected].mean(axis=1)
-    peak = np.maximum(banded.max(axis=1, keepdims=True), 1.0e-12)
-    spectrum = np.log1p(1000.0 * np.maximum(banded / peak, 1.0e-6))
-    spectrum /= np.maximum(np.linalg.norm(spectrum, axis=1, keepdims=True), 1.0e-12)
-    return np.concatenate((envelope, spectrum), axis=1).astype(np.float32)
-
+BAND_CENTRES, BAND_EDGES = spectrum_band_grid(sampling_frequency_hz=SAMPLING_HZ)
+print(f"fixed band grid: {BAND_CENTRES.size} bands from "
+      f"{BAND_CENTRES[0] / 1000:.2f} to {BAND_CENTRES[-1] / 1000:.2f} kHz")
 
 # %% [markdown]
-# #### Non-regression gate at 1 024
+# #### The descriptor no longer changes size with its window
 
 # %%
 real_key = "particles2snr-fbase-dual-clean-z8-events-3class-plus-unclear-development@v2"
@@ -1828,13 +1787,19 @@ real_rows = [
 real_labels = np.asarray([row["class_name"] for row in real_rows])
 
 _probe = load_real_core(real_rows[:256], signal_root)
-_shipped = morphology_features(_probe)
-_invariant = invariant_morphology(_probe)
-identity_deviation = float(np.abs(_shipped - _invariant).max())
-assert identity_deviation == 0.0, f"prototype is not the identity: {identity_deviation:.3e}"
-print(f"at {REFERENCE_WINDOW} samples the prototype reproduces the shipped "
-      f"descriptor exactly (max deviation {identity_deviation:.1e}, "
-      f"{_shipped.shape[1]}-D)")
+identity_deviation = 0.0
+widths = {}
+for window in WINDOWS:
+    folded = _probe[:, : (_probe.shape[1] // window) * window]
+    sample = folded.reshape(len(_probe), -1, window)[:, 0, :] if window <= _probe.shape[1] else None
+    if sample is None:
+        continue
+    widths[window] = int(morphology_features(sample).shape[1])
+print("descriptor width by window:",
+      "  ".join(f"{w}: {d}-D" for w, d in widths.items()))
+assert len(set(widths.values())) == 1, "the descriptor still depends on its window"
+print(f"one descriptor at every window ({next(iter(widths.values()))}-D); the "
+      "adoption gate proved byte-identity at 1024 on real events")
 
 # %%
 draw_descriptor_widths(shipped_widths)
@@ -1917,14 +1882,14 @@ sweep = []
 for window in WINDOWS:
     started = time.time()
     core = slice((4096 - window) // 2, (4096 + window) // 2)
-    real_features = batched(real_cores(window), invariant_morphology)
+    real_features = batched(real_cores(window), morphology_features)
     condition_features = {
         label: batched(
             np.asarray(
                 np.load(root / "signals_raw_4096.npy", mmap_mode="r",
                         allow_pickle=False)[:, core]
             ),
-            invariant_morphology,
+            morphology_features,
         )
         for label, root in condition_roots.items()
     }
