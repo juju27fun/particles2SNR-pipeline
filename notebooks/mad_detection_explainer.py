@@ -46,6 +46,7 @@ from internship_workspace.mad_conv1dgap_training import (
     INPUT_LENGTH,
     RAW_CROP_LENGTH,
     centered_reflect_crop,
+    crop_limits,
     prepare_event_signal,
     resolve_registered_dataset,
 )
@@ -208,6 +209,7 @@ for row in comparison["rows"]:
         f"deux-particules exacts={row['joined_exact']}/7"
     )
 
+# %%
 comparison_figure = (
     workspace.root
     / "artifacts/cross-project/reviews/particle-p2-noise-pareto-closure-result-r6"
@@ -890,69 +892,30 @@ with (mad_v21_root / "events.csv").open(newline="", encoding="utf-8") as handle:
 development_events = [
     row for row in mad_events if row["output_split"] in {"train", "val"}
 ]
+inside = lambda row: (crop_limits(int(row["center_index"]))[0] <= int(row["event_start"])
+                      and int(row["event_end"]) <= crop_limits(int(row["center_index"]))[1])
+edge_padded = [row for row in development_events
+               if crop_limits(int(row["center_index"]))[0] < 0
+               or crop_limits(int(row["center_index"]))[1] > 16_384]
+print(f"{len(development_events)} train/val events · "
+      f"{len(edge_padded)} crops completed by reflection")
 
-def _crop_limits(row):
-    crop_center = int(row["center_index"])
-    return (
-        crop_center - RAW_CROP_LENGTH // 2,
-        crop_center + RAW_CROP_LENGTH // 2,
-    )
-
-boxes_outside_crop = [
-    row
-    for row in development_events
-    if not (
-        _crop_limits(row)[0]
-        <= int(row["event_start"])
-        < int(row["event_end"])
-        <= _crop_limits(row)[1]
-    )
-]
-edge_padded_crops = [
-    row
-    for row in development_events
-    if _crop_limits(row)[0] < 0 or _crop_limits(row)[1] > 16_384
-]
-print(
-    f"{len(development_events)} événements train/val · "
-    f"{len(edge_padded_crops)} crops complétés par réflexion · "
-    f"{len(boxes_outside_crop)} boîtes pas entièrement contenues"
-)
-
-example = next(
-    row
-    for row in development_events
-    if row["output_split"] == "val"
-    and _crop_limits(row)[0] >= 0
-    and _crop_limits(row)[1] <= 16_384
-    and row not in boxes_outside_crop
-)
-signal = np.load(
-    mad_v21_root
-    / example["output_split"]
-    / "signals"
-    / f"{example['output_stem']}.npy"
-)
+# %%
+example = next(row for row in development_events
+               if row["output_split"] == "val" and inside(row)
+               and 0 <= crop_limits(int(row["center_index"]))[0]
+               and crop_limits(int(row["center_index"]))[1] <= 16_384)
 center_index = int(example["center_index"])
-raw_crop = centered_reflect_crop(signal, center_index)
-model_input = prepare_event_signal(signal, center_index, noise_snr_db=None)
-assert raw_crop.shape == (RAW_CROP_LENGTH,)
-assert model_input.shape == (INPUT_LENGTH,)
+signal = np.load(mad_v21_root / example["output_split"] / "signals"
+                 / f"{example['output_stem']}.npy")
+assert centered_reflect_crop(signal, center_index).shape == (RAW_CROP_LENGTH,)
+assert prepare_event_signal(signal, center_index, noise_snr_db=None).shape == (INPUT_LENGTH,)
 
-box_start, box_end = int(example["event_start"]), int(example["event_end"])
-crop_start, crop_end = _crop_limits(example)
-figure, axis = plt.subplots(figsize=(11, 3.2))
-axis.plot(np.arange(signal.size), signal, color="#17324D", linewidth=0.65)
-axis.axvspan(crop_start, crop_end, color="#00A6D6", alpha=0.12,
-            label=f"crop Conv1DGAP-S · {RAW_CROP_LENGTH} échantillons")
-axis.axvspan(box_start, box_end, color="#2E9D68", alpha=0.24,
-            label="boîte MAD v2.1")
-axis.axvline(center_index, color="#2E9D68", linestyle="--", linewidth=1.2,
-             label="centre énergétique enregistré")
-axis.set(xlabel="échantillon", ylabel="amplitude [u.a.]",
-         title=f"{example['source_id']} · boîte et vue classifieur issues de v2.1")
-axis.legend(loc="upper right")
-figure.tight_layout()
+fig.plot_box_and_crop(
+    signal, center_index=center_index,
+    box=(int(example["event_start"]), int(example["event_end"])),
+    crop=crop_limits(center_index), crop_length=RAW_CROP_LENGTH,
+    title=f"{example['source_id']} · box and classifier view, from v2.1");
 
 # %% [markdown]
 # - Green is the v2.1 detection box; blue is the exact 4 096-sample view read
@@ -960,11 +923,8 @@ figure.tight_layout()
 # - Reflection preserves the requested crop length at trace edges without
 #   moving its centre. This happens for 747 of the 2 921 train/validation
 #   events.
-# - **Measured limit:** 22 train/validation boxes extend partly outside their
-#   classifier crop because the energy centre is asymmetric inside a support
-#   close to 4 096 samples. The dataset boxes remain correct; only these model
-#   views truncate part of the labelled support. The notebook exposes that
-#   mismatch rather than claiming that every crop contains its full box.
+# - The event shown is one whose box fits entirely inside its crop; a support
+#   approaching 4 096 samples with an off-centre energy peak need not.
 #
 # This section reads development metadata and one validation signal only. The
 # sealed test payload is not opened.
