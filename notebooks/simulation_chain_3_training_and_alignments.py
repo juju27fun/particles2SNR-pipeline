@@ -1715,7 +1715,6 @@ except WorkspaceError as error:
 
 # %%
 from internship_workspace.z8_coverage import (  # noqa: E402
-    load_real_core,
     read_rows,
     reflect_crop,
     shared_class_sample,
@@ -1735,12 +1734,18 @@ BAND_HZ = (7_000.0, 80_000.0)
 REFERENCE_WINDOW = 1024
 ENVELOPE_BINS = 64
 
+BAND_CENTRES, _ = spectrum_band_grid(sampling_frequency_hz=SAMPLING_HZ)
+
 shipped_widths = []
 for window in WINDOWS:
     frequencies = np.fft.rfftfreq(window, d=1.0 / SAMPLING_HZ)
     in_band = int(((frequencies >= BAND_HZ[0]) & (frequencies <= BAND_HZ[1])).sum())
     shipped_widths.append(
-        {"window": window, "shipped": ENVELOPE_BINS + in_band, "invariant": ENVELOPE_BINS + 37}
+        {
+            "window": window,
+            "shipped": ENVELOPE_BINS + in_band,
+            "invariant": ENVELOPE_BINS + int(BAND_CENTRES.size),
+        }
     )
     print(f"window {window:5d}  Δf = {frequencies[1]:7.1f} Hz  "
           f"spectral bins {in_band:4d}  descriptor {ENVELOPE_BINS + in_band:4d}-D  "
@@ -1759,12 +1764,15 @@ for window in WINDOWS:
 # because it is what made the change safe to take: the new descriptor is
 # **byte-identical** to the old one at a 1 024-sample window on real events, so
 # every published number is untouched, and the sweep below measures a change of
-# window rather than a change of method. The prototype is gone from this
-# notebook — a second copy of a shipped method is exactly the drift this
-# notebook exists to prevent.
+# window rather than a change of method. That gate is not re-derived here — it
+# lives with the code it guards, as
+# `test_invariant_descriptor_is_byte_identical_on_real_events` in
+# `tests/test_z8_domain_pca.py`, which compares the shipped descriptor against a
+# frozen verbatim copy of the published one. The prototype is gone from this
+# notebook: a second copy of a shipped method is exactly the drift this notebook
+# exists to prevent.
 
 # %%
-BAND_CENTRES, BAND_EDGES = spectrum_band_grid(sampling_frequency_hz=SAMPLING_HZ)
 print(f"fixed band grid: {BAND_CENTRES.size} bands from "
       f"{BAND_CENTRES[0] / 1000:.2f} to {BAND_CENTRES[-1] / 1000:.2f} kHz")
 
@@ -1786,20 +1794,31 @@ real_rows = [
 ]
 real_labels = np.asarray([row["class_name"] for row in real_rows])
 
-_probe = load_real_core(real_rows[:256], signal_root)
-identity_deviation = 0.0
-widths = {}
-for window in WINDOWS:
-    folded = _probe[:, : (_probe.shape[1] // window) * window]
-    sample = folded.reshape(len(_probe), -1, window)[:, 0, :] if window <= _probe.shape[1] else None
-    if sample is None:
-        continue
-    widths[window] = int(morphology_features(sample).shape[1])
-print("descriptor width by window:",
-      "  ".join(f"{w}: {d}-D" for w, d in widths.items()))
+
+def real_cores(window, rows=None):
+    """Reflect-crop the real events to `window` samples about their centre."""
+    cache = {}
+    output = []
+    for row in real_rows if rows is None else rows:
+        relative = row["source_signal_relative_path"]
+        if relative not in cache:
+            cache[relative] = np.load(
+                signal_root / relative, allow_pickle=False
+            ).astype(np.float32, copy=False)
+        signal = cache[relative]
+        output.append(reflect_crop(signal, float(row["center_norm"]) * signal.size, window))
+    return np.stack(output)
+
+
+widths = {
+    window: int(morphology_features(real_cores(window, real_rows[:256])).shape[1])
+    for window in WINDOWS
+}
+print("descriptor width on 256 real events:  "
+      + "  ".join(f"{window}: {width}-D" for window, width in widths.items()))
 assert len(set(widths.values())) == 1, "the descriptor still depends on its window"
-print(f"one descriptor at every window ({next(iter(widths.values()))}-D); the "
-      "adoption gate proved byte-identity at 1024 on real events")
+print(f"one descriptor at every window ({next(iter(widths.values()))}-D), so the "
+      "sweep below varies the field of view and nothing else")
 
 # %%
 draw_descriptor_widths(shipped_widths)
@@ -1862,20 +1881,6 @@ def batched(signals, descriptor, batch_size=256):
          for start in range(0, len(signals), batch_size)],
         axis=0,
     )
-
-
-def real_cores(window):
-    cache = {}
-    output = []
-    for row in real_rows:
-        relative = row["source_signal_relative_path"]
-        if relative not in cache:
-            cache[relative] = np.load(
-                signal_root / relative, allow_pickle=False
-            ).astype(np.float32, copy=False)
-        signal = cache[relative]
-        output.append(reflect_crop(signal, float(row["center_norm"]) * signal.size, window))
-    return np.stack(output)
 
 
 sweep = []
@@ -2145,10 +2150,10 @@ try:
             "quantile": QUANTILE,
             "seed": SEED,
             "descriptor": (
-                "window-invariant prototype: fixed 37-band grid on 7-80 kHz, "
-                "envelope smoothing in bin units; identity at 1024"
+                "shipped internship_workspace.z8_domain_pca.morphology_features: "
+                f"fixed {BAND_CENTRES.size}-band grid on 7-80 kHz, envelope "
+                "smoothing in bin units"
             ),
-            "identity_deviation_at_reference_window": identity_deviation,
             "reproduces": {
                 "run_id": "particle-z8-v2-coverage-conditions-q80-r1",
                 "max_deviation": window_deviation,
