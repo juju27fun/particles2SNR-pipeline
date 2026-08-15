@@ -51,6 +51,7 @@
 # than omitted so the shape of the argument is visible from the start.
 
 # %%
+import csv
 import json
 import time
 
@@ -517,16 +518,324 @@ figure.tight_layout()
 # %% [markdown]
 # ## 3. Retrieval — can a regenerated event find its own parent?
 #
-# **[à écrire]** Regenerate an event from its fitted parameters, project it, and
-# look for its parent among the real events: Recall@5 and the median relative
-# rank q50, against chance (≈50 %) and against the ceiling (a benign parent,
-# 100 %).
+# Section 2f asked whether the synthetic cloud *covers* the real one. This asks
+# something far stricter, event by event: regenerate one event from its own
+# fitted parameters, and see whether the original comes back at the top of the
+# neighbour list.
 #
-# Redo note: the published experiment measures distances in the Conv1D-GAP latent
-# with cosine, on a 4 096 → 512 input, while section 2f measures distances in
-# morphology with euclidean on 1 024. Same idea of "neighbour", three different
-# choices. Alignment **A6** puts both experiments on the morphology space through
-# one shared implementation; this section will report what that costs, measured.
+# Two numbers, both reported against a floor and a ceiling:
 #
-# A blocker to clear on the way: the retrieval tool carries a hard-coded
-# regression guard that aborts unless Recall@5 equals its historical z8 value.
+# - **Recall@5** — how often the exact parent lands in the top five;
+# - **q50** — the median *relative* rank of the parent, where 0 % is first and
+#   ≈50 % is what chance would give.
+#
+# Each event is regenerated in eight views (phase is not identifiable), and the
+# views are averaged after normalisation. Galleries are **split-local**: a train
+# query is only ever compared to train parents. The tool's τ=σ arm is the one
+# the deck reports.
+
+# %%
+import torch  # noqa: E402  (kept beside the section that needs it)
+
+from internship_workspace.equation_latent_audit import (  # noqa: E402
+    average_normalized_views,
+    extract_penultimate_embeddings,
+    load_candidate,
+    load_frozen_classifier,
+)
+from internship_workspace.z8_parent_retrieval import (  # noqa: E402
+    macro_rate,
+    split_local_retrieval,
+)
+
+ROUNDTRIP_KEY = "particles2snr-z8-equation-roundtrip@v3"
+CHECKPOINT = (
+    workspace.root
+    / "artifacts/unsupervised-learning-flow-cytometry/pretrained_backbones-10dB"
+    / "particles2snr_f_3class_native_params_moment_patchtst_conv1dgap"
+    / "conv1dgap_same_input_3class/best_model.pt"
+)
+ORIGIN = "dual_clean_strict"
+SIGMA_VARIANT = "detector_empirical_cross_source_phase_marginal"
+VIEWS_PER_EVENT = 8
+
+roundtrip_signals, roundtrip_rows = load_candidate(dataset_root(ROUNDTRIP_KEY))
+gallery_index = np.asarray([
+    index
+    for index, row in enumerate(roundtrip_rows)
+    if row["record_kind"] == "real_gallery" and row["annotation_origin"] == ORIGIN
+])
+query_index = np.asarray([
+    index
+    for index, row in enumerate(roundtrip_rows)
+    if row["record_kind"] == "synthetic_query"
+    and row["annotation_origin"] == ORIGIN
+    and row["variant"] == SIGMA_VARIANT
+])
+assert query_index.size == gallery_index.size * VIEWS_PER_EVENT
+
+gallery_meta = {
+    field: np.asarray([roundtrip_rows[index][field] for index in gallery_index], dtype=str)
+    for field in ("source_event_id", "source_group", "class_name", "split")
+}
+query_event_ids = np.asarray(
+    [roundtrip_rows[index]["source_event_id"] for index in query_index], dtype=str
+)
+print(f"gallery {gallery_index.size} real events · queries {query_index.size} views "
+      f"· sources {len(set(gallery_meta['source_group']))}")
+
+
+# %%
+def retrieve(query_embeddings, gallery_embeddings):
+    """Split-local retrieval of each event's own parent, in any space.
+
+    The same function serves both spaces, which is the whole point of alignment
+    A6: parity is structural rather than a matter of discipline.
+    """
+    averaged, averaged_ids = average_normalized_views(query_embeddings, query_event_ids)
+    return split_local_retrieval(
+        query_embeddings=averaged,
+        query_ids=averaged_ids,
+        gallery_embeddings=gallery_embeddings,
+        gallery_ids=gallery_meta["source_event_id"],
+        gallery_groups=gallery_meta["source_group"],
+        gallery_classes=gallery_meta["class_name"],
+        gallery_splits=gallery_meta["split"],
+        top_k=50,
+    )
+
+
+def score(retrieval):
+    recall5 = (retrieval.result.rank <= 5).astype(np.float64)
+    return {
+        "events": int(len(retrieval.result.rank)),
+        "recall_at_5_macro": float(macro_rate(recall5, retrieval.classes)),
+        "q50_relative_rank": float(np.median(retrieval.result.rank_percentile)),
+    }
+
+
+# %% [markdown]
+# ### 3a. The published space — the frozen Conv1D-GAP latent
+#
+# The deck's numbers come from the 512-D penultimate activation of a frozen
+# Conv1D-GAP-**L** classifier, compared by cosine distance.
+
+# %%
+model = load_frozen_classifier(CHECKPOINT)
+latent_gallery = extract_penultimate_embeddings(
+    model, np.asarray(roundtrip_signals[gallery_index])
+)
+latent_queries = extract_penultimate_embeddings(
+    model, np.asarray(roundtrip_signals[query_index])
+)
+latent_score = score(retrieve(latent_queries, latent_gallery))
+print(json.dumps(latent_score, indent=2))
+
+# %% [markdown]
+# ### Reproduction check
+
+# %%
+reference_row = next(
+    row
+    for row in csv.DictReader(
+        (
+            workspace.root
+            / "artifacts/cross-project/runs/particle-z8-v2-exact-parent-retrieval-r1"
+            / "condition_metrics.csv"
+        ).open()
+    )
+    if row["condition_id"] == f"{ORIGIN}_tau_sigma"
+)
+retrieval_deviation = max(
+    abs(latent_score["recall_at_5_macro"] - float(reference_row["recall_at_5_macro"])),
+    abs(latent_score["q50_relative_rank"] - float(reference_row["q50_relative_rank"])),
+)
+assert retrieval_deviation < 1e-12, f"reproduction drifted by {retrieval_deviation:.3e}"
+print(f"reproduces particle-z8-v2-exact-parent-retrieval-r1 "
+      f"({ORIGIN}_tau_sigma) exactly (max deviation {retrieval_deviation:.1e})")
+
+# %% [markdown]
+# ### 3b. The same retrieval, in the morphology space
+#
+# This is the measurement alignment **A6** rests on. The deck currently uses two
+# different spaces for the same idea of "neighbour": the learned latent here, the
+# morphology descriptor in section 2f. Aligning on one is the decision; *what it
+# costs* is a number, and this is it.
+#
+# Everything is held fixed — same events, same eight views, same averaging, same
+# split-local galleries, same `retrieve` function. Only the space changes. The
+# descriptor is computed on the very signals the encoder sees (4 096 crop,
+# decimated ×8 to 512 points, so an effective 250 kHz), which isolates the space
+# from the preprocessing.
+
+# %%
+DECIMATED_HZ = SAMPLING_HZ / 8
+
+
+def morphology_of(indices):
+    return np.concatenate([
+        morphology_features(
+            np.asarray(roundtrip_signals[indices[start : start + 512]]),
+            sampling_frequency_hz=DECIMATED_HZ,
+        )
+        for start in range(0, len(indices), 512)
+    ])
+
+
+morphology_gallery = morphology_of(gallery_index)
+morphology_queries = morphology_of(query_index)
+morphology_score = score(retrieve(morphology_queries, morphology_gallery))
+print(f"descriptor {morphology_gallery.shape[1]}-D against a "
+      f"{latent_gallery.shape[1]}-D latent")
+print(json.dumps(morphology_score, indent=2))
+
+# %% [markdown]
+# A third variant makes the comparison directly transposable to section 2f,
+# which does not use the raw descriptor but its 16 principal components, with
+# the basis fitted on **synthetic events only**. Here the queries are the
+# synthetic side, so fitting on them follows the same convention and keeps the
+# gallery out of the fit.
+
+# %%
+morphology_scaler = StandardScaler().fit(morphology_queries)
+morphology_pca = PCA(n_components=16, svd_solver="full").fit(
+    morphology_scaler.transform(morphology_queries)
+)
+
+
+def reduce_morphology(values):
+    return morphology_pca.transform(morphology_scaler.transform(values))
+
+
+morphology_pca_score = score(
+    retrieve(reduce_morphology(morphology_queries), reduce_morphology(morphology_gallery))
+)
+print(json.dumps(morphology_pca_score, indent=2))
+
+# %% [markdown]
+# ### What aligning costs, or buys
+
+# %%
+CHANCE_Q50 = 0.5
+SPACES = [
+    ("Conv1D-GAP latent\n512-D", latent_score, "#64748b"),
+    ("morphology\nfull descriptor", morphology_score, CLASS_COLOUR["4um"]),
+    ("morphology\nPCA(16), as in 2f", morphology_pca_score, CLASS_COLOUR["2um"]),
+]
+
+figure, axes = plt.subplots(1, 2, figsize=(11, 3.6))
+for axis, key, title, reference in (
+    (axes[0], "recall_at_5_macro", "Recall@5 · higher is better", None),
+    (axes[1], "q50_relative_rank", "q50 relative rank · lower is better", CHANCE_Q50),
+):
+    bars = axis.bar(
+        [name for name, _, _ in SPACES],
+        [100 * values[key] for _, values, _ in SPACES],
+        color=[colour for _, _, colour in SPACES],
+        width=0.55,
+    )
+    axis.bar_label(bars, fmt="%.1f %%", fontsize=9, padding=2)
+    if reference is not None:
+        axis.axhline(100 * reference, color="#dc2626", ls="--", lw=1.2)
+        axis.text(2.4, 100 * reference + 1.5, "chance", color="#dc2626",
+                  fontsize=8, ha="right")
+    axis.set(title=title, ylabel="%")
+    axis.tick_params(axis="x", labelsize=8)
+    axis.spines[["top", "right"]].set_visible(False)
+figure.suptitle(
+    f"Same {latent_score['events']} events, same eight views, same split-local "
+    "galleries — only the space changes",
+    fontsize=10, y=1.06,
+)
+figure.tight_layout()
+
+for name, values, _ in SPACES:
+    print(f"{name.replace(chr(10), ' '):<34} "
+          f"R@5 {100 * values['recall_at_5_macro']:5.1f} %   "
+          f"q50 {100 * values['q50_relative_rank']:5.1f} %")
+
+# %% [markdown]
+# The three bars describe the same 1 494 events under the same protocol, which
+# is exactly what the deck could not claim before. Read them with two caveats
+# stated plainly: the descriptor here is computed on the **encoder's own input**
+# (4 096 crop decimated to 512 points), not on the 1 024-sample window of section
+# 2f, and its spectral half is finer because of that sampling rate. So this
+# settles *which space*, not *which window* — the window is alignment A1, and it
+# is measured separately.
+#
+# A blocker to clear before rerunning the published tool on MAD: it carries a
+# hard-coded regression guard that aborts unless Recall@5 equals its historical
+# z8 value (`analyze_z8_v2_exact_parent_retrieval.py`, alignment A12).
+
+# %%
+try:
+    emitted = notebook_evidence.emit_run(
+        workspace,
+        section="retrieval-space-comparison",
+        metrics={
+            "schema_version": 1,
+            "analysis": "parent-retrieval-across-neighbour-spaces",
+            "population": {
+                "origin": ORIGIN,
+                "condition": "tau_sigma",
+                "events": latent_score["events"],
+                "views_per_event": VIEWS_PER_EVENT,
+                "source_groups": len(set(gallery_meta["source_group"].tolist())),
+            },
+            "spaces": {
+                "conv1dgap_latent": {
+                    "dimensions": int(latent_gallery.shape[1]),
+                    **latent_score,
+                },
+                "morphology_full": {
+                    "dimensions": int(morphology_gallery.shape[1]),
+                    **morphology_score,
+                },
+                "morphology_pca16": {"dimensions": 16, **morphology_pca_score},
+            },
+            "chance_q50_relative_rank": CHANCE_Q50,
+            "reproduces": {
+                "run_id": "particle-z8-v2-exact-parent-retrieval-r1",
+                "condition_id": f"{ORIGIN}_tau_sigma",
+                "max_deviation": retrieval_deviation,
+            },
+        },
+        provenance={
+            "datasets": dataset_provenance(),
+            "inputs": {
+                "checkpoint_sha256": notebook_evidence.sha256_file(CHECKPOINT),
+            },
+            "parameters": {
+                "origin": ORIGIN,
+                "variant": SIGMA_VARIANT,
+                "views_per_event": VIEWS_PER_EVENT,
+                "top_k": 50,
+                "gallery": "split-local; train queries see train parents only",
+                "morphology_input": (
+                    "the encoder's own 512-point input, mean-decimated by 8 from a "
+                    "4096 crop, so an effective 250 kHz"
+                ),
+                "morphology_pca_fit": "synthetic queries only, 16 components",
+            },
+            "metric_definitions": {
+                "recall_at_5_macro": (
+                    "unweighted class mean of the fraction of events whose exact "
+                    "parent ranks within the first five neighbours"
+                ),
+                "q50_relative_rank": (
+                    "median relative rank of the exact parent, where 0 is first and "
+                    "0.5 is chance"
+                ),
+            },
+        },
+        claim_boundary=(
+            "Compares neighbour spaces for exact-parent retrieval on one detector "
+            "condition, holding events, views, averaging and galleries fixed. It "
+            "measures which space ranks the parent better on the encoder's input "
+            "window; it does not compare window sizes, does not evaluate coverage, "
+            "and authorizes no dataset promotion."
+        ),
+    )
+    print(f"emitted {emitted.name}")
+except WorkspaceError as error:
+    print(f"no evidence emitted ({error})")
