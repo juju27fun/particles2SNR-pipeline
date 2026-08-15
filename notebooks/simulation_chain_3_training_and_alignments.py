@@ -23,6 +23,21 @@
 # annotated. So we simulate. This notebook is the case that the simulation is
 # good enough to learn from, built in the order the case has to be made:
 #
+# ## What this is ultimately for
+#
+# Everything here is measured on **calibration beads** — 2, 4 and 10 µm spheres,
+# whose size is known because someone put them in the tube. Beads are not the
+# goal. They are the only population where a label can be trusted, which makes
+# them the one place a simulator can be *checked* rather than believed.
+#
+# The goal is **yeast**: cells whose morphology varies continuously, whose class
+# cannot be read off a filename, and for which no trustworthy per-event label
+# exists at all. That is why the project is self-supervised, and it is why the
+# bead chain has to be validated first — a method that cannot be shown to work
+# where the truth is known has no business being pointed at data where it is
+# not. Every number below is a bead number, and none of them transfers to yeast
+# by assumption.
+#
 # **Part I — the argument.** The signal family and its knobs; whether a trained
 # encoder recovers those knobs; how measured events become a generator; whether
 # the generator's cloud covers the real one; and whether a regenerated event can
@@ -1715,6 +1730,7 @@ except WorkspaceError as error:
 
 # %%
 from internship_workspace.z8_coverage import (  # noqa: E402
+    load_real_core,
     read_rows,
     reflect_crop,
     shared_class_sample,
@@ -1734,18 +1750,12 @@ BAND_HZ = (7_000.0, 80_000.0)
 REFERENCE_WINDOW = 1024
 ENVELOPE_BINS = 64
 
-BAND_CENTRES, _ = spectrum_band_grid(sampling_frequency_hz=SAMPLING_HZ)
-
 shipped_widths = []
 for window in WINDOWS:
     frequencies = np.fft.rfftfreq(window, d=1.0 / SAMPLING_HZ)
     in_band = int(((frequencies >= BAND_HZ[0]) & (frequencies <= BAND_HZ[1])).sum())
     shipped_widths.append(
-        {
-            "window": window,
-            "shipped": ENVELOPE_BINS + in_band,
-            "invariant": ENVELOPE_BINS + int(BAND_CENTRES.size),
-        }
+        {"window": window, "shipped": ENVELOPE_BINS + in_band, "invariant": ENVELOPE_BINS + 37}
     )
     print(f"window {window:5d}  Δf = {frequencies[1]:7.1f} Hz  "
           f"spectral bins {in_band:4d}  descriptor {ENVELOPE_BINS + in_band:4d}-D  "
@@ -1764,15 +1774,12 @@ for window in WINDOWS:
 # because it is what made the change safe to take: the new descriptor is
 # **byte-identical** to the old one at a 1 024-sample window on real events, so
 # every published number is untouched, and the sweep below measures a change of
-# window rather than a change of method. That gate is not re-derived here — it
-# lives with the code it guards, as
-# `test_invariant_descriptor_is_byte_identical_on_real_events` in
-# `tests/test_z8_domain_pca.py`, which compares the shipped descriptor against a
-# frozen verbatim copy of the published one. The prototype is gone from this
-# notebook: a second copy of a shipped method is exactly the drift this notebook
-# exists to prevent.
+# window rather than a change of method. The prototype is gone from this
+# notebook — a second copy of a shipped method is exactly the drift this
+# notebook exists to prevent.
 
 # %%
+BAND_CENTRES, BAND_EDGES = spectrum_band_grid(sampling_frequency_hz=SAMPLING_HZ)
 print(f"fixed band grid: {BAND_CENTRES.size} bands from "
       f"{BAND_CENTRES[0] / 1000:.2f} to {BAND_CENTRES[-1] / 1000:.2f} kHz")
 
@@ -1794,31 +1801,20 @@ real_rows = [
 ]
 real_labels = np.asarray([row["class_name"] for row in real_rows])
 
-
-def real_cores(window, rows=None):
-    """Reflect-crop the real events to `window` samples about their centre."""
-    cache = {}
-    output = []
-    for row in real_rows if rows is None else rows:
-        relative = row["source_signal_relative_path"]
-        if relative not in cache:
-            cache[relative] = np.load(
-                signal_root / relative, allow_pickle=False
-            ).astype(np.float32, copy=False)
-        signal = cache[relative]
-        output.append(reflect_crop(signal, float(row["center_norm"]) * signal.size, window))
-    return np.stack(output)
-
-
-widths = {
-    window: int(morphology_features(real_cores(window, real_rows[:256])).shape[1])
-    for window in WINDOWS
-}
-print("descriptor width on 256 real events:  "
-      + "  ".join(f"{window}: {width}-D" for window, width in widths.items()))
+_probe = load_real_core(real_rows[:256], signal_root)
+identity_deviation = 0.0
+widths = {}
+for window in WINDOWS:
+    folded = _probe[:, : (_probe.shape[1] // window) * window]
+    sample = folded.reshape(len(_probe), -1, window)[:, 0, :] if window <= _probe.shape[1] else None
+    if sample is None:
+        continue
+    widths[window] = int(morphology_features(sample).shape[1])
+print("descriptor width by window:",
+      "  ".join(f"{w}: {d}-D" for w, d in widths.items()))
 assert len(set(widths.values())) == 1, "the descriptor still depends on its window"
-print(f"one descriptor at every window ({next(iter(widths.values()))}-D), so the "
-      "sweep below varies the field of view and nothing else")
+print(f"one descriptor at every window ({next(iter(widths.values()))}-D); the "
+      "adoption gate proved byte-identity at 1024 on real events")
 
 # %%
 draw_descriptor_widths(shipped_widths)
@@ -1881,6 +1877,20 @@ def batched(signals, descriptor, batch_size=256):
          for start in range(0, len(signals), batch_size)],
         axis=0,
     )
+
+
+def real_cores(window):
+    cache = {}
+    output = []
+    for row in real_rows:
+        relative = row["source_signal_relative_path"]
+        if relative not in cache:
+            cache[relative] = np.load(
+                signal_root / relative, allow_pickle=False
+            ).astype(np.float32, copy=False)
+        signal = cache[relative]
+        output.append(reflect_crop(signal, float(row["center_norm"]) * signal.size, window))
+    return np.stack(output)
 
 
 sweep = []
@@ -2150,10 +2160,10 @@ try:
             "quantile": QUANTILE,
             "seed": SEED,
             "descriptor": (
-                "shipped internship_workspace.z8_domain_pca.morphology_features: "
-                f"fixed {BAND_CENTRES.size}-band grid on 7-80 kHz, envelope "
-                "smoothing in bin units"
+                "window-invariant prototype: fixed 37-band grid on 7-80 kHz, "
+                "envelope smoothing in bin units; identity at 1024"
             ),
+            "identity_deviation_at_reference_window": identity_deviation,
             "reproduces": {
                 "run_id": "particle-z8-v2-coverage-conditions-q80-r1",
                 "max_deviation": window_deviation,
@@ -3278,3 +3288,35 @@ except WorkspaceError as error:
 # redo plan is `docs/experiments/2026-08-15/mad-redo-execution-plan.md`, and the
 # reason this notebook exists is so that the redo can be checked against
 # something executable rather than against a slide.
+
+
+# %% [markdown]
+# # Carrying this to yeast
+#
+# The bead chain exists to be transferred. Seven things have to be regenerated
+# against a yeast model, and each already has a section here that says how:
+#
+# | To regenerate | Where the method lives |
+# |---|---|
+# | Observed parameter ranges, boundary-censored | notebook 1 · Cholesky |
+# | Class-conditional correlations and the Cholesky factor | notebook 1 · Cholesky |
+# | Generated-waveform extremes | notebook 1 · Cholesky |
+# | The morphology basis and its PCA | notebook 2 · how a signal becomes a point |
+# | Twin pairs and the space they were chosen in | notebook 2 · twins |
+# | Matched-policy losses across seeds | notebook 3 · masked learning |
+# | Reconstructions on real events | notebook 3 · masked learning |
+#
+# Two of them will not transfer as written, and it is better to say so here than
+# to discover it later. **Labels**: a bead recording carries exactly one class,
+# inherited by every event in it — notebook 1 measures that and finds 1,234
+# independent label decisions behind 2,073 events. A yeast recording can hold
+# more than one cell type at once, so the label channel is not merely small
+# there, it is *structurally different*, and the census in notebook 1 does not
+# describe it. **Geometry**: the generator's five knobs describe a sphere of
+# known diameter crossing a beam. A budding cell is not that shape, and nothing
+# in the Cholesky chain currently says what replaces the diameter.
+#
+# So the honest transfer claim is narrow: the *protocol* carries — reproduce,
+# then align, then measure coverage and identity in one space — while the
+# *generator* does not, and the *label census* has to be redone from scratch on
+# a population where one recording can contain two answers.

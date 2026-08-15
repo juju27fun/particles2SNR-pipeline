@@ -23,6 +23,21 @@
 # annotated. So we simulate. This notebook is the case that the simulation is
 # good enough to learn from, built in the order the case has to be made:
 #
+# ## What this is ultimately for
+#
+# Everything here is measured on **calibration beads** — 2, 4 and 10 µm spheres,
+# whose size is known because someone put them in the tube. Beads are not the
+# goal. They are the only population where a label can be trusted, which makes
+# them the one place a simulator can be *checked* rather than believed.
+#
+# The goal is **yeast**: cells whose morphology varies continuously, whose class
+# cannot be read off a filename, and for which no trustworthy per-event label
+# exists at all. That is why the project is self-supervised, and it is why the
+# bead chain has to be validated first — a method that cannot be shown to work
+# where the truth is known has no business being pointed at data where it is
+# not. Every number below is a bead number, and none of them transfers to yeast
+# by assumption.
+#
 # **Part I — the argument.** The signal family and its knobs; whether a trained
 # encoder recovers those knobs; how measured events become a generator; whether
 # the generator's cloud covers the real one; and whether a regenerated event can
@@ -2308,8 +2323,14 @@ print(f"reproduces particle-z8-v2-exact-parent-retrieval-r1 "
 
 # %%
 board = published("ssl-v3-v16-retrieval-and-ranges-r5", "board_values.json")
-ranking = published("p0-conv1dgapl-z8-ranking-v1")
-print(json.dumps(board, indent=2)[:1200])
+print(f"{'condition':<44} {'events':>7} {'Recall@5':>10} {'q50':>8}")
+print(f"{'benign real query (ceiling)':<44} {latent_score['events']:>7} "
+      f"{100.0:9.1f} % {0.0:7.1f} %")
+for row in sorted(board["retrieval_rows"], key=lambda r: -r["recall_at_5_macro"]):
+    print(f"{row['condition']:<44} {row['events']:>7} "
+          f"{100 * row['recall_at_5_macro']:9.1f} % "
+          f"{100 * row['q50_relative_rank']:7.1f} %")
+print(f"{'shuffled parents (floor)':<44} {'—':>7} {2.0:9.1f} % {50.0:7.1f} %")
 
 # %% [markdown]
 # - **Ceiling — a benign real query: 100 %, q50 0 %.** Feed a real event back as

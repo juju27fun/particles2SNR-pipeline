@@ -23,6 +23,21 @@
 # annotated. So we simulate. This notebook is the case that the simulation is
 # good enough to learn from, built in the order the case has to be made:
 #
+# ## What this is ultimately for
+#
+# Everything here is measured on **calibration beads** — 2, 4 and 10 µm spheres,
+# whose size is known because someone put them in the tube. Beads are not the
+# goal. They are the only population where a label can be trusted, which makes
+# them the one place a simulator can be *checked* rather than believed.
+#
+# The goal is **yeast**: cells whose morphology varies continuously, whose class
+# cannot be read off a filename, and for which no trustworthy per-event label
+# exists at all. That is why the project is self-supervised, and it is why the
+# bead chain has to be validated first — a method that cannot be shown to work
+# where the truth is known has no business being pointed at data where it is
+# not. Every number below is a bead number, and none of them transfers to yeast
+# by assumption.
+#
 # **Part I — the argument.** The signal family and its knobs; whether a trained
 # encoder recovers those knobs; how measured events become a generator; whether
 # the generator's cloud covers the real one; and whether a regenerated event can
