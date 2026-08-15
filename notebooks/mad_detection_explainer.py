@@ -35,6 +35,8 @@
 # chain on a signal built from scratch.
 
 # %%
+import json
+
 import matplotlib.pyplot as plt
 import numpy as np
 from IPython.display import Image
@@ -150,11 +152,11 @@ Image(filename=str(failure_png), width=980)
 # Two bounded pieces of development context (beads, not yeast):
 #
 # - On the frozen 87-event human ledger of the bead development corpus, the
-#   MAD chain recovered **78/87 confirmed events against 41/87** for Z8v2
+#   MAD v2.1 chain recovered **77/87 confirmed events against 41/87** for Z8v2
 #   (the historical peak-first detector), and returned the *right number* of
-#   events on 44 of 60 traces (manifested audit
-#   `particle-mad-gt-visual-audit-r2`, frozen metrics in
-#   `particle-gradual-wave8like-final-analysis-r1`).
+#   events on all seven frozen two-particle loci. The v2.1 metric is recomputed
+#   from its 3 618 supports below; it is not inherited from the 3 749-box v1
+#   audit.
 #   *Development evidence on one acquisition family, on beads. The audit also
 #   reports a localisation score (average precision at IoU 0.5) but only over
 #   the 11 events whose human boundaries were reliable — it is not a
@@ -166,6 +168,43 @@ Image(filename=str(failure_png), width=980)
 #   Section 4 shows why the energy chain does not need that gate at all: a
 #   persistent oscillation is *learned into the baseline* and never becomes
 #   a candidate in the first place.
+
+# %% [markdown]
+# ### The bounded comparison: MAD v2.1 versus P2SNR
+#
+# “MAD works better” has a precise, narrower meaning here. On the same frozen
+# bead audit, MAD v2.1 is the admissible operating point that preserves both
+# trace-level cleanliness and two-particle cardinality. It does **not** have the
+# highest raw recall: the maximal-recall P2SNR setting reaches 86/87, but it
+# activates seven reviewed-empty traces and returns exactly two boxes on only
+# one of seven joined-particle loci.
+#
+# The cell reads the manifested comparison rather than copying numbers into a
+# second calculation. It refuses the old MAD v1 row.
+
+# %%
+comparison_run = (
+    workspace.root
+    / "artifacts/cross-project/analysis/particle-p2-noise-tradeoff-evidence-analysis-r5"
+)
+comparison = json.loads((comparison_run / "tradeoff_comparison.json").read_text())
+assert comparison["mad_dataset_id"] == (
+    "particles2snr-beads-mad-teacher-detection-development@v2.1"
+)
+for row in comparison["rows"]:
+    print(
+        f"{row['label']:<34} rappel={row['recall']:>2}/87  "
+        f"propositions={row['global_predictions']:>4}  "
+        f"vides={row['verified_empty_active']:>2}/22  "
+        f"artefacts={row['artifact_active']}/6  "
+        f"deux-particules exacts={row['joined_exact']}/7"
+    )
+
+# %% [markdown]
+# The comparison is retrospective and limited to one acquisition family. The
+# human labels establish the number of particles in each joined locus, not
+# sample-precise child boundaries. It therefore supports choosing MAD as the
+# pseudo-label detector; it is not an independent-generalisation claim.
 
 # %% [markdown]
 # ## 1 · The trace and the event support
@@ -741,6 +780,11 @@ def _explore(z_thr: float) -> None:
 # > `extension_signal`. The stage is off. It remains reachable behind
 # > `boundary_expansion_enabled` so the comparison that produced the verdict
 # > can be re-run, but nothing in the shipped preset uses it.
+#
+# **Bead dataset v2.1.** Its production profile is stricter than the yeast
+# preset illustrated here: `boundary_expansion_enabled=False` and
+# `boundary_pad_ms=0.0`. Its YOLO box is exactly the support of the active MAD
+# frames after grouping — no lower-z tail and no fixed padding are appended.
 
 # %%
 bounds, = event_bounds(trace, record.signal.size)
@@ -781,10 +825,11 @@ print(f"detector output: [{record_events[0].event_start:5d}, {record_events[0].e
 # localised, and explained by a single named cap.
 #
 # *Event concentration is the share of the event's own excess held by its five
-# strongest bins — a spectral-shape descriptor, computed once the event
-# exists. A frame-level version of it used to gate activation as well; an
-# ablation over 1 316 yeast and 600 bead traces found it never changed an
-# outcome, so activation is z alone (`active_min_concentration = 0.0`).*
+# strongest bins — a post-localisation qualification descriptor. It does not
+# participate in frame activation: activation is z alone
+# (`active_min_concentration = 0.0`). The distinction matters because the bead
+# v2.1 manifest still records `acceptance_min_concentration=0.08`; saying that
+# concentration has disappeared everywhere would not reproduce the dataset.*
 
 # %% [markdown]
 # ## 9 · CROP — the bounded event becomes a training example
@@ -823,6 +868,36 @@ fig.plot_ssl_crop(record.signal, record_events[0], config);
 #
 # *Method only · one reviewed record · no claim of detector performance or
 # biological validity.*
+
+# %% [markdown]
+# ### Boxes and classifier crops in MAD v2.1
+#
+# The v2.1 dataset stores complete 16 384-sample traces. Its label is the
+# active-frame support itself; a crop is a downstream model view and cannot
+# change that box. The current Conv1DGAP-S experiment centres a 4 096-sample
+# crop on the v2.1 box midpoint, shifts it at trace edges to preserve its full
+# length, then averages non-overlapping groups of eight samples to obtain 512
+# inputs. Rebuilding v2.1 therefore updates both the box and every derived crop
+# centre without baking crops into the dataset.
+
+# %%
+mad_v21_root = (
+    workspace.root
+    / "datasets/interim/particles2SNR-pipeline/particles2snr-beads-mad-teacher-detection-development/v2.1"
+)
+events = np.genfromtxt(
+    mad_v21_root / "events.csv", delimiter=",", names=True, dtype=None, encoding="utf-8"
+)
+example = events[len(events) // 2]
+box_start, box_end = int(example["event_start"]), int(example["event_end"])
+crop_length = 4096
+crop_start = min(max(0, (box_start + box_end) // 2 - crop_length // 2), 16384 - crop_length)
+crop_end = crop_start + crop_length
+assert crop_start <= box_start < box_end <= crop_end
+print(
+    f"{example['source_id']}: box=[{box_start}, {box_end}), "
+    f"crop=[{crop_start}, {crop_end}) → 512 pooled samples"
+)
 
 # %% [markdown]
 # ## Running on your own data
