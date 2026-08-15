@@ -3,8 +3,7 @@
 Same palette and colour semantics as the frozen v5 explainer deck, at screen
 density (11 x 4.5 in, 110 dpi) instead of projection density. Colour grammar:
 PURPLE = robust/MAD/z, GREEN = median and active frames, RED = threshold on z,
-ORANGE = threshold on C or rejection, BLUE = signal/energy, TEAL =
-concentration, GREY = raw trace, PALE_GREEN = detected support, PALE_BLUE =
+ORANGE = rejection, BLUE = signal/energy, GREY = raw trace, PALE_GREEN = detected support, PALE_BLUE =
 review context.
 
 Every helper draws into the axes it is given (``ax=`` / ``axes=``) so
@@ -317,41 +316,6 @@ def plot_robust_band(
     return ax
 
 
-def plot_concentration_toy(
-    spectra: dict[str, np.ndarray],
-    *,
-    top_bins: int = 5,
-    axes: np.ndarray | None = None,
-) -> np.ndarray:
-    """Two frame spectra carrying the same total power, one peaked one flat."""
-    axes = _stacked_axes(axes, len(spectra), height=2.2 * len(spectra))
-    for axis, (label, values) in zip(axes, spectra.items()):
-        values = np.asarray(values, dtype=float)
-        share = np.sort(values)[-top_bins:].sum() / values.sum()
-        axis.bar(np.arange(values.size), values, color=TEAL, width=0.75)
-        axis.set_title(f"{label} — total power {values.sum():.0f}, "
-                       f"top-{top_bins} share C = {share:.2f}")
-        axis.set_ylabel("power")
-    axes[-1].set_xlabel("frequency bin k")
-    return axes
-
-
-def plot_concentration(trace: DetectorTrace, *, ax: Axes | None = None) -> Axes:
-    """C[m] along the trace, against the configured floor."""
-    ax = _single_axis(ax)
-    x_ms = frame_axis_ms(trace)
-    floor = trace.config.active_min_concentration
-    ax.plot(x_ms, trace.concentration, color=TEAL, linewidth=1.1, label="C[m]")
-    ax.axhline(floor, color=ORANGE, linestyle="--", linewidth=1.2,
-               label=f"configured floor C = {floor}")
-    ax.axhline(float(trace.concentration.min()), color=GREY, linestyle=":", linewidth=1.0,
-               label=f"lowest C on this trace = {trace.concentration.min():.2f}")
-    ax.set_ylim(0.0, 1.05)
-    ax.set_xlabel("time [ms]")
-    ax.set_ylabel("C[m]")
-    ax.set_title("Concentration: share of band power held by the top 5 bins")
-    ax.legend(loc="lower right")
-    return ax
 
 
 def count_active_runs(active: np.ndarray) -> int:
@@ -393,36 +357,6 @@ def plot_activation(
     ax.legend(loc="upper right")
     return ax
 
-
-def plot_grouping(
-    trace: DetectorTrace,
-    *,
-    group: tuple[int, int],
-    ax: Axes | None = None,
-) -> Axes:
-    """z[m] zoomed on the activation run that becomes one candidate."""
-    ax = _single_axis(ax)
-    config = trace.config
-    x_ms = frame_axis_ms(trace)
-    half = 0.5 * trace.hop / config.sampling_frequency_hz * 1000.0
-    group_left, group_right = group
-    ax.axvspan(x_ms[group_left] - half, x_ms[group_right] + half,
-               color=PALE_GREEN, zorder=1, label="activation run")
-    ax.plot(x_ms, trace.energy_z, color=PURPLE, linewidth=1.2, zorder=3)
-    ax.axhline(config.active_snr_z, color=RED, linestyle="--", linewidth=1.2,
-               label=f"detect: z = {config.active_snr_z}")
-    ax.set_yscale("symlog", linthresh=1.0)
-    ax.set_xlim(x_ms[max(0, group_left - 14)],
-                x_ms[min(x_ms.size - 1, group_right + 14)])
-    ax.set_xlabel("time [ms]")
-    ax.set_ylabel("z[m]")
-    ax.set_title(
-        f"frames {group_left}–{group_right} form one candidate "
-        f"({group_right - group_left + 1} frames, gaps of up to "
-        f"{max(0, round(config.cluster_gap_ms / 1000.0 * config.sampling_frequency_hz / trace.hop))} bridged)"
-    )
-    ax.legend(loc="upper right")
-    return ax
 
 
 def plot_ssl_crop(
@@ -586,28 +520,3 @@ def plot_legacy_vs_energy(
     return axes
 
 
-def plot_energy_and_z(
-    trace: DetectorTrace,
-    *,
-    axes: np.ndarray | None = None,
-) -> np.ndarray:
-    """Synthesis: E[m] with the scaled band on top, z[m] with its threshold below."""
-    axes = _stacked_axes(axes, 2, height=6.0)
-    x_ms = frame_axis_ms(trace)
-    axes[0].plot(x_ms, trace.frame_energy, color=BLUE, linewidth=1.1, label="E[m]")
-    axes[0].axhline(trace.energy_median, color=GREEN, linewidth=1.4, label="median")
-    axes[0].axhspan(trace.energy_median - trace.energy_scale,
-                    trace.energy_median + trace.energy_scale,
-                    color=PURPLE, alpha=0.18, label="median ± energy_scale")
-    axes[0].set_ylabel("E[m]")
-    axes[0].set_title("Energy, then its robust normalisation")
-    axes[0].legend(loc="upper right")
-    axes[1].plot(x_ms, trace.energy_z, color=PURPLE, linewidth=1.1,
-                 label="z[m] = (E − median) / energy_scale")
-    axes[1].axhline(trace.config.active_snr_z, color=RED, linewidth=1.2,
-                    linestyle="--", label=f"activation z = {trace.config.active_snr_z}")
-    axes[1].set_yscale("symlog", linthresh=1.0)
-    axes[1].set_ylabel("z[m]")
-    axes[1].set_xlabel("time [ms]")
-    axes[1].legend(loc="upper right")
-    return axes

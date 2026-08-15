@@ -27,7 +27,7 @@
 # follows the frozen
 # [v5 explainer deck](../../artifacts/cross-project/presentations/yeast-detector-explainer-v5/render-r1/Yeast_detector_explainer_v5.pdf):
 #
-# `ISOLATE → LOCALISE → REFERENCE → AGGREGATE → NORMALISE → GROUP → CROP`
+# `ISOLATE → LOCALISE → REFERENCE → AGGREGATE → NORMALISE → ACTIVATE → GROUP → CROP`
 #
 # It explains a method on one record: no performance metric, no biological
 # claim. The detector itself only needs a 1-D array — the workspace calls
@@ -84,7 +84,7 @@ print(f"{EVENT_ID}: {record.signal.size} samples, "
 # | Activation | z ≥ 3.5 |
 # | Boundaries | pad 0.04 ms |
 # | Grouping | bridge gaps ≤ 0.128 ms (2 frames) |
-# | Qualification | width 0.06–2.0 ms, max z ≥ 12, ≤ 5 events per trace |
+# | Qualification | width 0.06–2.0 ms, max z ≥ 12, event concentration ≥ 0.12, ≤ 5 events per trace |
 #
 # *These values are a development choice validated on a review campaign, not a
 # demonstrated optimum.* The last rows name quantities the notebook has not
@@ -383,7 +383,7 @@ fig.plot_legacy_vs_energy(slow_trace, replay=replay_slow, mad_events=slow_events
 #   the final output contains only the fast particle: one box, no trace of
 #   the other event.
 # - The MAD chain **returns both intervals** — and marks the slow one
-#   `reject`, because at 2.39 ms it exceeds the 2.0 ms qualification cap.
+#   `reject`, because at 2.256 ms it exceeds the 2.0 ms qualification cap.
 #   Read that honestly: the energy chain does **not** rescue the atypical
 #   particle either. What differs is the bookkeeping. The legacy hypothesis
 #   vanished inside a cascade; here the event is localised, scored
@@ -427,7 +427,8 @@ fig.plot_frame_energy(trace);
 # The candidate rule is: *flag every frame whose energy reaches V*. Recall
 # from section 3 that a frame is one column of the spectrogram, 64 µs of
 # trace, so the number of flagged frames is simply **how much of the record
-# the rule calls "event"** — here the event is genuinely about 4 frames wide.
+# the rule calls "event"** — the detector will settle on 14 frames; this
+# hand-picked V flags only the 4 around the peak.
 #
 # Take V at half the event's peak on this record — as good a hand-picked
 # value as any — and apply that *same* V to the same trace recorded with
@@ -657,15 +658,21 @@ fig.plot_detected_events(record.signal, record_events, config,
                          truth_spans_ms=[(event_start / 2e6 * 1000, event_end / 2e6 * 1000)]);
 
 # %% [markdown]
-# The green bar is the bounded event the notebook set out to produce. It
-# coincides exactly with the pale-green span — **and that is not a result**:
-# section 1 explained that the span *is* this detector's proposal, confirmed
-# by a reviewer. What the record establishes is that a human agreed there is
-# one complete event here; the interval's reproduction is arithmetic.
-# Sections 7 to 9 are how the z curve becomes that bar: which frames are
-# selected, how they are grouped, and how the boundaries are placed.
+# The green bar is the bounded event the notebook set out to produce. It sits
+# inside the pale-green span but does not fill it: the two agree on the right
+# edge and differ by 256 samples on the left.
 #
-# *Method only · one manifested record · no claim of detector performance or
+# **That gap is worth understanding, because it is not an error.** Section 1
+# said the pale-green span is a detector proposal a reviewer confirmed — and
+# that proposal was produced by an *earlier* version of this detector, one
+# that grew each interval outwards past the detection threshold. Section 8
+# explains why that stage was removed. So the visible difference is precisely
+# the region a human review judged to be margin rather than signal.
+#
+# Sections 7 and 8 are how the z curve becomes this bar: which frames are
+# selected, and how they become an interval.
+#
+# *Method only · one reviewed record · no claim of detector performance or
 # biological validity.*
 
 # %% [markdown]
@@ -696,15 +703,16 @@ def _explore(z_thr: float) -> None:
 
 # %% [markdown]
 # **z sets the duration of the event.** Raise it and the run shrinks towards
-# the peak; lower it from 3.5 to 2.0 and the run lengthens at both edges,
-# until around 2.0 a second run appears elsewhere in the trace — a candidate
-# the detector would then have to qualify or reject.
+# the peak; lower it towards 2.0 and the run extends leftwards (frame 55 to
+# 54) while its right edge holds at 68, until a second run appears elsewhere
+# in the trace — a candidate the detector would then have to qualify or
+# reject.
 #
 # This is the single knob that matters at activation, and 3.5 is a
 # development choice, not a demonstrated optimum. Dragging a slider on one
 # record is a sensitivity check, not a calibration.
 #
-# *Method only · one manifested record · no claim of detector performance or
+# *Method only · one reviewed record · no claim of detector performance or
 # biological validity.*
 
 # %% [markdown]
@@ -742,13 +750,17 @@ for label, (a, b) in (("run, in samples", bounds.group_samples),
                       ("after the pad  ", (bounds.start, bounds.end))):
     print(f"{label}: [{a:5d}, {b:5d}]  {b - a:5d} samples  {(b - a) / 2e6 * 1000:.3f} ms")
 print(f"detector output: [{record_events[0].event_start:5d}, {record_events[0].event_end:5d}]")
-fig.plot_grouping(trace, group=bounds.group);
 
 # %% [markdown]
-# The interval is the activation run plus the pad — nothing else. Every
-# boundary in this notebook is therefore a direct consequence of one
-# threshold, z ≥ 3.5, which is the whole point of section 6 having built z
-# carefully.
+# The interval is the activation run plus the pad — nothing else, which is why
+# no figure is needed here: it is the shaded run of section 7, converted to
+# samples. Every boundary in this notebook is therefore a direct consequence
+# of one threshold, z ≥ 3.5, which is the whole point of section 6 having
+# built z carefully.
+#
+# On this record the gap-bridging tolerance never fires: the 14 selected
+# frames are already contiguous. It matters for events that flicker below the
+# threshold mid-passage.
 #
 # ### 8a · Qualification — the interval still has to earn its label
 #
@@ -759,18 +771,20 @@ fig.plot_grouping(trace, group=bounds.group);
 #
 # | Test | Preset | On this event |
 # |---|---|---|
-# | width within 0.06–2.0 ms | `min/max_width_ms` | 1.296 ms ✔ |
+# | width within 0.06–2.0 ms | `min/max_width_ms` | 1.168 ms ✔ |
 # | max z over the event ≥ 12 | `strict/medium_min_snr` | 75.5 ✔ |
-# | event concentration ≥ 0.12 | `strict_min_concentration` | 0.965 ✔ |
+# | event concentration ≥ 0.12 | `strict_min_concentration` | 0.967 ✔ |
 # | at most 5 events per trace | `max_events_per_signal` | 1 ✔ |
 #
 # All four pass, so the candidate is labelled `strict`. The slow particle of
-# section 4 failed the first one at 2.39 ms and was labelled `reject` — kept,
+# section 4 failed the first one at 2.256 ms and was labelled `reject` — kept,
 # localised, and explained by a single named cap.
 #
-# *The event-level concentration here is not the frame-level quantity of the
-# activation rule: it is the share of the event's own excess held by its five
-# strongest bins, which is why it sits near 1 rather than near a threshold.*
+# *Event concentration is the share of the event's own excess held by its five
+# strongest bins — a spectral-shape descriptor, computed once the event
+# exists. A frame-level version of it used to gate activation as well; an
+# ablation over 1 316 yeast and 600 bead traces found it never changed an
+# outcome, so activation is z alone (`active_min_concentration = 0.0`).*
 
 # %% [markdown]
 # ## 9 · CROP — the bounded event becomes a training example
@@ -793,20 +807,21 @@ fig.plot_grouping(trace, group=bounds.group);
 fig.plot_ssl_crop(record.signal, record_events[0], config);
 
 # %% [markdown]
-# - Pale green: the detected event, 2 592 samples. Pale blue: the 8 192-sample
+# - Pale green: the detected event, 2 336 samples. Pale blue: the 8 192-sample
 #   window handed to the model. Dashed line: the energy-weighted centre.
 # - Why the crop is wider than the event: a model given only the event would
 #   never see what ordinary signal looks like, and the boundary itself would
 #   become a learnable artefact. The margin carries that context.
 # - Why centring is on the energy-weighted centre rather than the interval's
-#   midpoint: the interval is asymmetric (section 8), so its midpoint drifts
-#   away from where the energy actually is.
+#   midpoint: energy is not distributed evenly inside the interval, so the
+#   midpoint (sample 8128 here) drifts from where the event actually is
+#   (8249).
 #
 # This is the answer to the notebook's opening question. A time series went
 # in; one fixed-length, bounded, centred example comes out — with a quality
 # label and a documented provenance chain.
 #
-# *Method only · one confirmed record · no claim of detector performance or
+# *Method only · one reviewed record · no claim of detector performance or
 # biological validity.*
 
 # %% [markdown]
@@ -834,9 +849,9 @@ fig.plot_detected_events(your_signal, your_events, config, truth_spans_ms=[(3.6,
 
 # %% [markdown]
 # No registry, no review queue, no workspace: one array, one config, the same
-# seven stages, one bounded event. Replace `your_signal` with your own
+# eight stages, one bounded event. Replace `your_signal` with your own
 # acquisition and the whole notebook's reasoning applies unchanged.
 #
 # ---
-# **Sections 8–10 (grouping, SSL crop, multi-record sandbox) and the
-# appendices follow.**
+# **Still to come: a multi-record sandbox and the appendices (glossary,
+# configuration, evidence and limits).**
