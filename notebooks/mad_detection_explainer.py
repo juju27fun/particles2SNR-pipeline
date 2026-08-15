@@ -41,6 +41,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from IPython.display import Image
 from internship_workspace.config import Workspace
+from internship_workspace.mad_conv1dgap_training import resolve_registered_dataset
+from internship_workspace.mad_v21_figures import (
+    read_rows,
+    render_comparison,
+    render_gallery,
+    select_cases,
+)
 from particles2snr.yeast_events import (
     detect_yeast_events,
     detector_trace,
@@ -148,7 +155,7 @@ Image(filename=str(failure_png), width=980)
 # hypothesis exists, and Doppler peaks are measured afterwards as
 # descriptors, never as the unit of counting.
 #
-# One more structural cost, before the numbers:
+# One more structural cost — the closing section measures both:
 #
 # - A peak threshold is a **hard gate on a proxy**: a persistent
 #   nuisance oscillation *is* a Doppler-like peak, so peak-first has to
@@ -157,54 +164,6 @@ Image(filename=str(failure_png), width=980)
 #   Section 4 shows why the energy chain does not need that gate at all: a
 #   persistent oscillation is *learned into the baseline* and never becomes
 #   a candidate in the first place.
-
-# %% [markdown]
-# ### Bonus — the nail in the coffin
-#
-# Everything above argues about *representation*. Here is the empirical close,
-# read from the manifested comparison on the frozen 87-event bead audit.
-#
-# P2SNR **can** out-recall MAD. The question is what it costs.
-
-# %%
-comparison = json.loads((
-    workspace.root / "artifacts/cross-project/analysis"
-    / "particle-p2-noise-tradeoff-evidence-analysis-r5/tradeoff_comparison.json"
-).read_text())
-assert comparison["mad_dataset_id"].endswith("@v2.1")
-print(f"{'':<30}{'recall':>10}{'boxes':>8}{'empty lit':>12}{'2-particle':>12}")
-for row in comparison["rows"]:
-    print(f"{row['label']:<30}{row['recall']:>7}/87{row['global_predictions']:>8}"
-          f"{row['verified_empty_active']:>9}/22{row['joined_exact']:>10}/7")
-
-# %% [markdown]
-# Read the last two columns. To gain nine events over MAD, the maximal-recall
-# setting proposes **89 % more boxes**, lights up **seven traces a human
-# verified as empty**, and resolves **one of seven** two-particle loci instead
-# of seven. It does not find events better; it finds everything.
-#
-# And the two-particle column is where the argument closes, because it is the
-# multi-crest case of the introduction, measured on real loci. Below, each row
-# is one human locus containing **exactly two particles** (green), against
-# what each detector proposed (cyan):
-
-# %%
-Image(filename=str(
-    workspace.root / "artifacts/cross-project/reviews"
-    / "particle-p2-noise-pareto-closure-result-r6/assets/capture-01/source.png"
-), width=1100)
-
-# %% [markdown]
-# Same loci, three detectors, read row by row. MAD returns one box per locus,
-# every time. P2SNR at maximal recall shatters the same loci into three, four,
-# five proposals — the exact fragmentation the notebook opened on, no longer
-# argued from one yeast record but counted over the frozen audit. There is no
-# setting that keeps both: cleaning up the fragmentation costs the recall that
-# justified it.
-#
-# *Retrospective, one acquisition family, on beads. The human labels fix the
-# number of particles per joined locus, not sample-precise boundaries — this
-# supports choosing MAD as the pseudo-label detector, nothing wider.*
 
 # %% [markdown]
 # ## 1 · The trace and the event support
@@ -885,5 +844,48 @@ fig.plot_detected_events(your_signal, your_events, config, truth_spans_ms=[(3.6,
 # acquisition and the whole notebook's reasoning applies unchanged.
 #
 # ---
-# **Still to come: a multi-record sandbox and the appendices (glossary,
-# configuration, evidence and limits).**
+
+# %% [markdown]
+# ## Appendix · Does it hold beyond this record?
+#
+# Two figures, no new argument. Both are on the **bead** development corpus,
+# not yeast, and both are development evidence on one acquisition family.
+
+# %%
+evidence = workspace.root / ".cache/notebooks"
+gallery_png, comparison_png = evidence / "mad-v21-gallery.png", evidence / "mad-v21-comparison.png"
+dataset_root = resolve_registered_dataset(workspace)[1]
+render_gallery(select_cases(read_rows(dataset_root / "source_manifest.csv"),
+                            read_rows(dataset_root / "events.csv")),
+               dataset_root, gallery_png, "MAD teacher v2.1")
+Image(filename=str(gallery_png), width=1050)
+
+# %% [markdown]
+# **The chain does not depend on the record we used.** The six cases are
+# picked by a deterministic rule before anything is drawn: the median-energy
+# event of each bead class, then the densest trace, the weakest event still
+# retained, and one starting at sample 0. Boxes land on the events in all six,
+# including the dense trace where seven passages share one recording.
+
+# %%
+comparison = json.loads((workspace.root / "artifacts/cross-project/analysis"
+    / "particle-p2-noise-tradeoff-evidence-analysis-r5/tradeoff_comparison.json").read_text())
+assert comparison["mad_dataset_id"].endswith("@v2.1")
+render_comparison(comparison, workspace.root, comparison_png)
+Image(filename=str(comparison_png), width=1050)
+
+# %% [markdown]
+# **And the fragmentation of the opening is not anecdotal.** Each row is a
+# locus a human read as holding exactly two particles. MAD returns two boxes
+# in all seven. P2SNR tuned for recall reaches 86/87 against MAD's 77 — and
+# pays with 89 % more proposals, seven traces a human verified as empty, and
+# one exact locus out of seven. Tuned for cleanliness it keeps the traces
+# clean and loses the events instead. Neither setting holds both ends.
+#
+# *Retrospective, beads, one acquisition family. The human labels fix the
+# number of particles per locus, not sample-precise boundaries. This supports
+# choosing MAD as the pseudo-label detector, nothing wider.*
+#
+# ---
+# **Still to come: a multi-record sandbox for the yeast chain, and the
+# appendices (glossary, configuration, evidence and limits).**
