@@ -82,7 +82,7 @@ print(f"{EVENT_ID}: {record.signal.size} samples, "
 # | STFT | N = 512, overlap 384 → hop H = 128 samples (64 µs) |
 # | Smoothing | 3 frames |
 # | Activation | z ≥ 3.5 |
-# | Boundaries | extend while z ≥ 1.5, pad 0.04 ms |
+# | Boundaries | pad 0.04 ms |
 # | Grouping | bridge gaps ≤ 0.128 ms (2 frames) |
 # | Qualification | width 0.06–2.0 ms, max z ≥ 12, ≤ 5 events per trace |
 #
@@ -718,54 +718,37 @@ def _explore(z_thr: float) -> None:
 # frames: 0.128 ms × 2 MHz ÷ 128 samples per hop = **2 frames**. Runs
 # separated by at most that are one event.
 #
-# **2 · Extend the boundaries — with a *different* threshold.** The run stops
-# where z falls under 3.5, but the event does not: its tails are real signal
-# below the detection threshold. So the boundaries grow outwards while
-# z ≥ `boundary_snr_z` = **1.5**.
+# **2 · Convert frames to samples.** The run spans `left × hop` to
+# `right × hop + N`: a frame is a 512-sample window, not an instant, so the
+# last frame contributes its whole window.
 #
-# > **Two thresholds on z, and it is deliberate.** 3.5 to *detect*, 1.5 to
-# > *delimit*. Detecting demands confidence — a false detection creates a
-# > wrong example. Delimiting demands generosity — a boundary cut too short
-# > truncates a real event that has already been accepted. One number cannot
-# > serve both, and the deck never comments on it.
+# **3 · Pad.** `boundary_pad_ms = 0.04 ms` = **80 samples** on each side.
 #
-# **3 · Pad.** `boundary_pad_ms = 0.04 ms` = **80 samples** on each side,
-# absorbing the fact that a frame is a 512-sample window, not an instant.
+# > **A stage that used to sit here, and no longer does.** The detector once
+# > grew each interval outwards while z stayed above a second, lower threshold
+# > (1.5 against 3.5 for detection), on the reasoning that an event's quiet
+# > tails are still the event. Review `yeast-boundary-expansion-review-r2` put
+# > that to a human: on **76 of 76** reviewed events the extended region was
+# > judged `extension_margin` — margin, not signal — and never once
+# > `extension_signal`. The stage is off. It remains reachable behind
+# > `boundary_expansion_enabled` so the comparison that produced the verdict
+# > can be re-run, but nothing in the shipped preset uses it.
 
 # %%
 bounds, = event_bounds(trace, record.signal.size)
 group_left, group_right = bounds.group
-left, right = bounds.expanded
 print(f"activation run : frames {group_left}–{group_right}  ({group_right - group_left + 1} frames)")
-print(f"after expansion: frames {left}–{right}  (+{group_left - left} left, +{right - group_right} right)")
-fig.plot_grouping(trace, group=bounds.group, expanded=bounds.expanded);
-
-# %% [markdown]
-# On this record the run gains **two frames on the left and none on the
-# right**: the event rises gently and stops abruptly, and the asymmetric
-# boundary rule follows that shape instead of imposing a symmetric window.
-#
-# From frames to samples: the interval spans `left × hop` to
-# `right × hop + N`, then the pad is applied on both sides. Zoomed on the
-# event, the three stages are visible one under the other — at full record
-# scale they would be a single line.
-
-# %%
-for label, (a, b) in (("activation run only", bounds.group_samples),
-                      ("after expansion    ", bounds.expanded_samples),
-                      ("after the pad      ", (bounds.start, bounds.end))):
+for label, (a, b) in (("run, in samples", bounds.group_samples),
+                      ("after the pad  ", (bounds.start, bounds.end))):
     print(f"{label}: [{a:5d}, {b:5d}]  {b - a:5d} samples  {(b - a) / 2e6 * 1000:.3f} ms")
-print(f"detector output      : [{record_events[0].event_start:5d}, {record_events[0].event_end:5d}]")
-fig.plot_boundary_stages(record.signal, bounds, config);
+print(f"detector output: [{record_events[0].event_start:5d}, {record_events[0].event_end:5d}]")
+fig.plot_grouping(trace, group=bounds.group);
 
 # %% [markdown]
-# The green bar stops where activation stopped; the blue one reaches further
-# left, into signal that is clearly still part of the event but never crossed
-# z = 3.5; the purple one adds the fixed pad. Between the first and the last,
-# the interval grows by **416 samples**, 16 % of its final width — and that is
-# precisely the part a threshold tuned for confident detection would have cut
-# off. The event's onset does not stop being the event because it is quieter
-# than its peak.
+# The interval is the activation run plus the pad — nothing else. Every
+# boundary in this notebook is therefore a direct consequence of one
+# threshold, z ≥ 3.5, which is the whole point of section 6 having built z
+# carefully.
 #
 # ### 8a · Qualification — the interval still has to earn its label
 #

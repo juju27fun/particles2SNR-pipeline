@@ -398,83 +398,30 @@ def plot_grouping(
     trace: DetectorTrace,
     *,
     group: tuple[int, int],
-    expanded: tuple[int, int],
     ax: Axes | None = None,
 ) -> Axes:
-    """z[m] with the activation run and the boundary expansion around it."""
+    """z[m] zoomed on the activation run that becomes one candidate."""
     ax = _single_axis(ax)
     config = trace.config
     x_ms = frame_axis_ms(trace)
     half = 0.5 * trace.hop / config.sampling_frequency_hz * 1000.0
-    left, right = expanded
     group_left, group_right = group
-    ax.axvspan(x_ms[left] - half, x_ms[right] + half, color=PALE_BLUE, zorder=0,
-               label="after boundary expansion")
     ax.axvspan(x_ms[group_left] - half, x_ms[group_right] + half,
                color=PALE_GREEN, zorder=1, label="activation run")
     ax.plot(x_ms, trace.energy_z, color=PURPLE, linewidth=1.2, zorder=3)
     ax.axhline(config.active_snr_z, color=RED, linestyle="--", linewidth=1.2,
                label=f"detect: z = {config.active_snr_z}")
-    ax.axhline(config.boundary_snr_z, color=ORANGE, linestyle=":", linewidth=1.4,
-               label=f"delimit: z = {config.boundary_snr_z}")
     ax.set_yscale("symlog", linthresh=1.0)
-    ax.set_xlim(x_ms[max(0, left - 12)], x_ms[min(x_ms.size - 1, right + 12)])
+    ax.set_xlim(x_ms[max(0, group_left - 14)],
+                x_ms[min(x_ms.size - 1, group_right + 14)])
     ax.set_xlabel("time [ms]")
     ax.set_ylabel("z[m]")
     ax.set_title(
-        f"frames {group_left}–{group_right} detected, extended to {left}–{right} "
-        f"while z stays above {config.boundary_snr_z}"
+        f"frames {group_left}–{group_right} form one candidate "
+        f"({group_right - group_left + 1} frames, gaps of up to "
+        f"{max(0, round(config.cluster_gap_ms / 1000.0 * config.sampling_frequency_hz / trace.hop))} bridged)"
     )
     ax.legend(loc="upper right")
-    return ax
-
-
-def plot_boundary_stages(
-    signal: np.ndarray,
-    bounds,
-    config: YeastDetectionConfig,
-    *,
-    margin_samples: int = 900,
-    ax: Axes | None = None,
-) -> Axes:
-    """The candidate's interval at each of the three boundary stages.
-
-    Zoomed, because the expansion and the pad are a few hundred samples on a
-    16 384-sample record and are invisible at full scale.
-    """
-    ax = _single_axis(ax)
-    values = np.asarray(signal)
-    view = slice(max(0, bounds.start - margin_samples),
-                 min(values.size, bounds.end + margin_samples))
-    x_ms = np.arange(view.start, view.stop) / config.sampling_frequency_hz * 1000.0
-    ax.plot(x_ms, values[view], color=GREY, linewidth=0.6, zorder=3)
-    span = float(np.max(np.abs(values[view]))) or 1.0
-
-    def to_ms(index: int) -> float:
-        return index / config.sampling_frequency_hz * 1000.0
-
-    stages = (
-        (bounds.group_samples, GREEN, "activation run only"),
-        (bounds.expanded_samples, BLUE, f"after expansion (z ≥ {config.boundary_snr_z})"),
-        ((bounds.start, bounds.end), PURPLE, f"after {config.boundary_pad_ms} ms pad"),
-    )
-    for index, ((left, right), colour, label) in enumerate(stages):
-        y = -1.12 * span - 0.20 * span * index
-        ax.plot([to_ms(left), to_ms(right)], [y, y], color=colour, linewidth=7,
-                solid_capstyle="butt", label=f"{label} · {right - left} samples")
-        for edge in (left, right):
-            ax.axvline(to_ms(edge), color=colour, linewidth=0.8, alpha=0.45, zorder=1)
-    ax.set_ylim(-1.85 * span, 1.15 * span)
-    ax.set_xlabel("time [ms]")
-    ax.set_ylabel("amplitude [a.u.]")
-    grown = (bounds.end - bounds.start) - (
-        bounds.group_samples[1] - bounds.group_samples[0]
-    )
-    ax.set_title(
-        f"Boundaries stage by stage: the interval grows by {grown} samples "
-        f"({grown / config.sampling_frequency_hz * 1000:.3f} ms) after activation"
-    )
-    ax.legend(loc="upper right", fontsize=9)
     return ax
 
 

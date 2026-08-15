@@ -13,7 +13,8 @@ from particles2snr.yeast_events import (
 def test_review_calibrated_config_v1_matches_frozen_selection() -> None:
     config = review_calibrated_detection_config_v1()
     assert config.medium_min_snr == config.strict_min_snr == 12.0
-    assert config.boundary_snr_z == 1.5
+    assert config.boundary_expansion_enabled is False
+    assert config.boundary_snr_z == 1.5  # retained so the review comparison stays runnable
     assert config.cluster_gap_ms == 0.128
     assert config.max_width_ms == 2.0
     assert config.max_events_per_signal == 5

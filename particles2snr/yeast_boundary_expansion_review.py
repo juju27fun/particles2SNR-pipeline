@@ -19,6 +19,7 @@ SEED = 20260815
 ANCHOR_RECORD_ID = "9459e76ce29342debc90"
 GROUP_QUOTAS = {"mix": 40, "shmoo2": 25, "budding": 25, "shmoo": 10}
 VERDICTS = ("extension_signal", "extension_margin", "uncertain")
+REVIEWED_EXPANSION_SNR_Z = 1.5
 
 
 def _candidate_payload(candidate: Any) -> dict[str, Any]:
@@ -72,9 +73,14 @@ def detector_positive(signal: np.ndarray) -> bool:
 
 
 def compare_trace(signal: np.ndarray, *, record_id: str, source_group: str) -> list[dict[str, Any]]:
-    config = review_calibrated_detection_config_v1()
-    without_expansion = replace(config, boundary_snr_z=float("inf"))
-    current, current_error = detect_yeast_events(signal, config)
+    # Pinned to the parameters the review was run under, so the comparison
+    # stays reproducible now that the preset no longer expands boundaries.
+    base = review_calibrated_detection_config_v1()
+    with_expansion = replace(
+        base, boundary_expansion_enabled=True, boundary_snr_z=REVIEWED_EXPANSION_SNR_Z
+    )
+    without_expansion = replace(base, boundary_expansion_enabled=False)
+    current, current_error = detect_yeast_events(signal, with_expansion)
     plain, plain_error = detect_yeast_events(signal, without_expansion)
     if current_error or plain_error:
         raise RuntimeError(f"detector failed for {record_id}: current={current_error!r}, plain={plain_error!r}")

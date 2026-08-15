@@ -1,9 +1,15 @@
 """Non-regression contract for detector_trace and the refactored detector.
 
-The golden candidate tuples below were captured by running
-detect_yeast_events with review_calibrated_detection_config_v1 on the four
-manifested review records BEFORE the detector_trace refactor. They pin the
-observable behaviour of the detector across the refactor.
+The golden candidate tuples pin detect_yeast_events under
+review_calibrated_detection_config_v1 on the four manifested review records.
+
+They were first captured before the detector_trace refactor and proved it
+behaviour-preserving. They were re-captured once, deliberately, when boundary
+expansion was switched off following review
+yeast-boundary-expansion-review-r2 (76 of 76 reviewed events labelled
+"extension_margin"). That change moved boundaries only: the event count and
+every quality label on these four records are the same before and after, and
+snr_proxy is bit-identical.
 """
 
 from __future__ import annotations
@@ -143,30 +149,30 @@ def test_detector_reason_codes_are_preserved() -> None:
 
 GOLDEN_CANDIDATES = {
     "9459e76ce29342debc90:00": [
-        (0, 8236, 6704, 9296, 2592, 1.296, 75.53513989790409, 0.9654530873826674,
-         0.3420297261327505, 2, 11718.75, 19531.25, 11718.75, "strict", ""),
+        (0, 8249, 6960, 9296, 2336, 1.168, 75.53513989790409, 0.9674661867386373,
+         0.4220391996204853, 2, 11718.75, 19531.25, 11718.75, "strict", ""),
     ],
     "214f4ce4967af98a954c:00": [
         (0, 5005, 4144, 5968, 1824, 0.912, 137.88375771241945, 0.9779900552479162,
          0.9680505990982056, 1, 7812.5, 7812.5, 7812.5, "strict", ""),
     ],
     "e1b4603f8b9de6204003:02": [
-        (0, 1926, 1328, 2512, 1184, 0.592, 5.066511954329469, 0.8635289797443678,
-         0.46220457553863525, 2, 11718.75, 19531.25, 11718.75, "reject",
+        (0, 1923, 1456, 2384, 928, 0.464, 5.066511954329469, 0.8850371830671583,
+         0.6668993681669235, 2, 11718.75, 19531.25, 19531.25, "reject",
          "quality_below_threshold"),
-        (1, 4682, 4144, 5200, 1056, 0.528, 4.6372648854562595, 0.8059275862999495,
-         0.8556122779846191, 1, 15625.0, 15625.0, 15625.0, "reject",
+        (1, 4673, 4272, 5072, 800, 0.4, 4.6372648854562595, 0.8579668343770815,
+         1.0000001192092896, 1, 15625.0, 15625.0, 15625.0, "reject",
          "quality_below_threshold"),
-        (2, 11783, 10416, 13136, 2720, 1.36, 429.0063412603064, 0.9821539563930546,
-         0.749121367931366, 1, 11718.75, 11718.75, 11718.75, "strict", ""),
-        (3, 14932, 14384, 15568, 1184, 0.592, 19.570400710359653, 0.9423069632398359,
-         0.9991697072982788, 1, 19531.25, 19531.25, 19531.25, "strict", ""),
+        (2, 11784, 10544, 13136, 2592, 1.296, 429.0063412603064, 0.9823605869852847,
+         0.7330341339111328, 1, 11718.75, 11718.75, 11718.75, "strict", ""),
+        (3, 14922, 14384, 15440, 1056, 0.528, 19.570400710359653, 0.9508561707536479,
+         0.9996846914291382, 1, 19531.25, 19531.25, 19531.25, "strict", ""),
     ],
     "09f788a7473797b794f6:01": [
         (0, 11189, 10288, 12112, 1824, 0.912, 87.9829139571677, 0.9723372135933122,
          0.7926072478294373, 1, 15625.0, 15625.0, 15625.0, "strict", ""),
-        (1, 12486, 11952, 13008, 1056, 0.528, 3.899382774331652, 0.8522155977636485,
-         0.9930859804153442, 1, 11718.75, 11718.75, 11718.75, "reject",
+        (1, 12478, 12080, 12880, 800, 0.4, 3.899382774331652, 0.8764158315152341,
+         0.9999999403953552, 1, 11718.75, 11718.75, 11718.75, "reject",
          "quality_below_threshold"),
     ],
 }

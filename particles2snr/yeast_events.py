@@ -18,6 +18,12 @@ class YeastDetectionConfig:
     stft_noverlap: int = 384
     smooth_frames: int = 3
     active_snr_z: float = 3.5
+    # Boundary expansion grows an event outwards while z stays above
+    # boundary_snr_z. Off by default: review yeast-boundary-expansion-review-r2
+    # judged the added region "extension_margin" on 76 of 76 reviewed events,
+    # never once "extension_signal". The threshold is kept so the comparison
+    # that produced that verdict stays reproducible.
+    boundary_expansion_enabled: bool = False
     boundary_snr_z: float = 1.5
     medium_min_snr: float = 3.0
     strict_min_snr: float = 5.0
@@ -48,9 +54,13 @@ def review_calibrated_detection_config_v1() -> YeastDetectionConfig:
     traces of the bead development corpus produced byte-identical detections
     with and without it, so activation is stated in terms of z alone rather
     than carrying a term that never changes an outcome.
+
+    Boundary expansion is off. Review yeast-boundary-expansion-review-r2
+    labelled the extended region "extension_margin" on 76 of 76 reviewed
+    events, so the event keeps the frames activation selected, plus the pad.
     """
     return YeastDetectionConfig(
-        boundary_snr_z=1.5,
+        boundary_expansion_enabled=False,
         medium_min_snr=12.0,
         strict_min_snr=12.0,
         active_min_concentration=0.0,
@@ -261,9 +271,12 @@ def event_bounds(trace: DetectorTrace, n_samples: int) -> list[EventBounds]:
     pad = int(round(config.boundary_pad_ms / 1000.0 * config.sampling_frequency_hz))
     bounds: list[EventBounds] = []
     for group_left, group_right in _group_active_frames(trace.active, max_gap):
-        left, right = _expand_bounds(
-            group_left, group_right, trace.energy_z, config.boundary_snr_z
-        )
+        if config.boundary_expansion_enabled:
+            left, right = _expand_bounds(
+                group_left, group_right, trace.energy_z, config.boundary_snr_z
+            )
+        else:
+            left, right = group_left, group_right
         window = config.stft_nperseg
         bounds.append(
             EventBounds(
