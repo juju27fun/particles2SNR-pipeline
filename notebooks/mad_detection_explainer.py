@@ -181,9 +181,26 @@ for row in comparison["rows"]:
 # Read the last two columns. To gain nine events over MAD, the maximal-recall
 # setting proposes **89 % more boxes**, lights up **seven traces a human
 # verified as empty**, and resolves **one of seven** two-particle loci instead
-# of seven. It does not find events better; it finds everything, and the
-# cleaning cascade of the previous figure is what has to sort it out
-# afterwards.
+# of seven. It does not find events better; it finds everything.
+#
+# And the two-particle column is where the argument closes, because it is the
+# multi-crest case of the introduction, measured on real loci. Below, each row
+# is one human locus containing **exactly two particles** (green), against
+# what each detector proposed (cyan):
+
+# %%
+Image(filename=str(
+    workspace.root / "artifacts/cross-project/reviews"
+    / "particle-p2-noise-pareto-closure-result-r6/assets/capture-01/source.png"
+), width=1100)
+
+# %% [markdown]
+# Same loci, three detectors, read row by row. MAD returns one box per locus,
+# every time. P2SNR at maximal recall shatters the same loci into three, four,
+# five proposals — the exact fragmentation the notebook opened on, no longer
+# argued from one yeast record but counted over the frozen audit. There is no
+# setting that keeps both: cleaning up the fragmentation costs the recall that
+# justified it.
 #
 # *Retrospective, one acquisition family, on beads. The human labels fix the
 # number of particles per joined locus, not sample-precise boundaries — this
