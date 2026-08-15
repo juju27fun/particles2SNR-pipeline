@@ -394,6 +394,83 @@ def plot_activation(
     return ax
 
 
+def plot_grouping(
+    trace: DetectorTrace,
+    *,
+    group: tuple[int, int],
+    expanded: tuple[int, int],
+    ax: Axes | None = None,
+) -> Axes:
+    """z[m] with the activation run and the boundary expansion around it."""
+    ax = _single_axis(ax)
+    config = trace.config
+    x_ms = frame_axis_ms(trace)
+    half = 0.5 * trace.hop / config.sampling_frequency_hz * 1000.0
+    left, right = expanded
+    group_left, group_right = group
+    ax.axvspan(x_ms[left] - half, x_ms[right] + half, color=PALE_BLUE, zorder=0,
+               label="after boundary expansion")
+    ax.axvspan(x_ms[group_left] - half, x_ms[group_right] + half,
+               color=PALE_GREEN, zorder=1, label="activation run")
+    ax.plot(x_ms, trace.energy_z, color=PURPLE, linewidth=1.2, zorder=3)
+    ax.axhline(config.active_snr_z, color=RED, linestyle="--", linewidth=1.2,
+               label=f"detect: z = {config.active_snr_z}")
+    ax.axhline(config.boundary_snr_z, color=ORANGE, linestyle=":", linewidth=1.4,
+               label=f"delimit: z = {config.boundary_snr_z}")
+    ax.set_yscale("symlog", linthresh=1.0)
+    ax.set_xlim(x_ms[max(0, left - 12)], x_ms[min(x_ms.size - 1, right + 12)])
+    ax.set_xlabel("time [ms]")
+    ax.set_ylabel("z[m]")
+    ax.set_title(
+        f"frames {group_left}–{group_right} detected, extended to {left}–{right} "
+        f"while z stays above {config.boundary_snr_z}"
+    )
+    ax.legend(loc="upper right")
+    return ax
+
+
+def plot_ssl_crop(
+    signal: np.ndarray,
+    event,
+    config: YeastDetectionConfig,
+    *,
+    crop_length: int = 8192,
+    downsample_factor: int = 2,
+    ax: Axes | None = None,
+) -> Axes:
+    """The detected interval inside the fixed-length crop handed to the model."""
+    ax = _single_axis(ax)
+    values = np.asarray(signal)
+    centre = int(event.center_index)
+    crop_start = max(0, centre - crop_length // 2)
+    crop_end = min(values.size, crop_start + crop_length)
+    view = slice(max(0, crop_start - crop_length // 4),
+                 min(values.size, crop_end + crop_length // 4))
+    x_ms = (np.arange(view.start, view.stop) - centre) / config.sampling_frequency_hz * 1000.0
+
+    def to_ms(index: int) -> float:
+        return (index - centre) / config.sampling_frequency_hz * 1000.0
+
+    ax.axvspan(to_ms(crop_start), to_ms(crop_end), color=PALE_BLUE, zorder=0,
+               label=f"model crop · {crop_length} samples "
+                     f"({crop_length / config.sampling_frequency_hz * 1000:.3f} ms)")
+    ax.axvspan(to_ms(event.event_start), to_ms(event.event_end), color=PALE_GREEN,
+               zorder=1, label=f"detected event · {event.width_samples} samples "
+                               f"({event.width_ms:.3f} ms)")
+    ax.plot(x_ms, values[view], color=GREY, linewidth=0.6, zorder=3)
+    ax.axvline(0.0, color=NAVY, linewidth=1.0, linestyle="--", zorder=4,
+               label="energy-weighted centre")
+    ax.set_xlabel("time relative to the event centre [ms]")
+    ax.set_ylabel("amplitude [a.u.]")
+    output_length = crop_length // downsample_factor
+    ax.set_title(
+        f"One SSL example: {crop_length} samples cropped, downsampled x{downsample_factor} "
+        f"→ {output_length} points at {config.sampling_frequency_hz / downsample_factor / 1e6:.0f} MHz"
+    )
+    ax.legend(loc="upper right", fontsize=9)
+    return ax
+
+
 def plot_detected_events(
     signal: np.ndarray,
     events,

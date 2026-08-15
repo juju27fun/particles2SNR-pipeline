@@ -43,6 +43,7 @@ from internship_workspace.config import Workspace
 from particles2snr.yeast_events import (
     detect_yeast_events,
     detector_trace,
+    event_bounds,
     review_calibrated_detection_config_v1,
 )
 from particles2snr.yeast_particles2snr_comparison import (
@@ -180,16 +181,25 @@ fig.plot_trace_overview(record.signal, config, zoom_center=center);
 # - Nothing in the full view says *where* an event is — the eye picks the large
 #   excursion, but that is exactly the intuition the detector must formalise.
 #
-# The reviewed event occupies only a fraction of the record. We call its sample
+# The event occupies only a fraction of the record. We call its sample
 # interval the **temporal support**.
+#
+# **Where that support comes from, precisely** — this matters for everything
+# that follows. The interval below is not a boundary a human drew. It is the
+# detector's own proposal, which a reviewer then *confirmed*: the queue
+# records `review_event_present = yes`, `review_center_acceptable = yes`,
+# `review_full_event_visible = yes`, `reviewer = Julien`. So this record
+# certifies **that one complete event is there and the proposal is
+# acceptable** — not where its edges independently lie. Nothing in this
+# notebook can therefore be read as boundary accuracy.
 
 # %%
 fig.plot_event_support(record.signal, config,
                        event_start=event_start, event_end=event_end);
 
 # %% [markdown]
-# - The green span is the human-reviewed support: the target the detection
-#   chain must recover from the time series alone.
+# - The green span is that confirmed support: an interval a reviewer looked
+#   at and accepted as containing one complete event.
 
 # %% [markdown]
 # ## 2 · ISOLATE — the band-pass filter
@@ -647,10 +657,13 @@ fig.plot_detected_events(record.signal, record_events, config,
                          truth_spans_ms=[(event_start / 2e6 * 1000, event_end / 2e6 * 1000)]);
 
 # %% [markdown]
-# The green bar is the bounded event the notebook set out to produce, and it
-# lands on the human-reviewed support (pale green) it never saw. Sections 7
-# to 9 are how the z curve becomes that bar: which frames are selected, how
-# they are grouped, and how the boundaries are placed.
+# The green bar is the bounded event the notebook set out to produce. It
+# coincides exactly with the pale-green span — **and that is not a result**:
+# section 1 explained that the span *is* this detector's proposal, confirmed
+# by a reviewer. What the record establishes is that a human agreed there is
+# one complete event here; the interval's reproduction is arithmetic.
+# Sections 7 to 9 are how the z curve becomes that bar: which frames are
+# selected, how they are grouped, and how the boundaries are placed.
 #
 # *Method only · one manifested record · no claim of detector performance or
 # biological validity.*
@@ -692,6 +705,114 @@ def _explore(z_thr: float) -> None:
 # record is a sensitivity check, not a calibration.
 #
 # *Method only · one manifested record · no claim of detector performance or
+# biological validity.*
+
+# %% [markdown]
+# ## 8 · GROUP — from selected frames to one bounded event
+#
+# Section 7 leaves a set of frames. Turning them into an interval takes three
+# operations, each with one number from the preset.
+#
+# **1 · Bridge short gaps.** A passage can dip below the threshold for a frame
+# or two without ending. `cluster_gap_ms = 0.128 ms` becomes a tolerance in
+# frames: 0.128 ms × 2 MHz ÷ 128 samples per hop = **2 frames**. Runs
+# separated by at most that are one event.
+#
+# **2 · Extend the boundaries — with a *different* threshold.** The run stops
+# where z falls under 3.5, but the event does not: its tails are real signal
+# below the detection threshold. So the boundaries grow outwards while
+# z ≥ `boundary_snr_z` = **1.5**.
+#
+# > **Two thresholds on z, and it is deliberate.** 3.5 to *detect*, 1.5 to
+# > *delimit*. Detecting demands confidence — a false detection creates a
+# > wrong example. Delimiting demands generosity — a boundary cut too short
+# > truncates a real event that has already been accepted. One number cannot
+# > serve both, and the deck never comments on it.
+#
+# **3 · Pad.** `boundary_pad_ms = 0.04 ms` = **80 samples** on each side,
+# absorbing the fact that a frame is a 512-sample window, not an instant.
+
+# %%
+bounds, = event_bounds(trace, record.signal.size)
+group_left, group_right = bounds.group
+left, right = bounds.expanded
+print(f"activation run : frames {group_left}–{group_right}  ({group_right - group_left + 1} frames)")
+print(f"after expansion: frames {left}–{right}  (+{group_left - left} left, +{right - group_right} right)")
+fig.plot_grouping(trace, group=bounds.group, expanded=bounds.expanded);
+
+# %% [markdown]
+# On this record the run gains **two frames on the left and none on the
+# right**: the event rises gently and stops abruptly, and the asymmetric
+# boundary rule follows that shape instead of imposing a symmetric window.
+#
+# From frames to samples: the interval spans `left × hop` to
+# `right × hop + N`, then the pad is applied on both sides.
+
+# %%
+pad = round(config.boundary_pad_ms / 1000.0 * config.sampling_frequency_hz)
+print(f"frames {left}–{right} → samples [{left * trace.hop}, {right * trace.hop + config.stft_nperseg}]")
+print(f"with a {pad}-sample pad  → [{bounds.start}, {bounds.end}]"
+      f"   width {(bounds.end - bounds.start) / 2e6 * 1000:.3f} ms")
+print(f"detector output          → [{record_events[0].event_start}, {record_events[0].event_end}]")
+
+# %% [markdown]
+# ### 8a · Qualification — the interval still has to earn its label
+#
+# A bounded interval is a *candidate*. Four tests decide whether it becomes a
+# usable example, and unlike the legacy cascade they run **after** the event
+# exists, so a failure is reported against a localised object rather than
+# deleting a hypothesis:
+#
+# | Test | Preset | On this event |
+# |---|---|---|
+# | width within 0.06–2.0 ms | `min/max_width_ms` | 1.296 ms ✔ |
+# | max z over the event ≥ 12 | `strict/medium_min_snr` | 75.5 ✔ |
+# | event concentration ≥ 0.12 | `strict_min_concentration` | 0.965 ✔ |
+# | at most 5 events per trace | `max_events_per_signal` | 1 ✔ |
+#
+# All four pass, so the candidate is labelled `strict`. The slow particle of
+# section 4 failed the first one at 2.39 ms and was labelled `reject` — kept,
+# localised, and explained by a single named cap.
+#
+# *The event-level concentration here is not the frame-level quantity of the
+# activation rule: it is the share of the event's own excess held by its five
+# strongest bins, which is why it sits near 1 rather than near a threshold.*
+
+# %% [markdown]
+# ## 9 · CROP — the bounded event becomes a training example
+#
+# The detector's interval has a variable width; a model needs a fixed-length
+# input. The dataset contract (`yeast-event-8192to4096-bandpass-global-v1`)
+# resolves that in two steps, and they are different in kind:
+#
+# 1. **A fixed window in time** — 8192 samples (4.096 ms) centred on the
+#    event's energy-weighted centre, *not* on the middle of its interval. The
+#    detected event sits inside, with context on both sides.
+# 2. **A change of resolution** — that window is band-passed and downsampled
+#    by 2, giving **4096 points at 1 MHz**. The duration is unchanged; only
+#    the sampling rate is.
+#
+# The "8192to4096" in the contract name is that second step. It is a
+# resolution change, not a second, narrower window — an easy misreading.
+
+# %%
+fig.plot_ssl_crop(record.signal, record_events[0], config);
+
+# %% [markdown]
+# - Pale green: the detected event, 2 592 samples. Pale blue: the 8 192-sample
+#   window handed to the model. Dashed line: the energy-weighted centre.
+# - Why the crop is wider than the event: a model given only the event would
+#   never see what ordinary signal looks like, and the boundary itself would
+#   become a learnable artefact. The margin carries that context.
+# - Why centring is on the energy-weighted centre rather than the interval's
+#   midpoint: the interval is asymmetric (section 8), so its midpoint drifts
+#   away from where the energy actually is.
+#
+# This is the answer to the notebook's opening question. A time series went
+# in; one fixed-length, bounded, centred example comes out — with a quality
+# label and a documented provenance chain.
+#
+# *Method only · one confirmed record · no claim of detector performance or
 # biological validity.*
 
 # %% [markdown]

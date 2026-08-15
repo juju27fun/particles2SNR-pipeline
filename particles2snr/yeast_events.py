@@ -239,6 +239,40 @@ def _expand_bounds(left: int, right: int, energy_z: np.ndarray, threshold: float
     return left, right
 
 
+@dataclass(frozen=True)
+class EventBounds:
+    """The grouping stage, one entry per candidate, in pipeline order."""
+
+    group: tuple[int, int]      # frames selected by activation, gaps bridged
+    expanded: tuple[int, int]   # after growing outwards while z >= boundary_snr_z
+    start: int                  # sample bound, padding applied
+    end: int
+
+
+def event_bounds(trace: DetectorTrace, n_samples: int) -> list[EventBounds]:
+    """Group active frames into candidates and resolve their sample bounds."""
+    config = trace.config
+    max_gap = max(
+        0,
+        int(round(config.cluster_gap_ms / 1000.0 * config.sampling_frequency_hz / trace.hop)),
+    )
+    pad = int(round(config.boundary_pad_ms / 1000.0 * config.sampling_frequency_hz))
+    bounds: list[EventBounds] = []
+    for group_left, group_right in _group_active_frames(trace.active, max_gap):
+        left, right = _expand_bounds(
+            group_left, group_right, trace.energy_z, config.boundary_snr_z
+        )
+        bounds.append(
+            EventBounds(
+                group=(group_left, group_right),
+                expanded=(left, right),
+                start=max(0, left * trace.hop - pad),
+                end=min(int(n_samples), right * trace.hop + config.stft_nperseg + pad),
+            )
+        )
+    return bounds
+
+
 def _frequency_peaks(
     power: np.ndarray, frequencies: np.ndarray, config: YeastDetectionConfig
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -317,27 +351,21 @@ def detect_yeast_events(
     frame_energy = trace.frame_energy
     energy_median = trace.energy_median
     energy_z = trace.energy_z
-    active = trace.active
     hop = trace.hop
-    max_gap = max(
-        0,
-        int(round(config.cluster_gap_ms / 1000.0 * config.sampling_frequency_hz / hop)),
-    )
-    groups = _group_active_frames(active, max_gap)
-    if not groups:
+    bounds = event_bounds(trace, raw.size)
+    if not bounds:
         return [], "no_active_time_frequency_group"
 
-    pad = int(round(config.boundary_pad_ms / 1000.0 * config.sampling_frequency_hz))
     half_window = config.stft_nperseg // 2
     candidates: list[YeastEventCandidate] = []
-    for left, right in groups:
-        left, right = _expand_bounds(left, right, energy_z, config.boundary_snr_z)
+    for candidate_bounds in bounds:
+        left, right = candidate_bounds.expanded
         frames = np.arange(left, right + 1, dtype=np.int64)
         centers = frames.astype(np.float64) * hop + half_window
         weights = np.maximum(frame_energy[frames] - energy_median, 0.0)
         center = int(round(np.average(centers, weights=weights))) if np.sum(weights) > 0 else int(round(np.mean(centers)))
-        event_start = max(0, left * hop - pad)
-        event_end = min(raw.size, right * hop + config.stft_nperseg + pad)
+        event_start = candidate_bounds.start
+        event_end = candidate_bounds.end
         width = int(event_end - event_start)
         if width <= 0:
             continue
