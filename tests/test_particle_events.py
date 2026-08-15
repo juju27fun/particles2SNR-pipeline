@@ -80,6 +80,24 @@ def test_config_fingerprint_is_stable_and_sensitive() -> None:
     assert config_fingerprint(config) != config_fingerprint(
         replace(config, unified_rescue_enabled=True)
     )
+    assert config_fingerprint(config) != config_fingerprint(
+        replace(config, boundary_expansion_enabled=False)
+    )
+
+
+def test_boundary_expansion_can_be_disabled_without_changing_event_identity() -> None:
+    signal = _signal(8_000)
+    expanded, _ = detect_particle_events(signal, _permissive())
+    activation_only, _ = detect_particle_events(
+        signal,
+        replace(_permissive(), boundary_expansion_enabled=False),
+    )
+    assert len(expanded) == len(activation_only) == 1
+    assert expanded[0].quality == activation_only[0].quality == "retained"
+    assert expanded[0].event_start <= activation_only[0].event_start
+    assert expanded[0].event_end >= activation_only[0].event_end
+    assert expanded[0].width_samples > activation_only[0].width_samples
+    assert abs(expanded[0].center_index - activation_only[0].center_index) < 256
 
 
 def test_unified_rescue_interpolates_the_predeclared_physical_limits() -> None:

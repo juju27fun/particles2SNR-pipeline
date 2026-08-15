@@ -23,6 +23,11 @@ class ParticleDetectionConfig:
     stft_noverlap: int = 384
     smooth_frames: int = 3
     active_z: float = 3.5
+    # Legacy particle datasets expanded each active run while z stayed above
+    # boundary_z. Keep that behaviour as the compatibility default so frozen
+    # dataset fingerprints remain reproducible; new datasets can disable it
+    # explicitly and retain only the z >= active_z frames plus the fixed pad.
+    boundary_expansion_enabled: bool = True
     boundary_z: float = 1.5
     acceptance_z: float = 12.0
     active_min_concentration: float = 0.0
@@ -102,6 +107,11 @@ class ParticleDetectionDiagnostics:
 
 def config_fingerprint(config: ParticleDetectionConfig) -> str:
     values = asdict(config)
+    if config.boundary_expansion_enabled:
+        # The field did not exist when the reviewed particle configurations
+        # were frozen. Omitting the legacy-true value preserves their exact
+        # fingerprints while false creates a distinct configuration identity.
+        values.pop("boundary_expansion_enabled")
     if not config.deblend_enabled:
         # Preserve the exact fingerprint of the already-reviewed legacy detector.
         for field in (
@@ -421,10 +431,14 @@ def _deblended_regions(
     config: ParticleDetectionConfig,
     hop: int,
 ) -> list[tuple[int, int, int | None, int | None]]:
-    expanded = [
-        _expand_group(left, right, diagnostics.energy_z, config.boundary_z)
-        for left, right in groups
-    ]
+    expanded = (
+        [
+            _expand_group(left, right, diagnostics.energy_z, config.boundary_z)
+            for left, right in groups
+        ]
+        if config.boundary_expansion_enabled
+        else list(groups)
+    )
     merged = _merge_overlapping_groups(expanded)
     regions: list[tuple[int, int, int | None, int | None]] = []
     for left, right in merged:
@@ -708,10 +722,20 @@ def detect_particle_events(
     if config.deblend_enabled:
         candidate_regions = _deblended_regions(groups, diagnostics, config, hop)
     else:
-        candidate_regions = [
-            (*_expand_group(left, right, diagnostics.energy_z, config.boundary_z), None, None)
-            for left, right in groups
-        ]
+        candidate_regions = (
+            [
+                (
+                    *_expand_group(
+                        left, right, diagnostics.energy_z, config.boundary_z
+                    ),
+                    None,
+                    None,
+                )
+                for left, right in groups
+            ]
+            if config.boundary_expansion_enabled
+            else [(left, right, None, None) for left, right in groups]
+        )
     for left, right, hard_left, hard_right in candidate_regions:
         frames = np.arange(left, right + 1, dtype=np.int64)
         weights = np.maximum(
