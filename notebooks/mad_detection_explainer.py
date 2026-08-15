@@ -746,16 +746,27 @@ fig.plot_grouping(trace, group=bounds.group, expanded=bounds.expanded);
 # boundary rule follows that shape instead of imposing a symmetric window.
 #
 # From frames to samples: the interval spans `left × hop` to
-# `right × hop + N`, then the pad is applied on both sides.
+# `right × hop + N`, then the pad is applied on both sides. Zoomed on the
+# event, the three stages are visible one under the other — at full record
+# scale they would be a single line.
 
 # %%
-pad = round(config.boundary_pad_ms / 1000.0 * config.sampling_frequency_hz)
-print(f"frames {left}–{right} → samples [{left * trace.hop}, {right * trace.hop + config.stft_nperseg}]")
-print(f"with a {pad}-sample pad  → [{bounds.start}, {bounds.end}]"
-      f"   width {(bounds.end - bounds.start) / 2e6 * 1000:.3f} ms")
-print(f"detector output          → [{record_events[0].event_start}, {record_events[0].event_end}]")
+for label, (a, b) in (("activation run only", bounds.group_samples),
+                      ("after expansion    ", bounds.expanded_samples),
+                      ("after the pad      ", (bounds.start, bounds.end))):
+    print(f"{label}: [{a:5d}, {b:5d}]  {b - a:5d} samples  {(b - a) / 2e6 * 1000:.3f} ms")
+print(f"detector output      : [{record_events[0].event_start:5d}, {record_events[0].event_end:5d}]")
+fig.plot_boundary_stages(record.signal, bounds, config);
 
 # %% [markdown]
+# The green bar stops where activation stopped; the blue one reaches further
+# left, into signal that is clearly still part of the event but never crossed
+# z = 3.5; the purple one adds the fixed pad. Between the first and the last,
+# the interval grows by **416 samples**, 16 % of its final width — and that is
+# precisely the part a threshold tuned for confident detection would have cut
+# off. The event's onset does not stop being the event because it is quieter
+# than its peak.
+#
 # ### 8a · Qualification — the interval still has to earn its label
 #
 # A bounded interval is a *candidate*. Four tests decide whether it becomes a

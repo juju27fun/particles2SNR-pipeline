@@ -429,6 +429,55 @@ def plot_grouping(
     return ax
 
 
+def plot_boundary_stages(
+    signal: np.ndarray,
+    bounds,
+    config: YeastDetectionConfig,
+    *,
+    margin_samples: int = 900,
+    ax: Axes | None = None,
+) -> Axes:
+    """The candidate's interval at each of the three boundary stages.
+
+    Zoomed, because the expansion and the pad are a few hundred samples on a
+    16 384-sample record and are invisible at full scale.
+    """
+    ax = _single_axis(ax)
+    values = np.asarray(signal)
+    view = slice(max(0, bounds.start - margin_samples),
+                 min(values.size, bounds.end + margin_samples))
+    x_ms = np.arange(view.start, view.stop) / config.sampling_frequency_hz * 1000.0
+    ax.plot(x_ms, values[view], color=GREY, linewidth=0.6, zorder=3)
+    span = float(np.max(np.abs(values[view]))) or 1.0
+
+    def to_ms(index: int) -> float:
+        return index / config.sampling_frequency_hz * 1000.0
+
+    stages = (
+        (bounds.group_samples, GREEN, "activation run only"),
+        (bounds.expanded_samples, BLUE, f"after expansion (z ≥ {config.boundary_snr_z})"),
+        ((bounds.start, bounds.end), PURPLE, f"after {config.boundary_pad_ms} ms pad"),
+    )
+    for index, ((left, right), colour, label) in enumerate(stages):
+        y = -1.12 * span - 0.20 * span * index
+        ax.plot([to_ms(left), to_ms(right)], [y, y], color=colour, linewidth=7,
+                solid_capstyle="butt", label=f"{label} · {right - left} samples")
+        for edge in (left, right):
+            ax.axvline(to_ms(edge), color=colour, linewidth=0.8, alpha=0.45, zorder=1)
+    ax.set_ylim(-1.85 * span, 1.15 * span)
+    ax.set_xlabel("time [ms]")
+    ax.set_ylabel("amplitude [a.u.]")
+    grown = (bounds.end - bounds.start) - (
+        bounds.group_samples[1] - bounds.group_samples[0]
+    )
+    ax.set_title(
+        f"Boundaries stage by stage: the interval grows by {grown} samples "
+        f"({grown / config.sampling_frequency_hz * 1000:.3f} ms) after activation"
+    )
+    ax.legend(loc="upper right", fontsize=9)
+    return ax
+
+
 def plot_ssl_crop(
     signal: np.ndarray,
     event,

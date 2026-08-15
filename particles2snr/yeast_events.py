@@ -243,9 +243,11 @@ def _expand_bounds(left: int, right: int, energy_z: np.ndarray, threshold: float
 class EventBounds:
     """The grouping stage, one entry per candidate, in pipeline order."""
 
-    group: tuple[int, int]      # frames selected by activation, gaps bridged
-    expanded: tuple[int, int]   # after growing outwards while z >= boundary_snr_z
-    start: int                  # sample bound, padding applied
+    group: tuple[int, int]           # frames selected by activation, gaps bridged
+    expanded: tuple[int, int]        # after growing outwards while z >= boundary_snr_z
+    group_samples: tuple[int, int]   # the run alone, in samples, unpadded
+    expanded_samples: tuple[int, int]  # after expansion, in samples, unpadded
+    start: int                       # final sample bound, padding applied
     end: int
 
 
@@ -262,12 +264,15 @@ def event_bounds(trace: DetectorTrace, n_samples: int) -> list[EventBounds]:
         left, right = _expand_bounds(
             group_left, group_right, trace.energy_z, config.boundary_snr_z
         )
+        window = config.stft_nperseg
         bounds.append(
             EventBounds(
                 group=(group_left, group_right),
                 expanded=(left, right),
+                group_samples=(group_left * trace.hop, group_right * trace.hop + window),
+                expanded_samples=(left * trace.hop, right * trace.hop + window),
                 start=max(0, left * trace.hop - pad),
-                end=min(int(n_samples), right * trace.hop + config.stft_nperseg + pad),
+                end=min(int(n_samples), right * trace.hop + window + pad),
             )
         )
     return bounds

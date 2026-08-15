@@ -13,6 +13,7 @@ from particles2snr.yeast_detector_figures import (
     plot_activation,
     plot_bandpass,
     plot_concentration,
+    plot_boundary_stages,
     plot_detected_events,
     plot_concentration_toy,
     plot_energy_and_z,
@@ -77,6 +78,9 @@ def test_every_helper_renders_and_returns_axes(example) -> None:
         plot_robust_band(trace, both=True),
         plot_detected_events(signal, [], config),
     ]
+    from particles2snr.yeast_events import event_bounds
+
+    produced.append(plot_boundary_stages(signal, event_bounds(trace, signal.size)[0], config))
     for axes in produced:
         first = axes.flat[0] if isinstance(axes, np.ndarray) else axes
         assert first.figure is not None
