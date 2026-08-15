@@ -1901,18 +1901,22 @@ def draw_dimension_quantiles(published, recomputed, extended, class_order,
         axes[0].plot(dimensions,
                      [100 * entry["coverage"][class_name] for entry in published["sweep"]],
                      marker="o", ls="--", lw=1.4, alpha=0.55,
-                     color=class_colour[class_name], label=f"{class_name} · q95 (published)")
+                     color=class_colour[class_name])
         axes[0].plot(dimensions, [100 * recomputed[d][class_name] for d in dimensions],
-                     marker="D", lw=1.8, color=class_colour[class_name],
-                     label=f"{class_name} · q80")
+                     marker="D", lw=1.8, color=class_colour[class_name])
+    handles = [plt.Line2D([], [], color=class_colour[c], lw=2.0, label=c)
+               for c in class_order]
+    handles += [plt.Line2D([], [], color="#64748b", lw=1.4, ls="--", label="q95 · published"),
+                plt.Line2D([], [], color="#64748b", lw=1.8, label="q80 · recomputed")]
     axes[0].axvspan(12, 16, color="#e2e8f0", zorder=0)
-    axes[0].text(0.965, 0.04, "published\nplateau band", ha="right", va="bottom",
-                 fontsize=8, color="#64748b", transform=axes[0].transAxes)
+    axes[0].annotate("published plateau band", xy=(14, 1.0),
+                     xycoords=("data", "axes fraction"), xytext=(0, 4),
+                     textcoords="offset points", ha="center", fontsize=8, color="#64748b")
     axes[0].set(xlabel="retained PCA dimensions", ylabel="coverage (%)",
-                xticks=dimensions,
-                title="The sweep still reports q95 while the chain reports q80")
-    axes[0].title.set_fontsize(10)
-    axes[0].legend(frameon=False, fontsize=6.5, ncol=2, loc="lower left")
+                xticks=dimensions)
+    axes[0].set_title("The sweep still reports q95 while the chain reports q80",
+                      fontsize=10, pad=16)
+    axes[0].legend(handles=handles, frameon=False, fontsize=7, ncol=1, loc="lower left")
 
     grid = sorted(extended)
     auc_axis = axes[1].twinx()
@@ -1923,12 +1927,12 @@ def draw_dimension_quantiles(published, recomputed, extended, class_order,
                       marker="s", ms=3.5, ls=(0, (4, 3)), lw=1.2,
                       color=class_colour[class_name])
     axes[1].axvline(16, color="#0f172a", lw=1.0, ls=(0, (2, 3)))
-    axes[1].text(0.20, 0.03, "16 · the frozen choice", fontsize=8, color="#0f172a",
-                 transform=axes[1].transAxes)
+    axes[1].annotate("the frozen choice", xy=(16, 1.0),
+                     xycoords=("data", "axes fraction"), xytext=(0, 4),
+                     textcoords="offset points", ha="center", fontsize=8, color="#0f172a")
     axes[1].set(xlabel="retained PCA dimensions", ylabel="coverage % at q80 (solid)",
-                xticks=grid,
-                title="Past sixteen, both quantities resume moving")
-    axes[1].title.set_fontsize(10)
+                xticks=grid)
+    axes[1].set_title("Past sixteen, both quantities resume moving", fontsize=10, pad=16)
     auc_axis.set_ylabel("domain AUC (dashed)")
     auc_axis.spines[["top"]].set_visible(False)
     for axis in axes:
