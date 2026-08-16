@@ -24,7 +24,7 @@
 # tune, or select new test examples. MAD v2.1 intervals are deterministic
 # teacher pseudo-labels, not independent physical truth.
 
-# %%
+# %% tags=["hide-input"] jupyter={"source_hidden": true}
 import csv
 import json
 
@@ -67,7 +67,7 @@ from internship_workspace.particle_detection_cascade_figures import (
 )
 from p0.models import ProposalAwareROIClassifier
 
-# %%
+# %% tags=["hide-input"] jupyter={"source_hidden": true}
 workspace = Workspace.load()
 dataset_record, dataset_root = resolve_registered_dataset(workspace)
 assert dataset_record.key == DATASET_KEY
@@ -148,7 +148,7 @@ assert np.isclose(swin_operating_point["deployment_threshold"], 0.39910898756890
 # repaired saturation before annotation and removed proposals centred inside a
 # repaired interval. The trace identities and split assignments stayed fixed.
 
-# %%
+# %% tags=["hide-input"] jupyter={"source_hidden": true}
 with (dataset_root / "source_manifest.csv").open(newline="", encoding="utf-8") as handle:
     v21_sources = list(csv.DictReader(handle))
 v21_empty_traces = sum(
@@ -231,7 +231,7 @@ display(
 # (IoU) with a reference box reaches 0.5; **mAP** is the mean AP over the three
 # size classes.
 
-# %%
+# %% tags=["hide-input"] jupyter={"source_hidden": true}
 training_table = [
     "| Training choice | Frozen value |",
     "|---|---:|",
@@ -239,11 +239,7 @@ training_table = [
     f"| Model | `{historical['backbone']} + {historical['head']}` · "
     f"`{historical['total_params']:,}` parameters |",
     f"| Input / output grid | `{historical['input_length']:,}` samples / `512` cells |",
-    f"| Optimizer | `{historical['optimizer']}` · LR `{historical['learning_rate']}` · "
-    f"weight decay `{historical['weight_decay']}` |",
-    f"| Schedule | cosine · batch `{historical['batch_size']}` · "
-    f"at most `{historical['epochs']}` epochs |",
-    f"| Selection | seed `{historical['seed']}` · best epoch `{historical['best_epoch']}` |",
+    "| Selection | best validation checkpoint |",
 ]
 display(Markdown("\n".join(training_table)))
 
@@ -259,7 +255,7 @@ plt.show()
 
 # %% [markdown]
 # ## Resolution in one page
-# ### 1 · Start from the diagnostic
+# ### A · Start from the diagnostic
 #
 # **Why was good localisation not enough?** The initial Swin–YOLO found most
 # 10 µm events, but frequently called them 4 µm. This dissociation showed that
@@ -272,7 +268,7 @@ plt.show()
 # 6,144 samples, enough to cover a complete MAD box.
 
 # %% [markdown]
-# ### 2 · The useful experimental path
+# ### B · The useful experimental path
 #
 # | Stage | Question | Conclusion |
 # |---|---|---|
@@ -285,7 +281,7 @@ plt.show()
 # only the experiments needed to understand each transition.
 
 # %% [markdown]
-# ### 3 · Separate ranking performance from the operating point
+# ### C · Separate ranking performance from the operating point
 #
 # **Ranking performance.** Before operating calibration, `L1 + R2` reaches
 # **63.0%** mAP@0.5, **80.6%** Event AP, and **53.3%** AP 10 µm on validation.
@@ -297,6 +293,16 @@ plt.show()
 # MAD-empty traces. The decision order was fixed before reading the result:
 # macro-F1, precision, AP 10 µm, then the highest threshold. It selects
 # `L + R2`.
+#
+# ```text
+# Four folds: choose a threshold under the 10% budget
+#                                        ↓
+# Held-out fold: evaluate it once → rotate the held-out fold → aggregate
+# ```
+#
+# Thus every reported cross-fit prediction is evaluated with a threshold chosen
+# without that trace. A separate threshold is fitted on all validation traces
+# only after the arm has been selected for deployment.
 
 # %%
 operating_result_path = (
@@ -312,7 +318,7 @@ axis.axis("off")
 plt.show()
 
 # %% [markdown]
-# ### 4 · Operating conclusion and boundary
+# ### D · Operating conclusion and boundary
 #
 # | Cross-fit measurement | `L + R2` |
 # |---|---:|
@@ -363,7 +369,7 @@ plt.show()
 # a location. Neither guarantees the correct size class. The validation example
 # below makes that distinction concrete without reopening a test waveform.
 
-# %%
+# %% tags=["hide-input"] jupyter={"source_hidden": true}
 ten_micron = historical["test_per_class_prf"][2]
 confusion_10um = historical["test_confusion_at_f1"][2]
 assert ten_micron["support"] == 175 and ten_micron["tp"] == 14
@@ -414,7 +420,7 @@ plt.show()
 # the tensors during a real forward pass rather than relying on copied
 # dimensions.
 
-# %%
+# %% tags=["hide-input"] jupyter={"source_hidden": true}
 detector = rebuild_model(historical).cpu()
 shape_contract = inspect_detector_shapes(detector, input_length=historical["input_length"])
 assert shape_contract.total_parameters == historical["total_params"]
@@ -471,7 +477,7 @@ plt.show()
 # The cells below verify those facts from the frozen analyses. The detailed
 # preprocessing sweep is intentionally not reproduced here.
 
-# %%
+# %% tags=["hide-input"] jupyter={"source_hidden": true}
 preprocessing_root = workspace.artifacts_root / "cross-project/particle-preprocessing-comparison-results-r1"
 preprocessing_summary = json.loads(
     (preprocessing_root / "summary.json").read_text(encoding="utf-8")
@@ -533,6 +539,19 @@ remapped_targets = remap_targets_class_agnostic(toy_targets)
 assert torch.equal(remapped_targets[0][:, 1:], toy_targets[0][:, 1:])
 assert torch.equal(remapped_targets[0][:, 0], torch.zeros(2))
 
+toy_class_names = ("2 µm", "4 µm", "10 µm")
+toy_rows = [
+    "| Toy event | Multiclass target | L1 target | Centre / width |",
+    "|---|---|---|---:|",
+]
+for index, (before, after) in enumerate(zip(toy_targets[0], remapped_targets[0]), start=1):
+    l1_target = "event" if int(after[0]) == 0 else f"class {int(after[0])}"
+    toy_rows.append(
+        f"| {index} | {toy_class_names[int(before[0])]} | {l1_target} | "
+        f"{before[1]:.2f} / {before[2]:.2f} |"
+    )
+display(Markdown("\n".join(toy_rows)))
+
 l1_model = build_detector("swin1d", num_classes=1, head="yolo").cpu()
 l1_contract = inspect_detector_shapes(l1_model, input_length=16_384)
 assert l1_contract.output_shape == (1, 4, 512)
@@ -572,7 +591,8 @@ plot_l1_r2_design(
 plt.show()
 
 # %% [markdown]
-# The final score for class \(k\) is
+# Let \(o\) be the objectness predicted by the localiser. The final score for
+# class \(k\) is
 #
 # \[
 # s_k=o\,P(\mathrm{event}\mid\mathrm{ROI})\,
@@ -610,11 +630,14 @@ plt.show()
 # rather than in the pedagogical narrative.
 
 # %% [markdown]
-# ## 6 · Final comparison
+# ## 6 · Descriptive replication on the historical test split
 #
 # `B1 + R1` is the factorial reference on MAD v2.1, not the original MAD v1
 # detector from section 0. The four arms below differ only by localiser and ROI
-# classifier within the final experimental framework.
+# classifier within the final experimental framework. This historically
+# consumed test split checks whether the validation conclusion remains
+# descriptively coherent; it does not select a second system or replace the
+# validation-calibrated `L + R2` operating point reported above.
 
 # %%
 results = final_arm_results(final_summary)
@@ -635,11 +658,11 @@ display(Markdown(
 ))
 
 # %% [markdown]
-# The result answers the original paradox: explicit ROI aggregation recovered
-# class information, class-agnostic training improved localisation, and the R2
-# event head supplied the background decision missing from R1. The full cascade
-# reached **60.9% macro-F1** and **60.8% event precision** at its frozen
-# operating threshold.
+# This replication supports the same answer to the original paradox: explicit
+# ROI aggregation recovered class information, class-agnostic training improved
+# localisation, and the R2 event head supplied the background decision missing
+# from R1. The full cascade reached **60.9% macro-F1** and **60.8% event
+# precision** at its frozen operating threshold.
 #
 # The aggregate gain is real, but it does not mean every event type or operating
 # condition is solved. The final section examines what remains difficult.
@@ -685,7 +708,7 @@ display(Markdown(
 # `10 µm → 4 µm` error, and the highest-objectness proposal rejected on a
 # MAD-empty trace. They illustrate behaviour; they do not add test evidence.
 
-# %%
+# %% tags=["hide-input"] jupyter={"source_hidden": true}
 r2_development_root = (
     workspace.artifacts_root
     / "cross-project/remote-pfcalcul/20260816_mad_swin_fpr_inputs/extra"
