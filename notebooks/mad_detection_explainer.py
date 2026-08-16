@@ -1,10 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
-#     formats: py:percent
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.5
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -741,7 +743,7 @@ fig.plot_detected_events(near_floor, near_events, config);
 # development choice rather than a discovered constant. Elsewhere in the
 # corpus an event reaches **z = 11.7** and is rejected for it; move the floor
 # by 0.3 and it becomes a training label.
-
+#
 # On the yeast corpus, every rejection that is not a width comes down to
 # that z floor.
 #
