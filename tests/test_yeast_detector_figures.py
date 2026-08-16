@@ -123,3 +123,22 @@ def test_activation_shading_matches_the_grouped_interval(example) -> None:
     bounds, = event_bounds(trace, 16384)
     assert bounds.group == (left, right)
     assert bounds.group_samples == (left * trace.hop, right * trace.hop + config.stft_nperseg)
+
+
+def test_fixed_threshold_reports_each_gain_and_draws_the_shared_line(example) -> None:
+    """The point of the figure is one line across curves that moved."""
+    signal, config, trace = example
+    from particles2snr.yeast_detector_figures import plot_fixed_threshold
+    from particles2snr.yeast_events import detector_trace
+
+    threshold = 0.5 * float(trace.frame_energy.max())
+    entries = [(label, detector_trace(signal * factor, config))
+               for label, factor in (("original", 1.0), ("gain x3", 3.0), ("gain /3", 1 / 3))]
+    axis = plot_fixed_threshold(entries, threshold)
+    labels = [text.get_text() for text in axis.get_legend().get_texts()]
+    assert len(labels) == len(entries) + 1  # one per gain, plus the threshold
+    # Amplitude x3 is power x9, so more frames clear a threshold that did not move.
+    counts = [int((item.frame_energy >= threshold).sum()) for _label, item in entries]
+    assert counts[1] > counts[0] > counts[2]
+    assert axis.get_yscale() == "log"
+    plt.close("all")

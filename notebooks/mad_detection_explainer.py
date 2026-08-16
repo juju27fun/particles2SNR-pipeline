@@ -393,38 +393,41 @@ fig.plot_legacy_vs_energy(demo, replay=replay_tone, truth_spans_ms=[(4.6, 5.4)],
 #
 # ### 6a · Why a threshold on E[m] cannot be written down
 #
-# The candidate rule is: *flag every frame whose energy reaches V*. Recall
-# from section 3 that a frame is one column of the spectrogram, 64 µs of
-# trace, so the number of flagged frames is simply **how much of the record
-# the rule calls "event"** — the detector will settle on 14 frames; this
-# hand-picked V flags only the 4 around the peak.
+# The candidate rule is the obvious one: **flag every frame whose energy
+# reaches some fixed value**. Recall from section 3 that a frame is one column
+# of the spectrogram, 64 µs of trace, so the number of flagged frames is simply
+# how much of the record the rule calls "event".
 #
-# Take V at half the event's peak on this record — as good a hand-picked
-# value as any — and apply that *same* V to the same trace recorded with
-# three times more gain, and three times less. Nothing about the particle
-# changes; only the recording chain does.
+# Pick that value at half the event's peak on this record — as good a
+# hand-picked choice as any — then apply the *same* value to the same trace
+# recorded with three times more gain, and three times less. Nothing about the
+# particle changes; only the recording chain does.
 
 # %%
-V = 0.5 * trace.frame_energy.max()
-for label, factor in (("original", 1.0), ("gain x3", 3.0), ("gain /3", 1 / 3)):
-    scaled = detector_trace(record.signal * factor, config)
-    flagged = int((scaled.frame_energy >= V).sum())
-    print(f"{label:9s}: the rule 'E >= V' flags {flagged:3d} frames out of {scaled.times.size}")
+energy_threshold = 0.5 * trace.frame_energy.max()
+gains = [(label, detector_trace(record.signal * factor, config))
+         for label, factor in (("original", 1.0), ("gain x3", 3.0), ("gain /3", 1 / 3))]
+fig.plot_fixed_threshold(gains, energy_threshold);
 
 # %% [markdown]
-# Same particle, same physics, three different answers — and at one third of
-# the gain the rule finds **nothing at all**. V is not a bad choice; *any*
-# fixed energy value has this defect. The rule has to be expressed relative
-# to the trace it is applied to, which means estimating two things from the
-# trace itself:
+# The three curves are the same particle. The red line is the same threshold on
+# all three. Turning up the gain lifts the whole curve — noise floor included —
+# over a line that stayed put, so the rule calls **16 frames** an event instead
+# of 4. Turning it down drops the entire curve underneath: **the rule finds
+# nothing at all**, on a trace where the particle is perfectly visible.
+#
+# The chosen value is not a bad one; *any* fixed energy value has this defect,
+# because energy units are a property of the recording chain and not of the
+# particle. The rule has to be expressed relative to the trace it is applied
+# to, which means estimating two things from the trace itself:
 #
 # 1. its **ordinary level** — what E[m] looks like when nothing happens;
 # 2. its **spread** — how much E[m] normally wanders around that level.
 #
-# Both estimates must survive the presence of the event: if the event drags
-# its own reference upwards, it hides itself. That requirement — not
-# tradition — is why the next two subsections use the median and the MAD
-# rather than the mean and the standard deviation.
+# Both estimates must survive the presence of the event: if the event drags its
+# own reference upwards, it hides itself. That requirement — not tradition — is
+# why the next subsection uses the median and the MAD rather than the mean and
+# the standard deviation.
 #
 # ### 6b · Two statistics the event cannot move
 #
@@ -448,6 +451,8 @@ def mad(values: np.ndarray) -> float:
     return float(np.median(np.abs(values - np.median(values))))
 
 
+print(f"calm       : {calm.astype(int)}")
+print(f"one event  : {with_event.astype(int)}   (only the last frame differs)\n")
 print(f"{'':<20}{'calm':>9}{'one event':>12}{'change':>10}")
 print("-" * 51)
 for name, statistic in (("mean", np.mean), ("standard deviation", np.std),
@@ -491,10 +496,10 @@ print(f"\ndistances to the median: {np.sort(np.abs(with_event - np.median(with_e
 # transformation z is *not* meant to survive.
 
 # %%
-print(f"{'recording':<12}{'flagged by E >= V':>19}{'flagged by z >= 3.5':>21}")
+print(f"{'recording':<12}{'flagged by the fixed value':>27}{'flagged by z >= 3.5':>21}")
 for label, factor in (("original", 1.0), ("gain x3", 3.0), ("gain /3", 1 / 3)):
     scaled = detector_trace(record.signal * factor, config)
-    print(f"{label:<12}{int((scaled.frame_energy >= V).sum()):>19}"
+    print(f"{label:<12}{int((scaled.frame_energy >= energy_threshold).sum()):>27}"
           f"{int((scaled.energy_z >= config.active_snr_z).sum()):>21}")
 
 gained = detector_trace(record.signal * 3.0, config)

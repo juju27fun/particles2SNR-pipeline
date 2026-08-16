@@ -263,6 +263,37 @@ def plot_frame_energy(
     return axes
 
 
+def plot_fixed_threshold(
+    entries,
+    threshold: float,
+    *,
+    ax: Axes | None = None,
+) -> Axes:
+    """The same trace at several gains, under one fixed energy threshold.
+
+    ``entries`` is a sequence of ``(label, trace)``. One horizontal line is
+    drawn at the same energy value on every curve, so the figure shows what a
+    printed count cannot: the particle never changed, but the curve slid under
+    or over a line that stayed put. Log scale, because a gain of 3 on the
+    amplitude is a factor 9 on the energy.
+    """
+    ax = _single_axis(ax)
+    shades = (BLUE, PURPLE, TEAL)
+    for (label, item), colour in zip(entries, shades):
+        above = int((item.frame_energy >= threshold).sum())
+        ax.semilogy(frame_axis_ms(item), np.maximum(item.frame_energy, 1e-30),
+                    color=colour, linewidth=1.1,
+                    label=f"{label} — {above} frame(s) above")
+    ax.axhline(threshold, color=RED, linestyle="--", linewidth=1.4,
+               label="one fixed energy threshold")
+    ax.set_xlabel("time [ms]")
+    ax.set_ylabel("E[m], log scale")
+    ax.set_title("Same particle, same threshold, three recordings")
+    ax.set_ylim(top=float(max(item.frame_energy.max() for _label, item in entries)) * 40.0)
+    ax.legend(loc="upper left", fontsize=9, ncol=2)
+    return ax
+
+
 def plot_robust_band(
     trace: DetectorTrace,
     *,
