@@ -57,13 +57,16 @@ from internship_workspace.particle_detection_cascade_figures import (
     inspect_detector_shapes,
     oracle_crop_facts,
     plot_ap_ranking,
+    plot_b1_r1_design,
     plot_conditioned_classification_task,
     plot_grid_responsibility,
     plot_localized_misclassification,
     plot_preprocessing_deltas,
     plot_zscore_scale_invariance,
     preprocessing_results,
+    roi_training_facts,
     select_localized_misclassification,
+    validation_arm_results,
 )
 
 # %%
@@ -457,3 +460,79 @@ plt.show()
 # > **Reading checkpoint.** A reader should now be able to list which unknowns
 # > the oracle supplies, explain why macro-F1 and detector mAP are not directly
 # > comparable, and state what proposal-centred ROI classification must recover.
+
+# %% [markdown]
+# ## 5 · Common proposals B1 and the first ROI classifier R1
+#
+# To test the class head without moving any box, the experiment created one
+# **common proposal set**. The retrained B0 detector emitted 512 dense cells;
+# class-agnostic non-maximum suppression (NMS) ranked them by objectness,
+# removed boxes overlapping above IoU 0.5, and retained at most 20 per trace.
+#
+# - **B1** kept the detector's native class probabilities.
+# - **R1** replaced only those probabilities with a Conv1DGAP-S prediction from
+#   a 6,144-sample, proposal-centred, locally z-scored crop.
+#
+# Both used the same box and objectness, with class score
+# $s_k=o\,p(k)$ for objectness $o$ and class $k$.
+
+# %%
+b1_root = (
+    workspace.artifacts_root
+    / "cross-project/remote-pfcalcul/notebook-cascade-section1-source-r1/extra"
+    / "artifacts/cross-project/particle-mad-v21-common-proposals-b1-r1"
+)
+b1_run = json.loads((b1_root / "run.json").read_text(encoding="utf-8"))
+roi_input_run = json.loads((b1_root / "roi_inputs/run.json").read_text(encoding="utf-8"))
+threshold_selection = json.loads((b1_root / "threshold_selection.json").read_text(encoding="utf-8"))
+assert b1_run["status"] == "complete"
+assert b1_run["dataset"] == DATASET_KEY
+assert roi_input_run["splits_loaded"] == ["train", "val"]
+r1_crop_facts = roi_training_facts(roi_input_run)
+validation_results = validation_arm_results(threshold_selection)
+
+figure, axis = plt.subplots(figsize=(11.5, 4.0), constrained_layout=True)
+plot_b1_r1_design(r1_crop_facts, ax=axis)
+plt.show()
+
+# %% [markdown]
+# R1 training used the detector's distribution whenever possible: **2,856 of
+# 2,921 crops** were centred on a proposal matched to the GT at IoU ≥ 0.5. The
+# remaining **65** used a GT-centred fallback so every train/validation event
+# contributed. All crops contained the complete support; none had zero
+# variance. The fallback existed only for training—there is no GT centre at
+# inference.
+#
+# The validation operating points were frozen before test access:
+
+# %%
+validation_table = [
+    "| Arm | Event precision | Macro-F1 | 10 µm recall | 10→4 µm | Localised events |",
+    "|---|---:|---:|---:|---:|---:|",
+]
+for result in validation_results:
+    validation_table.append(
+        f"| {result.arm} | {result.event_precision:.1%} | {result.macro_f1:.1%} | "
+        f"{result.recall_10um:.1%} | {result.ten_to_four_rate:.1%} | "
+        f"{result.localized_events} |"
+    )
+display(Markdown("\n".join(validation_table)))
+
+# %% [markdown]
+# On validation, replacing only the class probabilities raised event precision
+# from **51.9% to 56.2%**, macro-F1 from **56.5% to 58.9%**, and 10 µm recall
+# from **39.8% to 61.2%**. The localised `10 µm → 4 µm` confusion fell from
+# **43.5% to 4.2%**. This was the first direct evidence that explicit regional
+# aggregation recovered useful class information.
+#
+# It was not yet a complete detector solution. R1 was trained only on event
+# crops, so it learned $P(k\mid\mathrm{event},\mathrm{ROI})$ but not whether a
+# proposal was background. Its 10 µm precision at this validation threshold was
+# only **35.3%**, and fewer events survived the higher operating threshold. The
+# next section examines why a classifier that fixes class confusion can still
+# leave the end-to-end cascade insufficient.
+#
+# > **Reading checkpoint.** A reader should now be able to explain why B1/R1 is
+# > a causal class-head comparison, where the 65 GT fallbacks are allowed, and
+# > which validation gains support ROI aggregation without proving a final
+# > detector.
