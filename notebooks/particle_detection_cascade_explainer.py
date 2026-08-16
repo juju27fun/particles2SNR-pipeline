@@ -76,6 +76,8 @@ analysis_ids = (
     "particle-mad-causal-diagnostic-analysis-r1",
     "particle-mad-v21-b0-b1-r1-analysis-r1",
     "particle-mad-v21-final-cascade-analysis-r1",
+    "particle-mad-v21-backbone-roi-fpr-analysis-r1",
+    "particle-mad-v21-swin-fpr-operating-analysis-r1",
 )
 for run_id in analysis_ids:
     run = json.loads(
@@ -89,13 +91,58 @@ print(
     + " events. Frozen analyses verified."
 )
 
+backbone_summary = json.loads(
+    (
+        workspace.artifacts_root
+        / "cross-project/particle-mad-v21-backbone-roi-fpr-analysis-r1"
+        / "metrics/summary.json"
+    ).read_text(encoding="utf-8")
+)
+operating_summary = json.loads(
+    (
+        workspace.artifacts_root
+        / "cross-project/particle-mad-v21-swin-fpr-operating-analysis-r1"
+        / "metrics/summary.json"
+    ).read_text(encoding="utf-8")
+)
+swin_l_r2_ranking = backbone_summary["families"]["swin1d"]["L_R2"][
+    "ranking_metrics"
+]
+swin_operating_point = operating_summary["operating_point"]
+swin_l_r2_crossfit = operating_summary["primary_results"]["L_R2"]["crossfit"]
+swin_crossfit_event = swin_l_r2_crossfit["held_out_event_metrics"]
+swin_crossfit_ranking = swin_l_r2_crossfit[
+    "held_out_ranking_metrics_after_threshold"
+]
+swin_crossfit_empty = swin_l_r2_crossfit["held_out_empty_traces"]
+
+assert operating_summary["splits_loaded"] == ["val"]
+assert operating_summary["test_loaded"] is False
+assert swin_operating_point["selected_arm"] == "L_R2"
+assert np.isclose(swin_l_r2_ranking["mAP@0.5"], 0.6302749869594989)
+assert np.isclose(
+    swin_l_r2_ranking["class_agnostic_event_AP@0.5"], 0.8060108577863514
+)
+assert np.isclose(
+    swin_l_r2_ranking["per_class_AP@0.5"]["10um"], 0.5331330346781183
+)
+assert np.isclose(swin_crossfit_empty["activation_rate"], 7 / 86)
+assert np.isclose(swin_crossfit_event["macro_f1"], 0.6205238738475591)
+assert np.isclose(swin_crossfit_event["event_precision"], 0.7246376811594203)
+assert np.isclose(swin_crossfit_event["event_recall"], 0.5543237250554324)
+assert np.isclose(swin_crossfit_ranking["mAP@0.5"], 0.48228247784018125)
+assert np.isclose(
+    swin_crossfit_ranking["per_class_AP@0.5"]["10um"], 0.471413940322664
+)
+assert np.isclose(swin_operating_point["deployment_threshold"], 0.39910898756890506)
+
 # %% [markdown]
 # ## 0 · What was trained, on what, and how
 #
 # Each input is a **16,384-sample 1-D trace**. A MAD detector supplies event
 # intervals, which become YOLO boxes; the acquisition folder supplies the
-# 2/4/10 µm class. A trace with no retained MAD interval remains a genuine
-# negative example.
+# 2/4/10 µm class. A trace with no retained MAD interval remains a negative
+# example under that teacher reference.
 #
 # The initial experiment used MAD v1. The later cascade used MAD v2.1, which
 # repaired saturation before annotation and removed proposals centred inside a
@@ -209,6 +256,100 @@ plt.show()
 # The baseline reached **42.3% mAP@0.5**, but AP 10 µm was only **12.2%**, far
 # below AP 2 µm and AP 4 µm. The rest of the notebook explains this specific
 # failure, then rebuilds the system on the corrected MAD v2.1 reference.
+
+# %% [markdown]
+# ## Resolution in one page
+# ### 1 · Start from the diagnostic
+#
+# **Why was good localisation not enough?** The initial Swin–YOLO found most
+# 10 µm events, but frequently called them 4 µm. This dissociation showed that
+# the signal required for localisation was present, while the class head had no
+# aggregation explicitly aligned with the complete event.
+#
+# Two corrections structured the resolution. The source and pseudo-labels were
+# first stabilised in **MAD v2.1**. The task was then split between a
+# class-agnostic localiser and a region-of-interest (**ROI**) classifier seeing
+# 6,144 samples, enough to cover a complete MAD box.
+
+# %% [markdown]
+# ### 2 · The useful experimental path
+#
+# | Stage | Question | Conclusion |
+# |---|---|---|
+# | B0/B1/R1 | Does an event-covering ROI improve classification? | Yes, but R1 does not reject background well enough. |
+# | L1/R2 | Should localisation and classification be separated? | Yes: class-agnostic localisation plus proposal-aware ROI. |
+# | Backbones | Is the conclusion specific to Swin? | Class-agnostic localisation is robust; the ROI gain is most convincing with Swin. |
+# | False-positive rate (FPR) | Which system should operate in practice? | `L + R2`, at threshold `0.3991`. |
+#
+# This summary replaces a chronology of jobs. The following sections retain
+# only the experiments needed to understand each transition.
+
+# %% [markdown]
+# ### 3 · Separate ranking performance from the operating point
+#
+# **Ranking performance.** Before operating calibration, `L1 + R2` reaches
+# **63.0%** mAP@0.5, **80.6%** Event AP, and **53.3%** AP 10 µm on validation.
+# Event AP measures localisation ranking without requiring the correct size
+# class. Swin remains the best backbone family for this system.
+#
+# **Operating point.** Thresholds are then calibrated by deterministic
+# five-fold cross-validation under a primary budget of 10% activation on
+# MAD-empty traces. The decision order was fixed before reading the result:
+# macro-F1, precision, AP 10 µm, then the highest threshold. It selects
+# `L + R2`.
+
+# %%
+operating_result_path = (
+    workspace.artifacts_root
+    / "cross-project/reviews/particle-mad-v21-swin-fpr-operating-result-r1"
+    / "result.png"
+)
+assert operating_result_path.is_file()
+operating_result_image = plt.imread(operating_result_path)
+figure, axis = plt.subplots(figsize=(14.0, 8.5), constrained_layout=True)
+axis.imshow(operating_result_image)
+axis.axis("off")
+plt.show()
+
+# %% [markdown]
+# ### 4 · Operating conclusion and boundary
+#
+# | Cross-fit measurement | `L + R2` |
+# |---|---:|
+# | MAD-empty activation | **8.1%** |
+# | Macro-F1 | **62.1%** |
+# | Precision | **72.5%** |
+# | Recall | **55.4%** |
+# | mAP after thresholding | **48.2%** |
+# | AP 10 µm after thresholding | **47.1%** |
+# | Final threshold | **0.3991** |
+#
+# The change from 63.0% to 48.2% mAP is not a regression. The first number
+# measures global proposal ranking; the second describes the system after
+# cross-fit selection under the MAD-empty activation constraint.
+#
+# **Conclusion.** The results support a cascade: Swin localises without imposing
+# a class, then R2 rejects background and predicts size from the complete
+# support. `L + R2` favours macro-F1 balance and precision; `M + R2` retains
+# more recall and mAP, but gives a less balanced operating classification.
+#
+# Here, “FPR” means activation of traces without MAD v2.1 pseudo-GT, not a rate
+# measured on certified physical negatives. The next scientifically useful step
+# would therefore be an independent campaign with human-reviewed negatives.
+#
+# ```text
+# 10→4 confusion → complete ROI → separate localisation / classification
+#                → multi-backbone validation → false-alarm calibration
+# ```
+#
+# <details><summary>Reproducibility and artifacts</summary>
+#
+# Numbers are read from `particle-mad-v21-backbone-roi-fpr-analysis-r1` and
+# `particle-mad-v21-swin-fpr-operating-analysis-r1`. The figure is checkpoint
+# `particle-mad-v21-swin-fpr-operating-result-r1`. This summary is restricted to
+# validation; it loads no test signal.
+#
+# </details>
 
 # %% [markdown]
 # ## 1 · The problem: localised but misclassified
