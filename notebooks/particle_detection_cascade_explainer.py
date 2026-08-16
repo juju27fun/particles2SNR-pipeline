@@ -62,8 +62,10 @@ from internship_workspace.particle_detection_cascade_figures import (
     plot_grid_responsibility,
     plot_localized_misclassification,
     plot_preprocessing_deltas,
+    plot_r1_tradeoffs,
     plot_zscore_scale_invariance,
     preprocessing_results,
+    r1_intermediate_facts,
     roi_training_facts,
     select_localized_misclassification,
     validation_arm_results,
@@ -536,3 +538,62 @@ display(Markdown("\n".join(validation_table)))
 # > a causal class-head comparison, where the 65 GT fallbacks are allowed, and
 # > which validation gains support ROI aggregation without proving a final
 # > detector.
+
+# %% [markdown]
+# ## 6 · Why R1 remained insufficient
+#
+# The sealed B0/B1/R1 evaluation was opened once after thresholds and hashes
+# were frozen. It is an internal replication on a historically consumed test,
+# not independent confirmation. This section reads only its summary—no test
+# prediction or waveform is reopened.
+
+# %%
+intermediate_root = workspace.artifacts_root / "cross-project/particle-mad-v21-b0-b1-r1-analysis-r1"
+intermediate_run = json.loads((intermediate_root / "run.json").read_text(encoding="utf-8"))
+intermediate_summary = json.loads(
+    (intermediate_root / "metrics/summary.json").read_text(encoding="utf-8")
+)
+intermediate_decision = json.loads(
+    (
+        workspace.artifacts_root
+        / "cross-project/reviews/particle-mad-v21-b0-b1-r1-result-r1/review/decisions.json"
+    ).read_text(encoding="utf-8")
+)
+assert intermediate_run["status"] == "complete"
+assert intermediate_summary["test_opened_once"] is True
+assert intermediate_decision["complete"] is True
+r1_result = r1_intermediate_facts(intermediate_summary)
+
+figure, axis = plt.subplots(figsize=(10.5, 4.6), constrained_layout=True)
+plot_r1_tradeoffs(r1_result, ax=axis)
+plt.show()
+
+# %% [markdown]
+# The causal check passed exactly: B1 and R1 had the same **71.0% class-agnostic
+# Event AP**, because they used identical boxes and objectness. R1 changed only
+# the class ranking. It raised class-aware mAP from **42.4% to 46.6%** and AP
+# 10 µm from **26.6% to 34.5%**, while reducing `10 µm → 4 µm` sharply.
+#
+# But the paired R1−B1 mAP gain was **+4.3 points with IC95
+# [−0.3; +9.9]**: the interval included zero. At the selected operating point,
+# proposal recall also fell from **83.8% to 75.8%**. Better conditional classes
+# did not create better boxes or recover missed events.
+#
+# ### The background-rejection warning
+#
+# On 164 MAD-v2.1-empty traces, activation fell from **31.1% for B1 to 20.1%
+# for R1** at each arm's own validation-selected threshold. However, R1 used a
+# much higher threshold (0.522 versus 0.402). At the common B0 threshold, R1
+# activated **37.8%** of empty traces versus **30.5%** for B1. The classifier
+# had changed score calibration; it had not learned an explicit event-versus-
+# background decision.
+#
+# The human checkpoint was therefore recorded as **`conditionally_supported`**:
+# ROI aggregation was supported, but localisation and background rejection
+# remained insufficient, and R1 was not retained as the final system. This
+# diagnosis directly motivated two orthogonal changes: a class-agnostic
+# localiser L1 and a proposal-aware classifier R2 with an explicit event head.
+#
+# > **Reading checkpoint.** A reader should now be able to separate geometry,
+# > class ranking, score calibration, and background rejection—and explain why
+# > correcting `10 µm → 4 µm` was necessary but not sufficient.
