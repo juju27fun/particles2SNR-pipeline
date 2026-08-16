@@ -58,6 +58,9 @@ from internship_workspace.particle_detection_cascade_figures import (
     plot_ap_ranking,
     plot_grid_responsibility,
     plot_localized_misclassification,
+    plot_preprocessing_deltas,
+    plot_zscore_scale_invariance,
+    preprocessing_results,
     select_localized_misclassification,
 )
 
@@ -315,3 +318,79 @@ plt.show()
 # > tensor shapes, explain why there are 512 raw candidate locations, and state
 # > precisely what regional aggregation the initial head does and does not
 # > perform.
+
+# %% [markdown]
+# ## 3 · Did preprocessing or crop length explain the failure?
+#
+# Per-window z-scoring applies
+#
+# \[
+# z(x)=\frac{x-\mu_x}{\sigma_x}.
+# \]
+#
+# For a positive global scale factor $a$, $z(ax)=z(x)$. Absolute amplitude,
+# root-mean-square level, and global energy therefore disappear. Timing,
+# frequency, asymmetry, and the relative envelope can remain.
+
+# %%
+toy_time = np.linspace(-1.0, 1.0, 600)
+toy_signal = np.exp(-3.0 * toy_time**2) * np.sin(2 * np.pi * 12 * toy_time)
+figure, axes = plt.subplots(1, 2, figsize=(12, 3.0), constrained_layout=True)
+plot_zscore_scale_invariance(toy_signal, axes=axes)
+plt.show()
+
+# %% [markdown]
+# This made preprocessing a serious candidate: if bead size was encoded mainly
+# by absolute signal scale, the detector never received that cue. The decisive
+# comparison kept the same **2,481 isolated MAD v1 events**, Conv1DGAP-S model
+# family, splits, and three seeds, and changed only the input representation.
+# It used the already-consumed 475-event historical test, so it is a diagnostic
+# comparison—not independent validation.
+
+# %%
+preprocessing_root = workspace.artifacts_root / "cross-project/particle-preprocessing-comparison-results-r1"
+preprocessing_run = json.loads((preprocessing_root / "run.json").read_text(encoding="utf-8"))
+preprocessing_summary = json.loads(
+    (preprocessing_root / "summary.json").read_text(encoding="utf-8")
+)
+assert preprocessing_run["run_id"] == "particle-preprocessing-comparison-results-r1"
+assert preprocessing_run["status"] == "complete"
+assert preprocessing_summary["population"]["isolated_test_events"] == 475
+representation_results = preprocessing_results(preprocessing_summary)
+
+table = [
+    "| Input representation | Macro-F1 | 10 µm recall | 10→4 µm | Gain [95% CI] |",
+    "|---|---:|---:|---:|---:|",
+]
+for index, result in enumerate(representation_results):
+    gain = "reference" if index == 0 else (
+        f"{100 * result.macro_f1_delta:+.1f} "
+        f"[{100 * result.ci95_low:+.1f}, {100 * result.ci95_high:+.1f}]"
+    )
+    table.append(
+        f"| {result.label} | {result.macro_f1:.1%} | {result.recall_10um:.1%} | "
+        f"{result.ten_to_four_rate:.1%} | {gain} |"
+    )
+display(Markdown("\n".join(table)))
+
+# %%
+figure, axis = plt.subplots(figsize=(9.5, 3.2), constrained_layout=True)
+plot_preprocessing_deltas(representation_results, ax=axis)
+plt.show()
+
+# %% [markdown]
+# Local z-scoring recovered much of the 10 µm signal: recall rose from **62.9%
+# to 78.5%**, and `10 µm → 4 µm` fell from **17.3% to 9.9%**. The best overall
+# arm—the shorter filtered P0 representation—gained **4.3 macro-F1 points**.
+# Yet every arm remained below the pre-registered **+7 point** causal gate; the
+# 4,096-sample arm's confidence interval also included zero.
+#
+# **Conclusion.** Preprocessing mattered, but it did not explain the historical
+# gap by itself. The result supported preserving more local event information;
+# it did not justify another preprocessing sweep or establish that amplitude
+# loss was the principal cause. The next question is why an oracle crop is a
+# fundamentally easier classification input than a full trace.
+#
+# > **Reading checkpoint.** A reader should now be able to say exactly what
+# > z-scoring removes, quantify the improvement, and explain why a real gain can
+# > still be a negative causal result.
