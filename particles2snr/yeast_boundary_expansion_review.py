@@ -20,6 +20,7 @@ ANCHOR_RECORD_ID = "9459e76ce29342debc90"
 GROUP_QUOTAS = {"mix": 40, "shmoo2": 25, "budding": 25, "shmoo": 10}
 VERDICTS = ("extension_signal", "extension_margin", "uncertain")
 REVIEWED_EXPANSION_SNR_Z = 1.5
+REVIEWED_BOUNDARY_PAD_MS = 0.04
 
 
 def _candidate_payload(candidate: Any) -> dict[str, Any]:
@@ -74,8 +75,14 @@ def detector_positive(signal: np.ndarray) -> bool:
 
 def compare_trace(signal: np.ndarray, *, record_id: str, source_group: str) -> list[dict[str, Any]]:
     # Pinned to the parameters the review was run under, so the comparison
-    # stays reproducible now that the preset no longer expands boundaries.
-    base = review_calibrated_detection_config_v1()
+    # stays reproducible now that the preset neither expands boundaries nor
+    # pads them. boundary_pad_ms is pinned to the reviewed 0.04 for the same
+    # reason as boundary_snr_z: the preset has since moved to 0.0, and letting
+    # that through would shift both arms of this comparison by 80 samples per
+    # side and stop it reproducing the r2 artifact.
+    base = replace(
+        review_calibrated_detection_config_v1(), boundary_pad_ms=REVIEWED_BOUNDARY_PAD_MS
+    )
     with_expansion = replace(
         base, boundary_expansion_enabled=True, boundary_snr_z=REVIEWED_EXPANSION_SNR_Z
     )
