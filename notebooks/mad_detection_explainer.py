@@ -379,49 +379,6 @@ fig.plot_legacy_vs_energy(demo, replay=replay_tone, truth_spans_ms=[(4.6, 5.4)],
 # - The energy chain (bottom) never created the problem: the tone lives in
 #   the baseline, so there was nothing to clean.
 #
-# ### The other side of the gate — a real but atypical particle
-#
-# Those cleaning gates are calibrated for *typical* particles: fitted boxes
-# t₀ ± 2.5τ must fall within 0.08–1.5 ms, passage times within 0.07–0.65 ms.
-# Now a toy with an unusually **slow, weak particle** (9 kHz, long envelope)
-# next to a normal fast one:
-
-# %%
-rng = np.random.default_rng(5)
-slow = 0.35 * np.exp(-0.5 * ((t - 2.5e-3) / 4.0e-4) ** 2) * np.sin(2 * np.pi * 9e3 * t)
-fast = np.exp(-0.5 * ((t - 6.0e-3) / 2.0e-4) ** 2) * np.sin(2 * np.pi * 30e3 * t)
-slow_signal = (slow + fast + 0.02 * rng.normal(size=t.size)).astype(np.float32)
-slow_trace = detector_trace(slow_signal, config)
-replay_slow = replay_particles2snr_on_synthetic(
-    slow_signal, truth_start=3400, truth_end=6600, frequency_hz=9e3)
-slow_events, slow_reason = detect_yeast_events(slow_signal, config)
-assert not slow_reason, slow_reason
-fig.plot_legacy_vs_energy(slow_trace, replay=replay_slow, mad_events=slow_events,
-                          truth_spans_ms=[(1.7, 3.3), (5.6, 6.4)]);
-
-# %% [markdown]
-# - The legacy pipeline *sees* the slow particle at the raw stage — then the
-#   **box-width gate deletes it** (its fitted box is longer than 1.5 ms), and
-#   the final output contains only the fast particle: one box, no trace of
-#   the other event.
-# - The MAD chain **returns both intervals** — and marks the slow one
-#   `reject`, because at 2.176 ms it exceeds the 2.0 ms qualification cap.
-#   What differs from the legacy is the bookkeeping: there the hypothesis
-#   vanished inside a cascade; here the event is localised, scored and
-#   rejected by one named cap you can read, argue with, or change.
-# - **Read the widths honestly, though.** The declared truths are 1.6 ms
-#   (slow) and 0.8 ms (fast); MAD's intervals are 2.176 ms and 1.472 ms. On
-#   these smooth Gaussian envelopes the energy tails cross z = 3.5 well
-#   beyond the declared span, so MAD's boundaries run wide — nearly ×2 on
-#   the *normal* particle. The rejection above is that boundary width
-#   colliding with the cap, at least as much as the particle's atypicality.
-#   ("Running on your own data" decomposes that width, term by term.)
-# - The z maxima printed on the bars (≈1.6·10³ and 1.5·10⁴) are what
-#   near-noiseless synthetic signals produce; the real record of section 1
-#   peaks at z = 75.5. Thresholds like "max z ≥ 12" live at real-noise
-#   scale, not at toy scale.
-# - This is a constructed illustration, not a prevalence claim.
-
 # %% [markdown]
 # ## 6 · NORMALISE — median and MAD ★
 #
@@ -469,194 +426,146 @@ for label, factor in (("original", 1.0), ("gain x3", 3.0), ("gain /3", 1 / 3)):
 # tradition — is why the next two subsections use the median and the MAD
 # rather than the mean and the standard deviation.
 #
-# ### 6b · The ordinary level: a median the event cannot move
+# ### 6b · Two statistics the event cannot move
 #
-# A toy series of 7 frames, one of which contains an event:
-
-# %%
-toy = np.array([1, 1, 1, 2, 2, 2, 20], dtype=float)
-calm = np.array([1, 1, 1, 2, 2, 2, 2], dtype=float)
-print(f"with outlier   : mean = {toy.mean():.3f}   median = {np.median(toy):.0f}")
-print(f"without outlier: mean = {calm.mean():.3f}   median = {np.median(calm):.0f}")
-
-# %% [markdown]
-# Replacing **one** value out of seven moves the mean by +164 % and the median
-# by 0 %. The mean follows the event; the median stays with the majority.
-# **Piece 1 acquired**: median(E) is an ordinary level the event cannot drag
-# upwards.
+# Both numbers must be read off the trace *while the event is in it*. So the
+# test is simple: compute each one on a calm series, then again after a single
+# frame lights up, and see which ones move.
 #
-# ### 6c · The spread: a MAD the event cannot inflate
-#
-# Knowing the ordinary level is not enough. It tells us where the middle is,
-# not **how far from the middle a frame must be before it counts as
-# surprising**. On a calm trace a rise of 3 units is enormous; on a restless
-# one it is nothing. So we need a second number: the typical size of the
-# wandering around the level.
-#
-# Every level comes with its natural companion measure of spread, built the
-# same way the level was:
+# Every level comes with a companion measure of spread, built the same way:
 #
 # | Level | Its companion spread | Built as |
 # |---|---|---|
 # | mean | standard deviation | square every distance to the mean, average, take the square root |
 # | median | **MAD** = *median absolute deviation* | the **median** distance to the median |
-#
-# We rejected the mean in 6b because a single event drags it. The standard
-# deviation is worse: it squares each distance before averaging, so the one
-# large distance dominates the result — the event would inflate the very
-# scale meant to measure it. Taking the median of the distances, exactly as
-# we took the median of the values, keeps that from happening:
-#
-# MAD(E) = median over frames i of |E_i − median(E)|
-#
-# On the same seven-value toy, the distances to the median are:
 
 # %%
-distances = np.abs(toy - np.median(toy))
-print("distances to the median:", np.sort(distances))
-print(f"MAD = {np.median(distances):.2f}   (std of the same series = {toy.std():.2f})")
+calm = np.array([4, 5, 5, 6, 5, 4, 6], dtype=float)
+with_event = np.array([4, 5, 5, 6, 5, 4, 40], dtype=float)   # one frame lights up
+
+
+def mad(values: np.ndarray) -> float:
+    return float(np.median(np.abs(values - np.median(values))))
+
+
+print(f"{'':<20}{'calm':>9}{'one event':>12}{'change':>10}")
+print("-" * 51)
+for name, statistic in (("mean", np.mean), ("standard deviation", np.std),
+                        ("median", np.median), ("MAD", mad)):
+    before, after = float(statistic(calm)), float(statistic(with_event))
+    print(f"{name:<20}{before:>9.2f}{after:>12.2f}{(after - before) / before * 100:>9.0f} %")
+print(f"\ndistances to the median: {np.sort(np.abs(with_event - np.median(with_event)))}")
 
 # %% [markdown]
-# The large distance (18) exists but cannot occupy the middle of the sorted
-# list. That is what robustness means here — not a formula, a *position in a
-# sort*. Compare the two scales on the same seven values: the MAD says the
-# series normally wanders by 1, the standard deviation says 6.5 — inflated
-# more than sixfold by the single value we are trying to detect.
-# **Piece 2 acquired.**
+# One value out of seven changed. The mean nearly doubled and the standard
+# deviation grew fifteenfold — the event inflated the very scale meant to
+# measure it. **The median and the MAD did not move at all.**
 #
-# ### 6d · z: the two pieces assembled
+# The last line says why, and it is the whole idea: the large distance (35)
+# exists, but it cannot occupy the *middle* of the sorted list. Robustness here
+# is not a formula, it is a position in a sort. Squaring, as the standard
+# deviation does, has the opposite effect — it hands the single largest
+# distance control of the result.
 #
-# We now have the two numbers 6a asked for, both read off the trace itself,
-# both unmoved by the event they are meant to measure:
+# **Both pieces acquired**: median(E) is an ordinary level the event cannot
+# drag upwards, MAD(E) an ordinary wandering it cannot inflate.
 #
-# - the ordinary level, **median(E)** — piece 1, from 6b;
-# - the ordinary wandering, **MAD(E)** — piece 2, from 6c.
+# ### 6c · z, and what it survives
 #
-# Assembling them is one subtraction and one division. Measure how far a
-# frame is above the level, then express that distance *in units of the
-# wandering* instead of in units of energy:
+# Assembling them is one subtraction and one division. Measure how far a frame
+# is above the level, then express that distance *in units of the wandering*
+# instead of in units of energy:
 #
 # $$ z[m] \;=\; \underbrace{\frac{E[m] - \mathrm{median}(E)}{\vphantom{X}}}_{\text{how far above ordinary}} \Bigg/ \underbrace{\big(1.4826 \times \mathrm{MAD}(E)\big)}_{\text{one ordinary wandering}} $$
 #
-# (The 1.4826 is a scale convention, explained in 6f; it changes nothing to
-# the reasoning here.) The essential point is what happens to the units:
-# numerator and denominator are **both in energy units, so they cancel**.
-# z[m] is a pure number, and that is precisely what 6a could not obtain:
+# (The 1.4826 is a scale convention, explained in 6d; it changes nothing here.)
+# The essential point is what happens to the units: numerator and denominator
+# are **both in energy units, so they cancel**. z[m] is a pure number, which is
+# exactly what 6a could not obtain:
 #
 # > **z[m] = how many ordinary wanderings above its own ordinary level this
 # > frame sits.**
 #
-# One estimation detail, stated once because every z in this notebook —
-# thresholds included — lives on it: E[m] was smoothed over 3 frames back in
-# section 5, *before* the median and the MAD are taken. The scale therefore
-# measures the wandering of the smoothed series, which is smaller than the
-# raw frame-to-frame noise — so z values are larger than they would be
-# against unsmoothed frames. The convention is consistent (detection and
-# thresholds share it), but z magnitudes are not comparable to a smoothing-
-# free implementation.
-#
-# Triple the gain and the energy, the level and the wandering all scale
-# together — the ratio cannot move. So the rule "z ≥ 3.5" means the same
-# thing on every recording, where "E ≥ V" did not. Here is 6a's broken
-# experiment, run again with both rules side by side:
+# The cell below puts that to three tests: 6a's broken experiment run again
+# with both rules, then the underlying identity to numerical precision, then a
+# transformation z is *not* meant to survive.
 
 # %%
-print(f"{'recording':<12}{'frames flagged by E >= V':>26}{'frames flagged by z >= 3.5':>28}")
-print("-" * 66)
+print(f"{'recording':<12}{'flagged by E >= V':>19}{'flagged by z >= 3.5':>21}")
 for label, factor in (("original", 1.0), ("gain x3", 3.0), ("gain /3", 1 / 3)):
     scaled = detector_trace(record.signal * factor, config)
-    above_v = int((scaled.frame_energy >= V).sum())
-    above_z = int((scaled.energy_z >= config.active_snr_z).sum())
-    print(f"{label:<12}{above_v:>26}{above_z:>28}")
+    print(f"{label:<12}{int((scaled.frame_energy >= V).sum()):>19}"
+          f"{int((scaled.energy_z >= config.active_snr_z).sum()):>21}")
+
+gained = detector_trace(record.signal * 3.0, config)
+assert np.allclose(gained.energy_z, trace.energy_z, rtol=1e-4, atol=1e-6)
+print(f"\namplitude x3 -> E[m] x{np.median(gained.frame_energy / trace.frame_energy):.0f}, "
+      f"but max |delta z| = {float(np.max(np.abs(gained.energy_z - trace.energy_z))):.1e}")
+
+rng = np.random.default_rng(1)
+extra = rng.normal(scale=3.0 * float(record.signal.std()),
+                   size=record.signal.size).astype(np.float32)
+noisy = detector_trace(record.signal + extra, config)
+print(f"adding noise instead -> peak z falls from {trace.energy_z.max():.1f} "
+      f"to {noisy.energy_z.max():.1f}")
 
 # %% [markdown]
 # Read the two columns downwards. The energy rule answers **4, then 16, then
 # 0** — it disagrees with itself about a particle that never changed. The z
-# rule answers **14, 14, 14**.
+# rule answers **14, 14, 14**. Amplitude ×3 means power ×9, so E[m], its median
+# and its MAD all scale by 9 together and the ratio cannot move: the identity
+# holds to 10⁻⁴.
 #
-# That is the whole reason z exists, and it is worth stating plainly: **z is
-# not a new measurement of the signal. It is E[m] in a different unit** — a
-# unit each trace derives from its own quiet stretches. Changing unit is what
-# makes a threshold portable; it adds no information and detects nothing by
-# itself.
+# The last line is the honest limit. z is **not** invariant to added noise, and
+# should not be: the MAD follows the noise floor up, so the same event stands
+# out less. z measures contrast against *this trace's* noise floor — a gain
+# change preserves it, a noisier recording does not.
 #
-# ### 6e · On the real signal
+# So z is worth stating plainly: **it is not a new measurement of the signal,
+# it is E[m] in a different unit** — one each trace derives from its own quiet
+# stretches. Changing unit is what makes a threshold portable; it adds no
+# information and detects nothing by itself.
+#
+# One estimation detail, stated once because every z in this notebook lives on
+# it: E[m] was smoothed over 3 frames in section 5, *before* the median and the
+# MAD are taken. The scale therefore measures the wandering of the smoothed
+# series, which is smaller than raw frame-to-frame noise, so z values run
+# larger than they would against unsmoothed frames. The convention is
+# consistent, but z magnitudes are not comparable to a smoothing-free
+# implementation.
+#
+# ### 6d · On the real signal, and where 1.4826 comes from
 #
 # Zoomed to the noise floor, because at full scale both bands are a single
-# line. The event's peak sits at z = 75.5 — with the 1.4826 factor of the
-# next subsection, that is 75.5 × 1.4826 ≈ **112 raw-MAD widths** above the
-# median, far off this axis:
+# line. The event's peak sits at z = 75.5 — that is 75.5 × 1.4826 ≈ **112
+# raw-MAD widths** above the median, far off this axis:
 
 # %%
 fig.plot_robust_band(trace, both=True);
 
 # %% [markdown]
 # **Vocabulary, fixed once and for all.** The two purple bands are the two
-# quantities that have both been called "the MAD": the inner one is
-# `raw_mad`, the unscaled median absolute deviation; the outer one is
+# quantities that have both been called "the MAD": the inner one is `raw_mad`,
+# the unscaled median absolute deviation; the outer one is
 # `energy_scale = 1.4826 × raw_mad`, the divisor the detector actually uses.
 # Two names, 48 % apart.
 #
-# ### 6f · Where 1.4826 comes from
-#
-# The MAD and the standard deviation both measure spread, but they do not
-# come out at the same number: on Gaussian noise the MAD lands at about 0.67
-# σ. The factor 1.4826 simply rescales it so that the two agree — it puts the
-# MAD "on the σ ruler", which is the ruler everyone's intuition uses.
-#
-# Where the value comes from, for the curious: for a Gaussian, half the
-# values fall within 0.6745 σ of the centre, so that distance *is* the MAD.
-# Since 1 / 0.6745 ≈ 1.4826, multiplying restores σ. (0.6745 is the 75th
-# percentile of the standard Gaussian, written Φ⁻¹(0.75), where Φ is the
-# Gaussian cumulative distribution function — the function giving the
-# probability of falling below a given value.)
-#
-# The check, on 100 000 Gaussian draws:
+# Where that constant comes from: on Gaussian noise the MAD lands at about
+# 0.67 σ, so 1.4826 rescales it to agree with the standard deviation — it puts
+# the MAD "on the σ ruler". For a Gaussian, half the values fall within
+# 0.6745 σ of the centre, so that distance *is* the MAD, and 1 / 0.6745 ≈
+# 1.4826 restores σ.
 
 # %%
-rng = np.random.default_rng(0)
-draw = rng.normal(size=100_000)
-mad = np.median(np.abs(draw - np.median(draw)))
-print(f"std = {draw.std():.4f}   1.4826 × MAD = {1.4826 * mad:.4f}")
+draw = np.random.default_rng(0).normal(size=100_000)
+print(f"on 100 000 Gaussian draws: std = {draw.std():.4f}   "
+      f"1.4826 x MAD = {1.4826 * mad(draw):.4f}")
 
 # %% [markdown]
-# They coincide on a Gaussian draw. **The constant only has meaning under a
-# Gaussian hypothesis; the detector keeps it as a scale convention, not as a
-# model of the noise.**
+# They coincide. **The constant only has meaning under a Gaussian hypothesis;
+# the detector keeps it as a scale convention, not as a model of the noise.**
 #
-# ### 6g · The invariance stated exactly — and its limit ★
-#
-# Subsection 6d showed the *rule* survives a gain change; here is the
-# underlying identity, to numerical precision. Amplitude ×3 means power ×9,
-# so E[m], its median and its MAD all scale by 9 — and the ratio does not
-# move at all.
-
-# %%
-gained = detector_trace(record.signal * 3.0, config)
-print(f"E[m] multiplied by {np.median(gained.frame_energy / trace.frame_energy):.3f}")
-max_dz = float(np.max(np.abs(gained.energy_z - trace.energy_z)))
-assert np.allclose(gained.energy_z, trace.energy_z, rtol=1e-4, atol=1e-6)
-print(f"z[m] unchanged: max |Δz| = {max_dz:.2e}")
-
-# %% [markdown]
-# Now *add* noise instead of scaling — z is **not** invariant to that, and it
-# should not be: the MAD follows the noise floor up, so the same event stands
-# out less.
-
-# %%
-rng = np.random.default_rng(1)
-extra = rng.normal(scale=3.0 * float(record.signal.std()),
-                   size=record.signal.size).astype(np.float32)
-noisy = detector_trace(record.signal + extra, config)
-print(f"peak z: original = {trace.energy_z.max():.1f}   "
-      f"with added noise = {noisy.energy_z.max():.1f}")
-
-# %% [markdown]
-# What this proves: the z threshold keeps the *same meaning* across gain
-# changes, which a fixed energy threshold would not. What it does not prove:
-# immunity to noise — z is a contrast against *this trace's* noise floor.
-#
-# ### 6h · What z is not
+# ### 6e · What z is not
 #
 # - z is **not an SNR** — a signal-to-noise ratio compares the power of a
 #   signal to the power of the noise; z compares a *distance* to a *spread*.
@@ -665,7 +574,7 @@ print(f"peak z: original = {trace.energy_z.max():.1f}   "
 #   values. Wherever this codebase says *snr*, read *z*.
 # - z is **not a probability**. z = 3.5 does not mean "3.5 sigmas hence
 #   p < 0.001": that reading would require the noise to be Gaussian, which
-#   6f explicitly declined to assume.
+#   6d explicitly declined to assume.
 # - z is **not comparable between two traces** with different noise floors:
 #   each trace defines its own unit, so equal z does not mean equal physics.
 #
@@ -827,10 +736,9 @@ fig.plot_detected_events(near_floor, near_events, config);
 # development choice rather than a discovered constant. Elsewhere in the
 # corpus an event reaches **z = 11.7** and is rejected for it; move the floor
 # by 0.3 and it becomes a training label.
-#
-# The slow particle of section 5 failed the *width* test at 2.176 ms and was
-# labelled `reject`; on the yeast corpus every other rejection comes down to
-# the z floor.
+
+# On the yeast corpus, every rejection that is not a width comes down to
+# that z floor.
 #
 # **A third test exists in the code and never binds.** `_quality` also
 # requires an *event concentration* — the share of the event's own excess
@@ -939,7 +847,7 @@ fig.plot_ssl_crop(record.signal, record_events[0], config);
 # Everything above used the workspace only to fetch a traceable example. The
 # method itself needs a plain 1-D array. The protocol:
 #
-# 1. A 1-D float array (any amplitude units — section 6d showed why gain does
+# 1. A 1-D float array (any amplitude units — section 6c showed why gain does
 #    not matter), at least one STFT window long (512 samples here).
 # 2. The configuration used throughout: `review_calibrated_detection_config_v1()`,
 #    with `sampling_frequency_hz` matching your acquisition (2 MHz here). Do
@@ -1157,17 +1065,17 @@ Image(filename=str(comparison_png), width=1050)
 # | P⁺(k, m) | positive excess, max(P − B_k, 0) | §4 |
 # | E[m] | frame energy, Σ_k P⁺(k, m), smoothed over 3 frames | §5 |
 # | median(E) | the trace's ordinary level — piece 1 of the scale | §6b |
-# | MAD(E) | median absolute deviation — piece 2, the ordinary wandering | §6c |
-# | `raw_mad` | MAD(E) unscaled | §6e |
-# | `energy_scale` | 1.4826 × `raw_mad`, the divisor actually used | §6e |
-# | z[m] | (E[m] − median(E)) / `energy_scale` — a pure number | §6d |
+# | MAD(E) | median absolute deviation — piece 2, the ordinary wandering | §6b |
+# | `raw_mad` | MAD(E) unscaled | §6d |
+# | `energy_scale` | 1.4826 × `raw_mad`, the divisor actually used | §6d |
+# | z[m] | (E[m] − median(E)) / `energy_scale` — a pure number | §6c |
 # | a[m] | activation, 1 when z[m] ≥ 3.5 | §7a |
 #
 # Two naming traps this codebase carries, worth repeating here: the fields
 # named `*_snr*` (`active_snr_z`, `medium/strict_min_snr`, `snr_proxy`) all
-# hold **z** values, not signal-to-noise ratios (§6h); and `raw_mad` and
+# hold **z** values, not signal-to-noise ratios (§6e); and `raw_mad` and
 # `energy_scale` have both been called "the MAD" while differing by 48 %
-# (§6e).
+# (§6d).
 
 # %% [markdown]
 # ## Appendix A2 · The configuration, read from the object
