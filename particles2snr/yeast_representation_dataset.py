@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
-from collections import Counter
-from collections.abc import Mapping
+from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +58,69 @@ def preprocess_crop(
     return output
 
 
+def neighbour_metadata(
+    rows: Sequence[Mapping[str, str]],
+    windows: Sequence[tuple[int, int]],
+    *,
+    downsample_factor: int,
+) -> list[dict[str, Any]]:
+    """Report, per event, the other retained events its crop happens to contain.
+
+    One crop is cut per event, so a second event lying nearby is carried along
+    as unlabelled context, and two neighbouring events yield two largely
+    overlapping crops. Neither is edited out: the input contract declares
+    ``event_position_in_crop`` a nuisance *retained as metadata*, and erasing a
+    neighbour would write the detector's own proposals into an unsupervised
+    input. These columns make the phenomenon filterable after the fact instead.
+
+    ``windows`` are the crop bounds actually taken, so edge-clamped crops are
+    handled without repeating the clamping rule. ``neighbour_spans_input`` is in
+    output-index space (post-decimation), clipped to the crop, so it can be read
+    directly against ``signals.npy``.
+    """
+    by_record: dict[str, list[int]] = defaultdict(list)
+    for index, row in enumerate(rows):
+        by_record[row["record_id"]].append(index)
+
+    output: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        low, high = windows[index]
+        length = high - low
+        spans: list[tuple[int, int]] = []
+        truncated = 0
+        best_iou, best_id = 0.0, ""
+        for other in by_record[row["record_id"]]:
+            if other == index:
+                continue
+            start, end = int(rows[other]["event_start"]), int(rows[other]["event_end"])
+            if end > low and start < high:
+                spans.append(
+                    (
+                        max(0, (start - low) // downsample_factor),
+                        min(length // downsample_factor, (end - low) // downsample_factor),
+                    )
+                )
+                if start < low or end > high:
+                    truncated += 1
+            other_low, other_high = windows[other]
+            intersection = max(0, min(high, other_high) - max(low, other_low))
+            if intersection:
+                iou = intersection / (length + other_high - other_low - intersection)
+                if iou > best_iou:
+                    best_iou, best_id = iou, rows[other]["event_id"]
+        spans.sort()
+        output.append(
+            {
+                "n_neighbours_in_crop": len(spans),
+                "n_neighbours_truncated": truncated,
+                "neighbour_spans_input": ";".join(f"{a}-{b}" for a, b in spans),
+                "max_crop_iou": round(best_iou, 6),
+                "max_crop_iou_event_id": best_id,
+            }
+        )
+    return output
+
+
 def build_representation_dataset(
     *,
     candidate_csv: Path,
@@ -81,6 +144,7 @@ def build_representation_dataset(
         shape=(len(rows), output_length),
     )
     metadata: list[dict[str, Any]] = []
+    windows: list[tuple[int, int]] = []
     train_sum = 0.0
     train_square_sum = 0.0
     train_count = 0
@@ -115,6 +179,11 @@ def build_representation_dataset(
                 "event_end_input_index": (int(row["event_end"]) - crop_start) / downsample_factor,
             }
         )
+        windows.append((crop_start, crop_start + crop_length))
+    for entry, neighbour in zip(
+        metadata, neighbour_metadata(rows, windows, downsample_factor=downsample_factor)
+    ):
+        entry.update(neighbour)
     if train_count == 0:
         raise ValueError("Development train split is empty")
     train_mean = train_sum / train_count

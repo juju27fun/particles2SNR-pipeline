@@ -164,3 +164,39 @@ def test_raw_signal_cannot_escape_registered_root(tmp_path: Path) -> None:
             single_root=root,
             roots_by_dataset={},
         )
+
+
+def test_neighbour_metadata_reports_without_editing_the_signal() -> None:
+    """Neighbours are reported in crop coordinates, never erased.
+
+    The input contract declares event_position_in_crop a nuisance retained as
+    metadata, so these columns exist precisely so no consumer has to guess and
+    no builder has to write detector proposals into an unsupervised input.
+    """
+    from particles2snr.yeast_representation_dataset import neighbour_metadata
+
+    def row(event_id, record, start, end):
+        return {"event_id": event_id, "record_id": record,
+                "event_start": str(start), "event_end": str(end)}
+
+    rows = [row("r:00", "r", 3800, 4200),      # neighbour of r:01
+            row("r:01", "r", 4900, 5100),
+            row("r:02", "r", 14900, 15100),    # far away, edge-clamped crop
+            row("s:00", "s", 7900, 8100)]      # alone on its record
+    windows = [(0, 8192), (904, 9096), (8192, 16384), (3904, 12096)]
+    out = neighbour_metadata(rows, windows, downsample_factor=2)
+
+    assert out[0]["n_neighbours_in_crop"] == 1
+    assert out[0]["max_crop_iou_event_id"] == "r:01"
+    assert out[1]["max_crop_iou_event_id"] == "r:00"
+    # Symmetric: the pair reports the same crop overlap from both sides.
+    assert out[0]["max_crop_iou"] == out[1]["max_crop_iou"] > 0.8
+    # Spans are output-index space, inside the 4096-point crop.
+    start, end = (int(v) for v in out[0]["neighbour_spans_input"].split("-"))
+    assert 0 <= start < end <= 4096
+    # A record with a single event reports nothing at all.
+    assert out[3] == {"n_neighbours_in_crop": 0, "n_neighbours_truncated": 0,
+                      "neighbour_spans_input": "", "max_crop_iou": 0.0,
+                      "max_crop_iou_event_id": ""}
+    # Neighbours never appear across records.
+    assert out[2]["n_neighbours_in_crop"] == 0

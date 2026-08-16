@@ -129,7 +129,8 @@ SCIENTIFIC_ROLES = {
     "yeast-events-representation@v1": ("representation", "Entrée SSL historique v3"),
     "yeast-events-representation@v2": ("representation", "Entrée SSL pré-calibration"),
     "yeast-events-representation@v3": ("legacy", "Remplacé par v4 : 108 boîtes dupliquées"),
-    "yeast-events-representation@v4": ("representation", "Entrée SSL canonique"),
+    "yeast-events-representation@v4": ("legacy", "Remplacé par v5 : voisinage non documenté"),
+    "yeast-events-representation@v5": ("representation", "Entrée SSL canonique"),
     "yeast-events-development@v1": ("representation", "Sous-ensemble développement"),
     "yeast-events-followup@v1": ("legacy", "Follow-up historique"),
     "yeast-events-followup@v2": ("representation", "Follow-up partitionné"),
@@ -155,10 +156,11 @@ LINEAGE = (
     ("yeast-event-candidates@v7", "yeast-events-representation@v3", "produit"),
     ("yeast-event-candidates@v7", "yeast-event-candidates@v9", "remplacé par"),
     ("yeast-event-candidates@v9", "yeast-events-representation@v4", "produit"),
+    ("yeast-events-representation@v4", "yeast-events-representation@v5", "documente le voisinage"),
     ("yeast-events-representation@v3", "yeast-events-development@v1", "filtre"),
     ("yeast-events-representation@v3", "yeast-events-followup@v2", "repartitionne"),
     ("yeast-passage-simulations@v2", "SSL A2/A3/A4", "entraîne"),
-    ("yeast-events-representation@v4", "SSL A0–A4", "évalue/adapte"),
+    ("yeast-events-representation@v5", "SSL A0–A4", "évalue/adapte"),
 )
 
 
@@ -262,7 +264,7 @@ def build_milestone1_model(
         )
 
     representation_counts = {}
-    for version in ("v1", "v2", "v3", "v4"):
+    for version in ("v1", "v2", "v3", "v4", "v5"):
         summary = summaries_by_key[f"yeast-events-representation@{version}"][
             "dataset_summary.json"
         ]

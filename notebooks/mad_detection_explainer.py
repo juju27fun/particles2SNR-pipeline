@@ -944,6 +944,44 @@ fig.plot_ssl_crop(record.signal, record_events[0], config);
 #   proves. (A third number, the reviewed row's centre 8236, is the *old*
 #   expanded interval's centre.)
 #
+# **One crop per event means a crop is not one event.** The window is 4.096 ms
+# wide and passages are not spread out politely, so a second event often lands
+# inside it. Measured over the 8 669 events of the registered set:
+#
+# | | |
+# |---|---|
+# | crops holding only their own event | 62.9 % |
+# | crops holding a neighbour | **37.1 %** |
+# | … of which the neighbour is cut by the crop edge | 12.0 % |
+# | crops overlapping another crop at IoU ≥ 0.75 | **12.2 %** |
+#
+# That last row is the one to keep in mind: when two events are close, the
+# same stretch of signal is stored twice — once centred on each — so a small
+# part of the set is near-duplicated, and dense regions weigh more than their
+# share.
+#
+# **Nothing is erased to fix this, and the reason is a contract clause.** The
+# input contract declares `event_position_in_crop` a nuisance
+# *`retained-as-metadata`*, alongside `padding: forbidden` and an in-band
+# amplitude policy of `no-augmentation-no-supervision`. Masking a neighbour
+# would write MAD's own proposals into an input that is meant to be
+# unsupervised: if the detector is wrong about a neighbour, real signal
+# disappears, and any later "the model found what MAD missed" comparison turns
+# circular, because the model was never shown it. So the dataset reports the
+# neighbourhood instead — `n_neighbours_in_crop`, `n_neighbours_truncated`,
+# `neighbour_spans_input` (in crop coordinates, directly usable against
+# `signals.npy`) and `max_crop_iou` — and leaves filtering to whoever consumes
+# it.
+#
+# **The bead pipeline never faces this**, because it does not crop: its
+# detection dataset is the whole 16 384-point trace with every box labelled,
+# up to six per trace, and empty traces kept as explicit negatives. Crops
+# reappear one stage later, for the proposal classifier, and there the same
+# question is answered explicitly — a proposal overlapping a truth at IoU ≥ 0.5
+# is `positive`, below 0.1 `background`, and the band between is `ambiguous`
+# and excluded from training by default. Two pipelines, two answers, the same
+# underlying problem.
+#
 # This closes the notebook's opening question. A time series went in; one
 # fixed-length, bounded, centred example comes out — with a quality label
 # and a documented provenance chain.
