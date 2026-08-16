@@ -743,17 +743,14 @@ def _explore(z_thr: float) -> None:
 # to it** — the same rule the published MAD v2.1 contract states for beads.
 #
 # > **Two mechanisms used to sit here, and neither does now.** The detector
-# > once grew each interval outwards while z stayed above a second, lower
-# > threshold (1.5 against 3.5 for detection), on the reasoning that an
-# > event's quiet tails are still the event; review
-# > `yeast-boundary-expansion-review-r2` put that to a human, who judged the
-# > extended region `extension_margin` on **76 of 76** events and never once
-# > `extension_signal`. A fixed 0.04 ms pad then added 80 further samples on
-# > each side. Both are off. Retiring the pad changed no event count over
-# > 6 172 traces and flipped 8 labels out of 13 226 — every one of them a
-# > 1.984 ms event that the pad had pushed past the 2.0 ms width cap, so the
-# > pad was disqualifying events by widening them. Both settings remain
-# > reachable in the config so the comparison below stays reproducible.
+# > once grew each interval outwards while z stayed above a lower threshold
+# > (1.5 against 3.5), and a fixed 0.04 ms pad then added 80 further samples
+# > per side. Retiring them changed no event count over 6 172 traces. What it
+# > removed is worse than width: growing each group outwards independently let
+# > **neighbouring groups grow into each other**, so 143 traces ended up with
+# > two boxes on identical bounds and 990 box pairs overlapped — 108 duplicated
+# > boxes reached the training set itself. With both mechanisms off there are
+# > none.
 
 # %%
 bounds, = event_bounds(trace, record.signal.size)
@@ -762,48 +759,23 @@ print(f"activation run : frames {group_left}–{group_right}  ({group_right - gr
 print(f"the event      : [{bounds.start:5d}, {bounds.end:5d}]  {bounds.end - bounds.start:5d} "
       f"samples  {(bounds.end - bounds.start) / 2e6 * 1000:.3f} ms")
 assert (bounds.start, bounds.end) == bounds.group_samples, "a stage widened the box"
-historical, = event_bounds(detector_trace(record.signal, replace(
-    config, boundary_expansion_enabled=True, boundary_pad_ms=0.04)), record.signal.size)
-print(f"both retired mechanisms back on: [{historical.start:5d}, {historical.end:5d}]"
-      f"  — the reviewed span, to the sample")
 
 # %% [markdown]
 # The assertion is the point: the interval *is* the activation run. Every
-# boundary in this notebook is a direct consequence of one threshold,
-# z ≥ 3.5, which is the whole point of section 6 having built z carefully.
-#
-# The last line is worth pausing on: **switch the expansion and the pad back
-# on and the bounds come out at [6704, 9296] — the reviewed support of
-# section 1, to the sample.** That is a provenance check, not an accuracy
-# result: the reviewed span *is* that older detector's own proposal, so
-# reproducing it is an identity. What the identity localises is the
-# difference — 256 samples on the left from the expansion, 80 on each side
-# from the pad, and nothing else.
+# boundary in this notebook is a direct consequence of one threshold, z ≥ 3.5,
+# which is the whole point of section 6 having built z carefully.
 #
 # ### 7c · The output, back on the record
 
 # %%
 record_events, record_reason = detect_yeast_events(record.signal, config)
 assert not record_reason, record_reason
-fig.plot_detected_events(record.signal, record_events, config,
-                         truth_spans_ms=[(event_start / 2e6 * 1000, event_end / 2e6 * 1000)]);
+fig.plot_detected_events(record.signal, record_events, config);
 
 # %% [markdown]
-# The green bar is the bounded event the notebook set out to produce. It is
+# The green bar is the bounded event the notebook set out to produce, and it is
 # **the same span the figure of 7a shaded** — [7040, 9216] — because nothing
-# between the two figures widens it. It sits inside the blue reviewed span
-# without filling it, and the difference is exactly what 7b just accounted
-# for:
-#
-# | Span | Samples | Width | Built by |
-# |---|---|---|---|
-# | activation run, shaded in 7a — **and the green bar here** | [7040, 9216] | 1.088 ms | frames 55–68, last frame's window included |
-# | the blue span | [6704, 9296] | 1.296 ms | + 256 samples of expansion on the left, + an 80-sample pad on each side — both retired |
-#
-# Note what the blue span is here: **an older detector's own proposal,
-# confirmed by a reviewer** — not an independently measured boundary. The
-# next section uses the same pale blue for something different in kind, which
-# is why it says so explicitly.
+# between the two figures widens it.
 #
 # ### 7d · QUALIFY — the interval still has to earn its label
 #
@@ -929,58 +901,30 @@ fig.plot_ssl_crop(record.signal, record_events[0], config);
 #   energy-weighted centre.
 # - Why the crop is wider than the event: a model given only the event would
 #   never see what ordinary signal looks like, and the boundary itself would
-#   become a learnable artefact. The margin carries that context. At a trace
-#   edge the three code paths in this workspace differ, and it is worth
-#   knowing which one produced a given array: the **registered yeast
-#   contract** clamps the window inwards and forbids padding, the **bead
-#   builder** reflect-pads (`centered_reflect_crop`, 6 144 points), and the
-#   convenience helper `crop_around_index` in `yeast_events` zero-pads. Only
-#   the first two ever produced a dataset.
+#   become a learnable artefact. The margin carries that context.
 # - Why centre on the energy-weighted centre rather than the interval's
 #   midpoint: energy is not distributed evenly inside the interval. Honest
-#   scale, though: both centres live on the 128-sample frame grid, and the
-#   difference here (8249 vs midpoint 8128) is 121 samples — less than one
-#   hop. Read the centring as a design principle, not something this record
-#   proves. (A third number, the reviewed row's centre 8236, is the *old*
-#   expanded interval's centre.)
+#   scale, though — both centres live on the 128-sample frame grid, and here
+#   they differ by 121 samples, less than one hop. Read the centring as a
+#   design principle, not something this record proves.
 #
-# **One crop per event means a crop is not one event.** The window is 4.096 ms
-# wide and passages are not spread out politely, so a second event often lands
-# inside it. Measured over the 8 669 events of the registered set:
+# **A crop is not one event.** The window is 4.096 ms wide and passages are not
+# spread out politely, so on the 8 669 registered events **37 % of crops contain
+# a second event** — 12 % contain one cut in half by the crop edge. And when two
+# events are close, each gets its own crop centred on it, so the same stretch of
+# signal is stored twice: 12 % of crops overlap another one at IoU ≥ 0.75.
 #
-# | | |
-# |---|---|
-# | crops holding only their own event | 62.9 % |
-# | crops holding a neighbour | **37.1 %** |
-# | … of which the neighbour is cut by the crop edge | 12.0 % |
-# | crops overlapping another crop at IoU ≥ 0.75 | **12.2 %** |
+# The dataset records this rather than removing it. Each row carries how many
+# neighbours its crop holds and where they sit inside it, so a consumer can
+# filter or deduplicate. Erasing them instead would mean painting MAD's own
+# boxes into the signal — and where MAD is wrong, that deletes real events from
+# an input whose whole purpose is to be unlabelled.
 #
-# That last row is the one to keep in mind: when two events are close, the
-# same stretch of signal is stored twice — once centred on each — so a small
-# part of the set is near-duplicated, and dense regions weigh more than their
-# share.
-#
-# **Nothing is erased to fix this, and the reason is a contract clause.** The
-# input contract declares `event_position_in_crop` a nuisance
-# *`retained-as-metadata`*, alongside `padding: forbidden` and an in-band
-# amplitude policy of `no-augmentation-no-supervision`. Masking a neighbour
-# would write MAD's own proposals into an input that is meant to be
-# unsupervised: if the detector is wrong about a neighbour, real signal
-# disappears, and any later "the model found what MAD missed" comparison turns
-# circular, because the model was never shown it. So the dataset reports the
-# neighbourhood instead — `n_neighbours_in_crop`, `n_neighbours_truncated`,
-# `neighbour_spans_input` (in crop coordinates, directly usable against
-# `signals.npy`) and `max_crop_iou` — and leaves filtering to whoever consumes
-# it.
-#
-# **The bead pipeline never faces this**, because it does not crop: its
-# detection dataset is the whole 16 384-point trace with every box labelled,
-# up to six per trace, and empty traces kept as explicit negatives. Crops
-# reappear one stage later, for the proposal classifier, and there the same
-# question is answered explicitly — a proposal overlapping a truth at IoU ≥ 0.5
-# is `positive`, below 0.1 `background`, and the band between is `ambiguous`
-# and excluded from training by default. Two pipelines, two answers, the same
-# underlying problem.
+# The bead pipeline avoids the question at this stage by not cropping at all:
+# it labels every box on the whole trace. It meets the same problem one stage
+# later, at the proposal classifier, and answers it there — a crop overlapping
+# a real event too partially to call is marked ambiguous and dropped from
+# training.
 #
 # This closes the notebook's opening question. A time series went in; one
 # fixed-length, bounded, centred example comes out — with a quality label
