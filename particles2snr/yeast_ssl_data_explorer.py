@@ -90,12 +90,27 @@ VERSION_STORY = (
         ),
         "change": "Validation humaine finale sur l'acquisition disponible.",
     },
+    {
+        "version": "v9",
+        "family": "v9",
+        "kind": "processing",
+        "title": "Boîtes réduites aux frames actives",
+        "summary": (
+            "Extension des bornes et pad de 0,04 ms retirés, comme le contrat "
+            "MAD v2.1 publié. Mêmes 12 271 candidats sur les mêmes traces ; "
+            "largeur médiane 0,784 → 0,640 ms. L'extension faisait grandir deux "
+            "groupes voisins l'un dans l'autre : v7 portait 143 traces à bornes "
+            "dupliquées et 990 paires chevauchantes, v9 aucune."
+        ),
+        "change": "Aucun seuil déplacé ; deux mécanismes d'élargissement retirés.",
+    },
 )
 
 FAMILY_LABELS = {
     "v2": "Rejet géométrique",
     "v5": "Avant calibration",
     "v7": "Calibré et validé",
+    "v9": "Boîtes non élargies",
 }
 
 SCIENTIFIC_ROLES = {
@@ -108,11 +123,13 @@ SCIENTIFIC_ROLES = {
     "yeast-event-candidates@v4": ("candidate", "Historique : nouveaux splits"),
     "yeast-event-candidates@v5": ("calibration", "Calibration manuelle"),
     "yeast-event-candidates@v6": ("candidate", "Validation sous-dimensionnée"),
-    "yeast-event-candidates@v7": ("validation", "Détecteur gelé validé"),
+    "yeast-event-candidates@v7": ("legacy", "Remplacé par v9 : boîtes élargies"),
+    "yeast-event-candidates@v9": ("validation", "Détecteur gelé, boîtes non élargies"),
     "yeast-event-review-annotations@v1": ("annotation", "Annotations v7 arbitrées"),
     "yeast-events-representation@v1": ("representation", "Entrée SSL historique v3"),
     "yeast-events-representation@v2": ("representation", "Entrée SSL pré-calibration"),
-    "yeast-events-representation@v3": ("representation", "Entrée SSL post-validation"),
+    "yeast-events-representation@v3": ("legacy", "Remplacé par v4 : 108 boîtes dupliquées"),
+    "yeast-events-representation@v4": ("representation", "Entrée SSL canonique"),
     "yeast-events-development@v1": ("representation", "Sous-ensemble développement"),
     "yeast-events-followup@v1": ("legacy", "Follow-up historique"),
     "yeast-events-followup@v2": ("representation", "Follow-up partitionné"),
@@ -136,10 +153,12 @@ LINEAGE = (
     ("yeast-event-candidates@v3", "yeast-events-representation@v1", "produit"),
     ("yeast-event-candidates@v4", "yeast-events-representation@v2", "produit"),
     ("yeast-event-candidates@v7", "yeast-events-representation@v3", "produit"),
+    ("yeast-event-candidates@v7", "yeast-event-candidates@v9", "remplacé par"),
+    ("yeast-event-candidates@v9", "yeast-events-representation@v4", "produit"),
     ("yeast-events-representation@v3", "yeast-events-development@v1", "filtre"),
     ("yeast-events-representation@v3", "yeast-events-followup@v2", "repartitionne"),
     ("yeast-passage-simulations@v2", "SSL A2/A3/A4", "entraîne"),
-    ("yeast-events-representation@v3", "SSL A0–A4", "évalue/adapte"),
+    ("yeast-events-representation@v4", "SSL A0–A4", "évalue/adapte"),
 )
 
 
@@ -224,7 +243,7 @@ def build_milestone1_model(
 
     source_summary = summaries_by_key["yeast-source-index@v2"]["dataset_summary.json"]
     stages = []
-    for version in ("v2", "v5", "v7"):
+    for version in ("v2", "v5", "v7", "v9"):
         key = f"yeast-event-candidates@{version}"
         summary = summaries_by_key[key]["candidate_audit_summary.json"]
         qualities = summary["candidate_quality_counts"]
@@ -243,7 +262,7 @@ def build_milestone1_model(
         )
 
     representation_counts = {}
-    for version in ("v1", "v2", "v3"):
+    for version in ("v1", "v2", "v3", "v4"):
         summary = summaries_by_key[f"yeast-events-representation@{version}"][
             "dataset_summary.json"
         ]
@@ -425,7 +444,7 @@ def render_milestone1_html(model: dict[str, Any]) -> str:
   </header>
   <nav>
     <a href="#vue-ensemble">Vue d'ensemble</a>
-    <a href="#chronologie">Chronologie v1→v7</a>
+    <a href="#chronologie">Chronologie v1→v9</a>
     <a href="#equations">Équations</a>
     <a href="#familles">Familles comparées</a>
     <a href="#filiation">Filiation</a>
