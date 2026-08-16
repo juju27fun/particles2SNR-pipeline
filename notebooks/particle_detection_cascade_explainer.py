@@ -55,7 +55,9 @@ from internship_workspace.mad_conv1dgap_training import (
 from internship_workspace.particle_detection_cascade_figures import (
     grid_responsibility,
     inspect_detector_shapes,
+    oracle_crop_facts,
     plot_ap_ranking,
+    plot_conditioned_classification_task,
     plot_grid_responsibility,
     plot_localized_misclassification,
     plot_preprocessing_deltas,
@@ -394,3 +396,64 @@ plt.show()
 # > **Reading checkpoint.** A reader should now be able to say exactly what
 # > z-scoring removes, quantify the improvement, and explain why a real gain can
 # > still be a negative causal result.
+
+# %% [markdown]
+# ## 4 · Why crop classification is an easier task
+#
+# A joint detector must infer event presence, centre $c$, width $w$, and class
+# $k$ from a complete trace $x$:
+#
+# \[
+# P(\mathrm{event},c,w,k\mid x_{1:16384}).
+# \]
+#
+# An oracle classifier is conditioned on information supplied by the label:
+#
+# \[
+# P\!\left(k\mid \operatorname{crop}(x,c_{\mathrm{GT}},6144),\mathrm{event\ exists}\right).
+# \]
+#
+# It does not search for the event, reject empty locations, or regress a box.
+
+# %%
+ceiling_root = workspace.artifacts_root / "cross-project/particle-classification-ceiling-method-analysis-r2"
+ceiling_run = json.loads((ceiling_root / "run.json").read_text(encoding="utf-8"))
+ceiling_summary = json.loads((ceiling_root / "summary.json").read_text(encoding="utf-8"))
+assert ceiling_run["run_id"] == "particle-classification-ceiling-method-analysis-r2"
+assert ceiling_run["status"] == "complete"
+crop_facts = oracle_crop_facts(ceiling_summary)
+
+figure, axis = plt.subplots(figsize=(11.5, 3.6), constrained_layout=True)
+plot_conditioned_classification_task(crop_facts, ax=axis, detector_cells=shape_contract.output_shape[-1])
+plt.show()
+
+# %% [markdown]
+# The geometry audit makes the advantage concrete on the same historical MAD
+# v1 cohort used in section 3:
+#
+# | Centred crop | Complete target support visible |
+# |---:|---:|
+# | 2,500 samples | 54.5% |
+# | 4,096 samples | 94.7% |
+# | 6,144 samples | 100.0% |
+#
+# Thus the 6,144-sample experiment tested classification with the event already
+# found and its entire annotated support visible. Its **84.0% macro-F1** cannot
+# be compared directly with detector mAP: mAP additionally penalises missed
+# events, background activations, box mismatch, duplicate proposals, and score
+# ranking.
+#
+# “Oracle” does not mean “perfectly clean.” Although the 475-event cohort had no
+# second MAD centre inside the crop, **81 crops (17.1%)** still intersected some
+# other annotated support. The pseudo-label itself also remained a MAD teacher
+# label. The experiment therefore removed localisation uncertainty; it did not
+# prove physical class separability under ideal observation.
+#
+# This distinction motivated a separate ROI classifier: first let the detector
+# propose a region of interest (ROI), then classify the crop. At inference that
+# crop is proposal-centred—not GT-centred—so the next experiment still had to
+# measure how much of the oracle advantage survived localisation error.
+#
+# > **Reading checkpoint.** A reader should now be able to list which unknowns
+# > the oracle supplies, explain why macro-F1 and detector mAP are not directly
+# > comparable, and state what proposal-centred ROI classification must recover.
