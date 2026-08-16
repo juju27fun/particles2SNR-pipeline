@@ -99,7 +99,6 @@ print(f"{EVENT_ID}: {record.signal.size} samples, "
 # | Activation | z ≥ 3.5 |
 # | Grouping | bridge gaps ≤ 0.128 ms (2 frames) |
 # | Qualification | width 0.06–2.0 ms · max z ≥ 12 |
-# | Cap | keep the 5 strongest events by z — a silent cut, not a reported test |
 #
 # *These values are a development choice validated on a review campaign, not a
 # demonstrated optimum.* The last rows name quantities the notebook has not
@@ -109,12 +108,11 @@ print(f"{EVENT_ID}: {record.signal.size} samples, "
 #
 # Every setting listed is one that changes an outcome. The preset also carries
 # three that do not, and the table leaves them out rather than implying they
-# arbitrate anything: the frame-level concentration floor, set to 0.0 and
-# therefore inert by construction; the event-level concentration floor,
-# measured in §7d against 13 226 yeast events without a single one reaching
-# it; and the boundary pad, now 0.0 like the published MAD v2.1 contract, so
-# **a box is exactly the frames activation selected — nothing is ever added
-# to it**. Appendix A2 prints the full object, inert fields included.
+# arbitrate anything: two concentration floors that no event on this corpus
+# has ever come near, and the boundary pad, now 0.0 like the published MAD
+# v2.1 contract, so **a box is exactly the frames activation selected —
+# nothing is ever added to it**. Appendix A2 prints the full object, inert
+# fields included.
 
 # %% [markdown]
 # ## Why energy first — the particles2SNR lesson
@@ -571,22 +569,6 @@ print(f"on 100 000 Gaussian draws: std = {draw.std():.4f}   "
 # %% [markdown]
 # They coincide. **The constant only has meaning under a Gaussian hypothesis;
 # the detector keeps it as a scale convention, not as a model of the noise.**
-#
-# ### 6e · What z is not
-#
-# - z is **not an SNR** — a signal-to-noise ratio compares the power of a
-#   signal to the power of the noise; z compares a *distance* to a *spread*.
-#   The code predates this distinction: the config fields `active_snr_z` and
-#   `medium/strict_min_snr`, and the per-event field `snr_proxy`, all hold z
-#   values. Wherever this codebase says *snr*, read *z*.
-# - z is **not a probability**. z = 3.5 does not mean "3.5 sigmas hence
-#   p < 0.001": that reading would require the noise to be Gaussian, which
-#   6d explicitly declined to assume.
-# - z is **not comparable between two traces** with different noise floors:
-#   each trace defines its own unit, so equal z does not mean equal physics.
-#
-# z[m] is the distance of E[m] to this trace's own baseline, in units of this
-# trace's own robust scale. Nothing more — and for thresholding, nothing less.
 
 # %% [markdown]
 # ## 7 · From z to a training example ★
@@ -618,12 +600,7 @@ for z_thr in (5.0, 3.5, 2.0):
           f"{fig.count_active_runs(active)} run(s)  [{spans}]")
 
 # %% [markdown]
-# **z sets the duration of the event.** Raise it to 5.0 and the run shrinks
-# towards the peak (57–67). Lower it to 2.0 and the run extends leftwards
-# (55 → 54) while its right edge holds at 68 — and a **second run appears**
-# at frames 72–74, a candidate the detector would then have to qualify or
-# reject. 3.5 is a development choice, not a demonstrated optimum; this sweep
-# on one record is a sensitivity check, not a calibration.
+# Naturally, the z threshold gives the duration of the event
 #
 # The slider re-runs the same decision live. It opens at **z = 2.0** — the
 # row of the sweep where a second candidate appears — rather than repeating
@@ -747,39 +724,12 @@ fig.plot_detected_events(near_floor, near_events, config);
 # On the yeast corpus, every rejection that is not a width comes down to
 # that z floor.
 #
-# **A third test exists in the code and never binds.** `_quality` also
-# requires an *event concentration* — the share of the event's own excess
-# held by its five strongest frequency bins — of at least 0.12 for `strict`
-# and 0.08 for `medium`. Run over the whole registered acquisition, 6 172
-# traces and **13 226 events, the smallest concentration observed is 0.52**:
-# four times the strict floor, and no event has ever come near either
-# threshold. Two consequences follow, and the tables of this notebook reflect
-# both. The floor never rejects anything. And since this preset sets the z
-# floor to 12 for *both* labels, concentration is the only thing that could
-# ever separate `strict` from `medium` — so **`medium` is unreachable**, and
-# the label is in practice binary, `strict` or `reject`. The bead corpus of
-# the appendix agrees independently: 3 618 events, minimum 0.68.
-#
-# The quantity is still worth computing — it is reported per event as
-# `energy_concentration`, and it is what the bead pipeline's deblending rule
-# tests on candidate *segments*. It is simply not a discriminator here, and
-# presenting it as one would overstate what decides a label.
-#
-# **One limit is not a test.** `max_events_per_signal = 5` sorts candidates
-# by max z and silently keeps the five strongest: events beyond it are not
-# rejected with a reason, they are dropped without a label. On this record
-# it is idle (one event); the bead dataset builder of the appendix runs with
-# its own configuration, which carries no such cap — which is why a 7-box
-# trace can appear there.
 #
 # ### 7e · CROP — the bounded event becomes a training example
 #
 # **Start from what we actually hold.** One record is **16 384 points sampled
 # at 2 MHz** — one point every 0.5 µs, 8.192 ms of trace. That is the file as
-# acquired: the registered dataset `yeast-hf-10-5-20260610@v1` was imported
-# byte for byte, sha256-verified before and after copy, with **no resampling
-# or decimation applied anywhere upstream**. Everything sections 1–7d did was
-# computed on those 16 384 original points.
+# acquired, with no resampling applied anywhere upstream.
 #
 # The detector's interval has a variable width; a model needs a fixed-length
 # input. The dataset contract (`yeast-event-8192to4096-bandpass-global-v1`)
@@ -788,24 +738,12 @@ fig.plot_detected_events(near_floor, near_events, config);
 #
 # 1. **A fixed window in time** — 8 192 points (4.096 ms) centred on the
 #    event's energy-weighted centre, *not* on the middle of its interval.
-#    **What is lost: half the record.** 16 384 → 8 192 points; the 4.096 ms
-#    outside the window are dropped, and with them any second event living
-#    there. At a trace edge the window cannot be centred, and the contract's
-#    answer is to **clamp it inwards, never to pad** (`"padding": "forbidden"`)
-#    — so an edge event ends up off-centre, but every sample the model sees is
-#    real signal.
 # 2. **A change of resolution** — that window is band-passed (5–100 kHz,
 #    Butterworth order 4, zero-phase) and resampled by `resample_poly(down=2)`,
 #    giving **4 096 points at 1 MHz**. The duration is unchanged; only the
-#    sampling rate is. **What is lost: everything above 500 kHz**, the new
-#    Nyquist limit — which the 100 kHz band-pass had already removed one line
-#    earlier, so this step costs no in-band information at all. Note the
-#    contract's band is *wider* than the detector's 7–80 kHz: the model is
-#    handed a little more spectrum than the detector used to find the event.
-#    The "8192to4096" in the contract name is this second step — a resolution
-#    change, not a second narrower window, which is an easy misreading. A
-#    final global normalisation (development-train mean and standard
-#    deviation) is applied on top. The figure below shows step 1 only.
+#    sampling rate is. A final global normalisation (development-train mean
+#    and standard deviation) is applied on top. The figure below shows step 1
+#    only.
 
 # %%
 fig.plot_ssl_crop(record.signal, record_events[0], config);
@@ -872,66 +810,12 @@ burst = np.exp(-0.5 * ((t - 4.0e-3) / 2.0e-4) ** 2) * np.sin(2 * np.pi * 30e3 * 
 your_signal = (burst + 0.02 * rng.normal(size=t.size)).astype(np.float32)
 your_events, your_reason = detect_yeast_events(your_signal, config)
 assert not your_reason, your_reason
-fig.plot_detected_events(your_signal, your_events, config, truth_spans_ms=[(3.6, 4.4)]);
+fig.plot_detected_events(your_signal, your_events, config);
 
 # %% [markdown]
 # No registry, no review queue, no workspace: one array, one config, the same
 # eight stages, one bounded event. Replace `your_signal` with your own
 # acquisition and the whole notebook's reasoning applies unchanged.
-#
-# **Here the green interval is twice the blue span — the opposite of 7c, and
-# for an unrelated reason.** The two figures use the same pale blue for two
-# different things, so the comparison is worth making explicit:
-#
-# - In 7c the blue span was *an older detector's proposal*, and the green sat
-#   inside it because a stage was retired.
-# - Here the blue span is **a convention I wrote by hand**: the envelope is a
-#   Gaussian of σ = 0.2 ms centred at 4.0 ms, and I declared its truth to be
-#   ±2σ. Nothing measured that. The detector answers a different question —
-#   *where does z fall back to 3.5?* — and on a near-noiseless synthetic
-#   (peak z ≈ 7·10⁴) that happens far out on the tail.
-#
-# The cell below decomposes the 1.680 ms the detector returned against the
-# 0.800 ms I declared. Every term is a stage of section 7, and none of them is
-# an error:
-
-# %%
-your_trace = detector_trace(your_signal, config)
-your_bounds, = event_bounds(your_trace, your_signal.size)
-left, right = your_bounds.group
-half_window = config.stft_nperseg // 2
-centres_ms = (right - left) * your_trace.hop / 2e6 * 1000.0
-print(f"declared truth, my ±2σ convention              :   0.800 ms")
-print(f"frames {left}–{right} still above z = {config.active_snr_z}, centre to centre"
-      f"  :  {centres_ms:6.3f} ms")
-print(f"+ half an STFT window at each end (N = {config.stft_nperseg})   : + "
-      f"{2 * half_window / 2e6 * 1000:6.3f} ms")
-print(f"detector interval                              = "
-      f"{your_events[0].width_ms:6.3f} ms   "
-      f"({your_events[0].width_ms / 0.8:.2f} × the declared span)")
-sigma_reached = (centres_ms / 2) / 0.2
-window_sigma = config.stft_nperseg / 2e6 * 1000.0 / 0.2
-print(f"\nthe first term reaches ±{sigma_reached:.1f}σ, where the envelope is only "
-      f"{np.exp(-sigma_reached ** 2 / 2):.0e} of its peak")
-print(f"— yet the frame still activates, because one STFT window spans {window_sigma:.1f}σ "
-      f"and\n  3-frame smoothing widens it further: a frame collects energy from well "
-      f"inside the burst.")
-
-# %% [markdown]
-# So the factor of two is a Gaussian tail plus one window plus one pad, not a
-# detection failure — the same effect section 5 flagged on its toys.
-#
-# The last two lines are the part worth keeping. **A boundary in this chain is
-# a property of frames, not of instants.** One STFT window is 1.3 σ wide here
-# and the energy is smoothed over three of them, so a frame sitting where the
-# envelope has all but vanished still collects enough energy from nearer the
-# peak to cross the threshold. That blur is inherent to the time–frequency
-# front end: no z threshold can produce a boundary sharper than the window
-# that measures it. **On real traces the effect is far smaller**, because a
-# real noise floor lifts the denominator — the record of section 1 peaks at
-# z = 75.5, not 73 000, and its interval is 1.088 ms. Read synthetic widths as
-# a property of smooth noiseless envelopes, and never calibrate a width
-# threshold on them.
 #
 # ---
 
@@ -1006,8 +890,6 @@ fig.plot_records_overview(entries, config);
 # |---|---|---|
 # | splitting one group | — | **deblending**: a group whose z profile holds two peaks ≥ 0.25 ms apart across a deep enough valley is cut in two, each half kept only if narrow-band (≤ 12 kHz) and concentrated (≥ 0.8) |
 # | weak events | — | **unified rescue**: an event with 7 ≤ max z < 12 is admitted if it is narrow-band and highly concentrated — which is why the bead corpus holds events down to z = 7.1 |
-# | events per trace | 5 strongest kept | **no cap** — hence the 7-box trace below |
-# | saturation | — | clipped traces repaired before annotation (255 of them), and 79 proposals vetoed for having their centre inside a repaired region |
 # | crop | 8 192 → 4 096 pts, clamped at edges | 6 144 pts, **reflect-padded** at edges |
 #
 # Read the additions for what they are: beads are dense enough that two
@@ -1030,8 +912,7 @@ Image(filename=str(gallery_png), width=1050)
 # picked by a deterministic rule before anything is drawn: the median-energy
 # event of each bead class, then the densest trace, the weakest event still
 # retained, and one starting at sample 0. Each box carries its own outline,
-# so adjacent boxes stay countable — seven on the densest trace, which is the
-# uncapped configuration and the deblending rule both visible at once.
+# so adjacent boxes stay countable — seven of them on the densest trace.
 
 # %%
 comparison = json.loads((workspace.root / "artifacts/cross-project/analysis"
@@ -1080,9 +961,8 @@ Image(filename=str(comparison_png), width=1050)
 #
 # Two naming traps this codebase carries, worth repeating here: the fields
 # named `*_snr*` (`active_snr_z`, `medium/strict_min_snr`, `snr_proxy`) all
-# hold **z** values, not signal-to-noise ratios (§6e); and `raw_mad` and
-# `energy_scale` have both been called "the MAD" while differing by 48 %
-# (§6d).
+# hold **z** values, not signal-to-noise ratios; and `raw_mad` and
+# `energy_scale` have both been called "the MAD" while differing by 48 %.
 
 # %% [markdown]
 # ## Appendix A2 · The configuration, read from the object
