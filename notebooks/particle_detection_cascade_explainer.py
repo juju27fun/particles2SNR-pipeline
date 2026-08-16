@@ -45,6 +45,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from IPython.display import Markdown, display
 
+from detseg.postprocess import rebuild_model
 from internship_workspace.config import Workspace
 from internship_workspace.mad_conv1dgap_training import (
     DATASET_KEY,
@@ -52,7 +53,10 @@ from internship_workspace.mad_conv1dgap_training import (
     resolve_registered_dataset,
 )
 from internship_workspace.particle_detection_cascade_figures import (
+    grid_responsibility,
+    inspect_detector_shapes,
     plot_ap_ranking,
+    plot_grid_responsibility,
     plot_localized_misclassification,
     select_localized_misclassification,
 )
@@ -215,3 +219,99 @@ plt.show()
 # > **Reading checkpoint.** A reader should now be able to explain how an event
 # > can be localised with high IoU and objectness while still being a
 # > wrong-class detection that lowers AP.
+
+# %% [markdown]
+# ## 2 · The initial joint Swin1D–YOLO detector
+#
+# The historical model solved all three tasks jointly:
+#
+# ```text
+# 16,384-sample trace → Swin1D feature pyramid → deepest 512-cell map
+#                      → 1×1 YOLO head → objectness + box + 3 classes
+# ```
+#
+# The next cell reconstructs the architecture from the frozen training record.
+# Temporary hooks measure the tensors seen during a real forward pass; the
+# parameter count is then checked against the recorded run. The checkpoint
+# itself remains remote, but its recorded size and hash identify the exact
+# trained state whose results were shown in section 1.
+
+# %%
+historical_run = json.loads((historical_root / "run.json").read_text(encoding="utf-8"))
+detector = rebuild_model(historical).cpu()
+shape_contract = inspect_detector_shapes(detector, input_length=historical["input_length"])
+
+assert shape_contract.total_parameters == historical["total_params"]
+assert shape_contract.trainable_parameters == historical["trainable_params"]
+assert shape_contract.output_shape[-1] == historical["input_length"] // shape_contract.strides[-1]
+assert shape_contract.output_shape[1] == 1 + historical["num_classes"] + 2
+
+backbone_text = " → ".join(
+    f"{shape[-1]} cells × {shape[-2]} channels"
+    for shape in shape_contract.backbone_shapes
+)
+checkpoint = historical_run["outputs"]["checkpoint"]
+display(
+    Markdown(
+        "\n".join(
+            [
+                "| Measured quantity | Value |",
+                "|---|---:|",
+                f"| Input | `{shape_contract.input_shape}` |",
+                f"| Swin1D pyramid | `{backbone_text}` |",
+                f"| Strides | `{shape_contract.strides}` |",
+                f"| Tensor entering the cell-wise 1×1 convolution | `{shape_contract.head_cell_input_shape}` |",
+                f"| YOLO output | `{shape_contract.output_shape}` |",
+                f"| Total / trainable parameters | `{shape_contract.total_parameters:,}` / `{shape_contract.trainable_parameters:,}` |",
+                f"| Serialized checkpoint size recorded by the run | `{historical['size_mb']:.3f} MB` |",
+                f"| Checkpoint SHA-256 | `{checkpoint['sha256']}` |",
+                "| Raw / retained proposals per trace | `512` / at most `20` after NMS |",
+            ]
+        )
+    )
+)
+
+# %% [markdown]
+# The output has six channels at every deepest-grid location:
+#
+# \[
+# [\text{objectness},\;p_{2},p_{4},p_{10},\;\Delta c,\;\log w].
+# \]
+#
+# The three Swin maps exist, but this historical YOLO head consumes only the
+# deepest one. Its `1×1` convolution independently maps each 256-dimensional
+# cell vector to those six outputs. Thus the cell responsible for an event
+# emits both its box and its class.
+
+# %% [markdown]
+# ### A long event and one responsible cell
+#
+# The toy event below is 4,000 samples long, matching the upper end of the MAD
+# supports. At stride 32 it spans many deepest-grid cells, but supervision
+# assigns the output to the cell containing its centre.
+
+# %%
+responsibility = grid_responsibility(6200, 10200, stride=shape_contract.strides[-1])
+figure, axis = plt.subplots(figsize=(11.5, 3.2), constrained_layout=True)
+plot_grid_responsibility(responsibility, ax=axis)
+plt.show()
+
+# %% [markdown]
+# This does **not** mean the responsible feature sees only 32 raw samples.
+# Swin attention and the hierarchical backbone give it a wider contextual
+# receptive field. The narrower architectural claim is:
+#
+# > the class is read from one deepest feature vector; there is no explicit
+# > pooling aligned with the full predicted interval.
+#
+# Box regression can therefore succeed whenever that vector contains enough
+# information about centre and extent, while fine class evidence distributed
+# across the waveform may remain difficult to extract. This is a motivated
+# hypothesis, not yet a causal result: preprocessing, crop difficulty, and
+# pseudo-label quality remain alternative explanations at this point in the
+# story.
+#
+# > **Reading checkpoint.** A reader should now be able to trace the measured
+# > tensor shapes, explain why there are 512 raw candidate locations, and state
+# > precisely what regional aggregation the initial head does and does not
+# > perform.
