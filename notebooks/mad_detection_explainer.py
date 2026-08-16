@@ -921,3 +921,108 @@ Image(filename=str(comparison_png), width=1050)
 #
 # *Retrospective, beads, one acquisition family. This supports choosing MAD
 # as the pseudo-label detector, nothing wider.*
+
+# %% [markdown]
+# ## 11 · Sandbox — the same chain on four reviewed records
+#
+# Everything so far rests on one record. Four are manifested in the review
+# queues, and they were chosen to disagree with each other: a clean single
+# passage, a trace holding several, and one where a neighbouring rise is
+# proposed and then rejected. The chain below is not re-implemented — it is
+# the same `detect_yeast_events` call, on four different signals.
+
+# %%
+SANDBOX = {
+    "principal": "9459e76ce29342debc90:00",
+    "clean single passage": "214f4ce4967af98a954c:00",
+    "several passages": "e1b4603f8b9de6204003:02",
+    "rejected neighbour": "09f788a7473797b794f6:01",
+}
+entries = []
+for label, event_id in SANDBOX.items():
+    signal = load_reviewed_event(workspace, event_id).signal
+    events, reason = detect_yeast_events(signal, config)
+    assert not reason, f"{event_id}: {reason}"
+    entries.append((f"{label} · {event_id}", signal, events))
+fig.plot_records_overview(entries, config);
+
+# %% [markdown]
+# Read the four rows against each other:
+#
+# | Record | Returned | Accepted | What it shows |
+# |---|---|---|---|
+# | principal | 1 | 1 | the worked example of sections 1–7 |
+# | clean single passage | 1 | 1 | the easy case: one passage, one box |
+# | several passages | 4 | 2 | grouping keeps passages apart instead of merging them |
+# | rejected neighbour | 2 | 1 | a real rise localised, then labelled `reject` |
+#
+# The last two rows carry the argument. **`reject` is a label, not a
+# deletion**: the chain returns the interval, scores it, and records why it
+# failed — which is what section 7d claimed and what the legacy cascade of the
+# introduction cannot do, because its hypotheses disappear inside the cleaning
+# stages. And the multi-passage record shows the grouping tolerance doing the
+# opposite job from the introduction's failure: there, one event was split in
+# two; here, several genuine events stay separate.
+#
+# Change an identifier above and the whole notebook's reasoning recomputes —
+# these four are simply the ones with a confirmed human review.
+
+# %% [markdown]
+# ## Appendix A1 · Glossary
+#
+# Every symbol the notebook introduces, in the order the chain uses them.
+#
+# | Symbol | Meaning | Built in |
+# |---|---|---|
+# | fₛ | sampling frequency, 2 MHz | §0 |
+# | N | STFT window length, 512 samples | §3 |
+# | H | hop between windows, 128 samples (64 µs) | §3 |
+# | m | frame index — one window position, one spectrogram column | §3 |
+# | k | frequency bin index — one spectrogram row | §3 |
+# | w | Hann window — the taper applied before each FFT | §3 |
+# | X(k, m) | complex STFT value at bin k, frame m | §3 |
+# | P(k, m) | power \|X(k, m)\|² | §3 |
+# | B_k | per-frequency baseline, the 25th percentile of row k over time | §4 |
+# | P⁺(k, m) | positive excess, max(P − B_k, 0) | §4 |
+# | E[m] | frame energy, Σ_k P⁺(k, m), smoothed over 3 frames | §5 |
+# | median(E) | the trace's ordinary level — piece 1 of the scale | §6b |
+# | MAD(E) | median absolute deviation — piece 2, the ordinary wandering | §6c |
+# | `raw_mad` | MAD(E) unscaled | §6e |
+# | `energy_scale` | 1.4826 × `raw_mad`, the divisor actually used | §6e |
+# | z[m] | (E[m] − median(E)) / `energy_scale` — a pure number | §6d |
+# | a[m] | activation, 1 when z[m] ≥ 3.5 | §7a |
+#
+# Two naming traps this codebase carries, worth repeating here: the fields
+# named `*_snr*` (`active_snr_z`, `medium/strict_min_snr`, `snr_proxy`) all
+# hold **z** values, not signal-to-noise ratios (§6h); and `raw_mad` and
+# `energy_scale` have both been called "the MAD" while differing by 48 %
+# (§6e).
+
+# %% [markdown]
+# ## Appendix A2 · The configuration, read from the object
+#
+# The table in §0 is prose, written by hand, and prose drifts: twice during
+# this notebook's development a setting changed in the code while the table
+# still described the old behaviour. The table below cannot drift — it is
+# printed from the very `config` object every cell above was given.
+
+# %%
+from dataclasses import asdict
+
+for name, value in asdict(config).items():
+    default = getattr(type(config)(), name)
+    mark = "" if value == default else "  ← differs from the dataclass default"
+    print(f"{name:<32}{value!r:>12}{mark}")
+
+# %% [markdown]
+# The six marked lines are exactly what `review_calibrated_detection_config_v1()`
+# changes relative to a bare `YeastDetectionConfig()` — the six the "Running on
+# your own data" protocol warns about. Among them is
+# `active_min_concentration = 0.0`, the frame-level concentration gate this
+# notebook measured inert.
+#
+# `boundary_expansion_enabled = False` carries **no** marker, and that is
+# informative rather than an omission: the reviewed retirement was applied to
+# the dataclass default itself, so no preset has to opt out of it. The
+# threshold it would use, `boundary_snr_z = 1.5`, is still listed — kept so
+# the comparison behind the review stays reproducible (§7b).

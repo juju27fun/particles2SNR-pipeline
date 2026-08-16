@@ -429,9 +429,10 @@ def plot_detected_events(
         ax.plot([left, right], [-1.15 * span] * 2, color=colour, linewidth=9,
                 solid_capstyle="butt")
         ax.annotate(f"{event.quality} · z max {event.snr_proxy:.1f}",
-                    xy=((left + right) / 2.0, -1.15 * span), xytext=(0, 9),
+                    xy=((left + right) / 2.0, -1.15 * span),
+                    xytext=(0, 9 + 11 * (index % 2)),
                     textcoords="offset points", ha="center", fontsize=8.5, color=colour)
-    ax.set_ylim(-1.45 * span, 1.2 * span)
+    ax.set_ylim(-1.55 * span, 1.2 * span)
     ax.set_xlabel("time [ms]")
     ax.set_ylabel("amplitude [a.u.]")
     kept = sum(1 for event in events if event.quality in {"strict", "medium"})
@@ -440,6 +441,31 @@ def plot_detected_events(
         + (" — the given span in blue" if truth_spans_ms else "")
     )
     return ax
+
+
+def plot_records_overview(
+    entries,
+    config: YeastDetectionConfig,
+    *,
+    axes: np.ndarray | None = None,
+) -> np.ndarray:
+    """One row per record: the trace with every interval the chain returned.
+
+    ``entries`` is a sequence of ``(label, signal, events)``. Accepted events
+    are green, rejected ones orange, so a whole cohort reads at a glance.
+    """
+    entries = list(entries)
+    axes = _stacked_axes(axes, len(entries), height=2.05 * len(entries))
+    for axis, (label, signal, events) in zip(axes, entries):
+        plot_detected_events(signal, events, config, ax=axis)
+        kept = sum(1 for event in events if event.quality in {"strict", "medium"})
+        axis.set_title("")  # replace the single-record title
+        axis.set_title(f"{label} — {len(events)} interval(s), {kept} accepted",
+                       loc="left", fontsize=10, color=NAVY)
+        axis.set_xlabel("")
+        axis.set_ylabel("")
+    axes[-1].set_xlabel("time [ms]")
+    return axes
 
 
 _DROP_STAGE_LABELS = {
