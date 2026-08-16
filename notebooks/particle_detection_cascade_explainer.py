@@ -13,32 +13,19 @@
 
 # %% [markdown]
 # # Particle-event detection in 1-D traces
-# ## From a joint detector to a localisation–classification cascade
+# ## Why separating localisation and classification worked
 #
 # **Guiding question.** Why could a detector locate particle events while
 # repeatedly assigning them the wrong size class, and what changed when
-# localisation, proposal validation, and classification were separated?
+# localisation, event validation, and classification were separated?
 #
-# This executable account preserves the investigation in evidence order,
-# including hypotheses that did not fully explain the failure. The companion
-# [`mad_detection_explainer`](mad_detection_explainer.py) stops where a raw
-# trace becomes a bounded MAD event; this notebook starts there.
-
-# %% [markdown]
-# ## 0 · Reading contract
-#
-# | This notebook does | It does not |
-# |---|---|
-# | replay explanations on train/validation records | train, tune, or recalibrate |
-# | inspect shipped models and frozen analyses | select a new test example |
-# | separate localisation, proposal validation, and class | treat MAD labels as independent physical truth |
-#
-# MAD v2.1 provides deterministic **teacher pseudo-labels**, not human-verified
-# physical truth. The historical test is already consumed: later test numbers
-# come only from frozen summaries; every new case or diagnostic stays on
-# train/validation.
+# This executable notebook follows the shortest evidence chain needed to answer
+# that question. It reads shipped models and frozen analyses; it does not train,
+# tune, or select new test examples. MAD v2.1 intervals are deterministic
+# teacher pseudo-labels, not independent physical truth.
 
 # %%
+import csv
 import json
 
 import matplotlib.pyplot as plt
@@ -50,30 +37,33 @@ from detseg.models import build_detector
 from detseg.postprocess import rebuild_model
 from detseg.train_detection import remap_targets_class_agnostic
 from internship_workspace.config import Workspace
+from internship_workspace.datasets import resolve_path, select_record
 from internship_workspace.mad_conv1dgap_training import (
+    DATASET_ID,
     DATASET_KEY,
     EXPECTED_EVENT_COUNTS,
     resolve_registered_dataset,
 )
 from internship_workspace.particle_detection_cascade_figures import (
+    factorial_freeze_facts,
+    final_arm_results,
     grid_responsibility,
     inspect_detector_shapes,
     oracle_crop_facts,
-    plot_ap_ranking,
     plot_b1_r1_design,
-    plot_conditioned_classification_task,
+    plot_cascade_validation_cases,
+    plot_factorial_design,
+    plot_final_error_anatomy,
+    plot_final_arm_results,
     plot_grid_responsibility,
+    plot_initial_detector_results,
     plot_l1_r2_design,
     plot_localized_misclassification,
-    plot_preprocessing_deltas,
-    plot_r1_tradeoffs,
-    plot_zscore_scale_invariance,
     preprocessing_results,
     r1_intermediate_facts,
-    roi_training_facts,
+    select_final_validation_cases,
     select_localized_misclassification,
     summarize_r2_development_exports,
-    validation_arm_results,
 )
 from p0.models import ProposalAwareROIClassifier
 
@@ -96,38 +86,48 @@ for run_id in analysis_ids:
 print(
     f"Resolved {DATASET_KEY}: "
     + ", ".join(f"{split}={count}" for split, count in EXPECTED_EVENT_COUNTS.items())
-    + f" events; {len(analysis_ids)} frozen analyses available. No signal loaded."
+    + " events. Frozen analyses verified."
 )
 
 # %% [markdown]
-# ### Roadmap
+# ## 0 · What was trained, on what, and how
 #
-# | Now | Next | Then |
-# |---|---|---|
-# | 0. Reading contract | 2. Initial Swin1D–YOLO | 5. B1 proposals + R1 |
-# | 1. Initial paradox | 3. Preprocessing and crops | 6. Why R1 was insufficient |
-# |  | 4. Why crop classification is easier | 7. L1 + R2 architecture |
-# |  |  | 8. Causal 2×2 experiment |
-# |  |  | 9. Frozen results |
-# |  |  | 10–12. Errors, cases, conclusions |
+# Each input is a **16,384-sample 1-D trace**. A MAD detector supplies event
+# intervals, which become YOLO boxes; the acquisition folder supplies the
+# 2/4/10 µm class. A trace with no retained MAD interval remains a genuine
+# negative example.
 #
-# New calibration, multiplicity, amplitude, and saturation-join diagnostics
-# will remain development-only.
-
-# %% [markdown]
-# ## 1 · The initial paradox: localised but misclassified
-#
-# The first result was not random failure. Among **175 historical 10 µm
-# events**, the detector localised **148** at IoU ≥ 0.5, yet only **14** were
-# correct class-aware detections at the operating threshold: about **9.5% of
-# the localised events**. It sent **121** 10 µm events to 4 µm.
-#
-# These values describe the historical MAD v1 test and are not an independent
-# validation result. The cell below checks the frozen run summary for the
-# population, true positives, and structured confusion; prediction rows are
-# deliberately not reopened.
+# The initial experiment used MAD v1. The later cascade used MAD v2.1, which
+# repaired saturation before annotation and removed proposals centred inside a
+# repaired interval. The trace identities and split assignments stayed fixed.
 
 # %%
+with (dataset_root / "source_manifest.csv").open(newline="", encoding="utf-8") as handle:
+    v21_sources = list(csv.DictReader(handle))
+v21_empty_traces = sum(
+    row["empty_mad_label"].lower() in {"1", "true"} for row in v21_sources
+)
+v21_trace_counts = {
+    split: sum(row["output_split"] == split for row in v21_sources)
+    for split in ("train", "val", "test")
+}
+assert sum(v21_trace_counts.values()) == 2888
+assert v21_empty_traces == 783
+
+v1_record = select_record(workspace, DATASET_ID, "v1")
+v1_root = resolve_path(workspace, v1_record)
+with (v1_root / "source_manifest.csv").open(newline="", encoding="utf-8") as handle:
+    v1_sources = list(csv.DictReader(handle))
+v1_assignments = {
+    row["source_id"]: (row["output_split"], row["source_class"])
+    for row in v1_sources
+}
+v21_assignments = {
+    row["source_id"]: (row["output_split"], row["source_class"])
+    for row in v21_sources
+}
+assert v1_assignments == v21_assignments
+
 historical_root = (
     workspace.artifacts_root
     / "cross-project/remote-pfcalcul/notebook-cascade-historical-source-r1/extra"
@@ -140,43 +140,80 @@ historical = json.loads(
         / "runs/swin1d-yolo-seed42-particle-mad-teacher-swin-yolo-r1.json"
     ).read_text(encoding="utf-8")
 )
-ten_micron = historical["test_per_class_prf"][2]
-confusion_10um = historical["test_confusion_at_f1"][2]
-historical_localized_10um = 148  # frozen class-agnostic localisation audit
-assert ten_micron["support"] == 175 and ten_micron["tp"] == 14
-assert confusion_10um[1] == 121
+assert historical["dataset"].endswith("@v1")
+assert historical["train_samples"] == v21_trace_counts["train"]
+assert historical["val_samples"] == v21_trace_counts["val"]
+assert historical["test_samples"] == v21_trace_counts["test"]
 
+dataset_table = [
+    "| Split | Traces | MAD v2.1 events |",
+    "|---|---:|---:|",
+]
+for split in ("train", "val", "test"):
+    dataset_table.append(
+        f"| {split} | {v21_trace_counts[split]:,} | {EXPECTED_EVENT_COUNTS[split]:,} |"
+    )
+dataset_table.append(
+    f"| **Total** | **{sum(v21_trace_counts.values()):,}** | "
+    f"**{sum(EXPECTED_EVENT_COUNTS.values()):,}** |"
+)
 display(
     Markdown(
-        f"**Historical check.** {historical_localized_10um}/175 localised · "
-        f"{ten_micron['tp']}/{historical_localized_10um} correctly classified "
-        f"after localisation ({100 * ten_micron['tp'] / historical_localized_10um:.1f}%) · "
-        f"{confusion_10um[1]} labelled 4 µm."
+        "\n".join(dataset_table)
+        + f"\n\nMAD-empty traces in v2.1: **{v21_empty_traces:,}**."
     )
 )
 
 # %% [markdown]
-# ### One geometry, two decisions
-#
-# **Intersection over union (IoU)** measures whether two intervals cover the
-# same region:
-#
-# \[
-# \operatorname{IoU}(G,P)=\frac{|G\cap P|}{|G\cup P|}.
-# \]
-#
-# Here, \(G\) is the MAD interval and \(P\) the predicted interval. IoU ≥ 0.5
-# means “localised” in this experiment. **Objectness** is the detector's score
-# that an event exists at that location; it says nothing by itself about which
-# size class is correct.
-#
-# The next case is not taken from the historical test. It is selected
-# deterministically from the MAD v2.1 **validation** proposals: among 10 µm
-# events that are alone on their trace and away from its edges, retain those
-# whose best proposal has objectness ≥ 0.9 and is classified as 4 µm; choose
-# the highest IoU, then break ties by stable IDs.
+# The starting model was a **Swin1D backbone with a one-scale YOLO head**. It
+# jointly predicted objectness, centre, width, and three class probabilities at
+# each of 512 grid cells. Training used balanced class weights and selected the
+# checkpoint with the best validation performance.
 
 # %%
+training_table = [
+    "| Training choice | Frozen value |",
+    "|---|---:|",
+    f"| Dataset | `{historical['dataset']}` |",
+    f"| Model | `{historical['backbone']} + {historical['head']}` · "
+    f"`{historical['total_params']:,}` parameters |",
+    f"| Input / output grid | `{historical['input_length']:,}` samples / `512` cells |",
+    f"| Optimizer | `{historical['optimizer']}` · LR `{historical['learning_rate']}` · "
+    f"weight decay `{historical['weight_decay']}` |",
+    f"| Schedule | cosine · batch `{historical['batch_size']}` · "
+    f"at most `{historical['epochs']}` epochs |",
+    f"| Selection | seed `{historical['seed']}` · best epoch `{historical['best_epoch']}` |",
+]
+display(Markdown("\n".join(training_table)))
+
+# %%
+figure, axis = plt.subplots(figsize=(8.5, 3.5), constrained_layout=True)
+plot_initial_detector_results(historical, ax=axis)
+plt.show()
+
+# %% [markdown]
+# The baseline reached **42.3% mAP@0.5**, but AP 10 µm was only **12.2%**, far
+# below AP 2 µm and AP 4 µm. The rest of the notebook explains this specific
+# failure, then rebuilds the system on the corrected MAD v2.1 reference.
+
+# %% [markdown]
+# ## 1 · The problem: localised but misclassified
+#
+# The initial failure was structured. Among **175 historical 10 µm events**,
+# the detector localised **148** at intersection over union (IoU) ≥ 0.5, yet
+# only **14** became correct class-aware detections: **9.5% of the events it had
+# already found**. It assigned **121** of them to 4 µm.
+#
+# IoU measures box overlap. **Objectness** estimates whether an event exists at
+# a location. Neither guarantees the correct size class. The validation example
+# below makes that distinction concrete without reopening a test waveform.
+
+# %%
+ten_micron = historical["test_per_class_prf"][2]
+confusion_10um = historical["test_confusion_at_f1"][2]
+assert ten_micron["support"] == 175 and ten_micron["tp"] == 14
+assert confusion_10um[1] == 121
+
 development_root = (
     workspace.artifacts_root
     / "cross-project/remote-pfcalcul/notebook-cascade-section1-source-r1/extra"
@@ -193,7 +230,7 @@ signal = np.load(dataset_root / "val/signals" / f"{case.trace_id}.npy", allow_pi
 figure, axes = plt.subplots(1, 2, figsize=(13, 3.4), constrained_layout=True)
 plot_localized_misclassification(signal, case, axes=axes)
 figure.suptitle(
-    f"A real validation error · {case.event_id}",
+    "A confident localisation can still have the wrong class",
     x=0.01,
     ha="left",
     fontsize=13,
@@ -202,109 +239,45 @@ figure.suptitle(
 plt.show()
 
 # %% [markdown]
-# The proposal overlaps the teacher box strongly and its objectness is near
-# one. The error is therefore not “the detector saw nothing”: the 4 µm class
-# probability outranks the 10 µm probability on an already localised region.
-#
-# ### Why AP is not classification accuracy
-#
-# **Average precision (AP)** evaluates the whole ranked list of detections.
-# After sorting predictions by score, a prediction is a true positive only if
-# its class is correct *and* its IoU reaches the matching threshold. AP is high
-# when correct detections appear early; a confident wrong-class box harms AP
-# even when its geometry is excellent.
-
-# %%
-figure, axis = plt.subplots(figsize=(7.8, 2.8), constrained_layout=True)
-plot_ap_ranking(ax=axis)
-plt.show()
+# The box strongly overlaps the MAD interval and objectness is near one, but
+# the 4 µm probability outranks 10 µm. This is why localisation recall,
+# conditional classification, and class-aware average precision (AP) must be
+# read separately: AP requires both the correct box and the correct class to be
+# ranked ahead of errors.
 
 # %% [markdown]
-# This separates the apparently contradictory observations:
+# ## 2 · Why the joint detector could fail
 #
-# - **localisation:** does any proposal overlap the event?
-# - **conditional classification:** is that localised proposal assigned the
-#   right bead size?
-# - **class-aware AP:** are correct class-and-box pairs ranked ahead of errors?
-#
-# At this point, four explanations were still plausible: information removed
-# by preprocessing, the easier oracle-crop task, insufficient regional
-# aggregation in the YOLO head, and imperfect pseudo-labels. The next section
-# inspects the initial architecture before judging among them.
-#
-# > **Reading checkpoint.** A reader should now be able to explain how an event
-# > can be localised with high IoU and objectness while still being a
-# > wrong-class detection that lowers AP.
-
-# %% [markdown]
-# ## 2 · The initial joint Swin1D–YOLO detector
-#
-# The historical model solved all three tasks jointly:
+# The initial model solved everything from one deepest feature map:
 #
 # ```text
-# 16,384-sample trace → Swin1D feature pyramid → deepest 512-cell map
-#                      → 1×1 YOLO head → objectness + box + 3 classes
+# 16,384 samples → Swin1D backbone → 512-cell map
+#                → cell-wise YOLO head → objectness + box + 3 classes
 # ```
 #
-# The next cell reconstructs the architecture from the frozen training record.
-# Temporary hooks measure the tensors seen during a real forward pass; the
-# parameter count is then checked against the recorded run. The checkpoint
-# itself remains remote, but its recorded size and hash identify the exact
-# trained state whose results were shown in section 1.
+# The architecture is reconstructed from its frozen run below. Hooks measure
+# the tensors during a real forward pass rather than relying on copied
+# dimensions.
 
 # %%
-historical_run = json.loads((historical_root / "run.json").read_text(encoding="utf-8"))
 detector = rebuild_model(historical).cpu()
 shape_contract = inspect_detector_shapes(detector, input_length=historical["input_length"])
-
 assert shape_contract.total_parameters == historical["total_params"]
-assert shape_contract.trainable_parameters == historical["trainable_params"]
-assert shape_contract.output_shape[-1] == historical["input_length"] // shape_contract.strides[-1]
 assert shape_contract.output_shape[1] == 1 + historical["num_classes"] + 2
 
 backbone_text = " → ".join(
     f"{shape[-1]} cells × {shape[-2]} channels"
     for shape in shape_contract.backbone_shapes
 )
-checkpoint = historical_run["outputs"]["checkpoint"]
-display(
-    Markdown(
-        "\n".join(
-            [
-                "| Measured quantity | Value |",
-                "|---|---:|",
-                f"| Input | `{shape_contract.input_shape}` |",
-                f"| Swin1D pyramid | `{backbone_text}` |",
-                f"| Strides | `{shape_contract.strides}` |",
-                f"| Tensor entering the cell-wise 1×1 convolution | `{shape_contract.head_cell_input_shape}` |",
-                f"| YOLO output | `{shape_contract.output_shape}` |",
-                f"| Total / trainable parameters | `{shape_contract.total_parameters:,}` / `{shape_contract.trainable_parameters:,}` |",
-                f"| Serialized checkpoint size recorded by the run | `{historical['size_mb']:.3f} MB` |",
-                f"| Checkpoint SHA-256 | `{checkpoint['sha256']}` |",
-                "| Raw / retained proposals per trace | `512` / at most `20` after NMS |",
-            ]
-        )
-    )
-)
-
-# %% [markdown]
-# The output has six channels at every deepest-grid location:
-#
-# \[
-# [\text{objectness},\;p_{2},p_{4},p_{10},\;\Delta c,\;\log w].
-# \]
-#
-# The three Swin maps exist, but this historical YOLO head consumes only the
-# deepest one. Its `1×1` convolution independently maps each 256-dimensional
-# cell vector to those six outputs. Thus the cell responsible for an event
-# emits both its box and its class.
-
-# %% [markdown]
-# ### A long event and one responsible cell
-#
-# The toy event below is 4,000 samples long, matching the upper end of the MAD
-# supports. At stride 32 it spans many deepest-grid cells, but supervision
-# assigns the output to the cell containing its centre.
+display(Markdown("\n".join([
+    "| Measured quantity | Value |",
+    "|---|---:|",
+    f"| Input | `{shape_contract.input_shape}` |",
+    f"| Swin1D pyramid | `{backbone_text}` |",
+    f"| Deepest feature entering the YOLO head | `{shape_contract.head_cell_input_shape}` |",
+    f"| YOLO output | `{shape_contract.output_shape}` |",
+    f"| Trainable parameters | `{shape_contract.trainable_parameters:,}` |",
+])))
 
 # %%
 responsibility = grid_responsibility(6200, 10200, stride=shape_contract.strides[-1])
@@ -313,312 +286,83 @@ plot_grid_responsibility(responsibility, ax=axis)
 plt.show()
 
 # %% [markdown]
-# This does **not** mean the responsible feature sees only 32 raw samples.
-# Swin attention and the hierarchical backbone give it a wider contextual
-# receptive field. The narrower architectural claim is:
-#
-# > the class is read from one deepest feature vector; there is no explicit
-# > pooling aligned with the full predicted interval.
-#
-# Box regression can therefore succeed whenever that vector contains enough
-# information about centre and extent, while fine class evidence distributed
-# across the waveform may remain difficult to extract. This is a motivated
-# hypothesis, not yet a causal result: preprocessing, crop difficulty, and
-# pseudo-label quality remain alternative explanations at this point in the
-# story.
-#
-# > **Reading checkpoint.** A reader should now be able to trace the measured
-# > tensor shapes, explain why there are 512 raw candidate locations, and state
-# > precisely what regional aggregation the initial head does and does not
-# > perform.
+# A long event spans many grid cells, but one centre cell emits its box and
+# class. Swin attention gives that feature wider context than a single stride;
+# the precise limitation is that the head performs **no explicit pooling aligned
+# with the full predicted interval**. Box regression can therefore succeed
+# while class evidence distributed across the waveform remains difficult to
+# aggregate.
 
 # %% [markdown]
-# ## 3 · Did preprocessing or crop length explain the failure?
+# ## 3 · Why a crop classifier was not enough
 #
-# Per-window z-scoring applies
+# Three intermediate observations narrowed the problem:
 #
-# \[
-# z(x)=\frac{x-\mu_x}{\sigma_x}.
-# \]
+# 1. changing preprocessing helped, but the best gain remained below the
+#    pre-registered causal threshold;
+# 2. a 6,144-sample oracle crop exposed the complete target support, making
+#    classification easier than full-trace detection;
+# 3. R1 improved class ranking on fixed proposals, but it neither moved boxes
+#    nor learned an explicit event-versus-background decision.
 #
-# For a positive global scale factor $a$, $z(ax)=z(x)$. Absolute amplitude,
-# root-mean-square level, and global energy therefore disappear. Timing,
-# frequency, asymmetry, and the relative envelope can remain.
-
-# %%
-toy_time = np.linspace(-1.0, 1.0, 600)
-toy_signal = np.exp(-3.0 * toy_time**2) * np.sin(2 * np.pi * 12 * toy_time)
-figure, axes = plt.subplots(1, 2, figsize=(12, 3.0), constrained_layout=True)
-plot_zscore_scale_invariance(toy_signal, axes=axes)
-plt.show()
-
-# %% [markdown]
-# This made preprocessing a serious candidate: if bead size was encoded mainly
-# by absolute signal scale, the detector never received that cue. The decisive
-# comparison kept the same **2,481 isolated MAD v1 events**, Conv1DGAP-S model
-# family, splits, and three seeds, and changed only the input representation.
-# It used the already-consumed 475-event historical test, so it is a diagnostic
-# comparison—not independent validation.
+# The cells below verify those facts from the frozen analyses. The detailed
+# preprocessing sweep is intentionally not reproduced here.
 
 # %%
 preprocessing_root = workspace.artifacts_root / "cross-project/particle-preprocessing-comparison-results-r1"
-preprocessing_run = json.loads((preprocessing_root / "run.json").read_text(encoding="utf-8"))
 preprocessing_summary = json.loads(
     (preprocessing_root / "summary.json").read_text(encoding="utf-8")
 )
-assert preprocessing_run["run_id"] == "particle-preprocessing-comparison-results-r1"
-assert preprocessing_run["status"] == "complete"
-assert preprocessing_summary["population"]["isolated_test_events"] == 475
-representation_results = preprocessing_results(preprocessing_summary)
+representations = preprocessing_results(preprocessing_summary)
+best_preprocessing = max(representations[1:], key=lambda row: row.macro_f1_delta)
 
-table = [
-    "| Input representation | Macro-F1 | 10 µm recall | 10→4 µm | Gain [95% CI] |",
-    "|---|---:|---:|---:|---:|",
-]
-for index, result in enumerate(representation_results):
-    gain = "reference" if index == 0 else (
-        f"{100 * result.macro_f1_delta:+.1f} "
-        f"[{100 * result.ci95_low:+.1f}, {100 * result.ci95_high:+.1f}]"
-    )
-    table.append(
-        f"| {result.label} | {result.macro_f1:.1%} | {result.recall_10um:.1%} | "
-        f"{result.ten_to_four_rate:.1%} | {gain} |"
-    )
-display(Markdown("\n".join(table)))
-
-# %%
-figure, axis = plt.subplots(figsize=(9.5, 3.2), constrained_layout=True)
-plot_preprocessing_deltas(representation_results, ax=axis)
-plt.show()
-
-# %% [markdown]
-# Local z-scoring recovered much of the 10 µm signal: recall rose from **62.9%
-# to 78.5%**, and `10 µm → 4 µm` fell from **17.3% to 9.9%**. The best overall
-# arm—the shorter filtered P0 representation—gained **4.3 macro-F1 points**.
-# Yet every arm remained below the pre-registered **+7 point** causal gate; the
-# 4,096-sample arm's confidence interval also included zero.
-#
-# **Conclusion.** Preprocessing mattered, but it did not explain the historical
-# gap by itself. The result supported preserving more local event information;
-# it did not justify another preprocessing sweep or establish that amplitude
-# loss was the principal cause. The next question is why an oracle crop is a
-# fundamentally easier classification input than a full trace.
-#
-# > **Reading checkpoint.** A reader should now be able to say exactly what
-# > z-scoring removes, quantify the improvement, and explain why a real gain can
-# > still be a negative causal result.
-
-# %% [markdown]
-# ## 4 · Why crop classification is an easier task
-#
-# A joint detector must infer event presence, centre $c$, width $w$, and class
-# $k$ from a complete trace $x$:
-#
-# \[
-# P(\mathrm{event},c,w,k\mid x_{1:16384}).
-# \]
-#
-# An oracle classifier is conditioned on information supplied by the label:
-#
-# \[
-# P\!\left(k\mid \operatorname{crop}(x,c_{\mathrm{GT}},6144),\mathrm{event\ exists}\right).
-# \]
-#
-# It does not search for the event, reject empty locations, or regress a box.
-
-# %%
 ceiling_root = workspace.artifacts_root / "cross-project/particle-classification-ceiling-method-analysis-r2"
-ceiling_run = json.loads((ceiling_root / "run.json").read_text(encoding="utf-8"))
 ceiling_summary = json.loads((ceiling_root / "summary.json").read_text(encoding="utf-8"))
-assert ceiling_run["run_id"] == "particle-classification-ceiling-method-analysis-r2"
-assert ceiling_run["status"] == "complete"
 crop_facts = oracle_crop_facts(ceiling_summary)
 
-figure, axis = plt.subplots(figsize=(11.5, 3.6), constrained_layout=True)
-plot_conditioned_classification_task(crop_facts, ax=axis, detector_cells=shape_contract.output_shape[-1])
-plt.show()
-
-# %% [markdown]
-# The geometry audit makes the advantage concrete on the same historical MAD
-# v1 cohort used in section 3:
-#
-# | Centred crop | Complete target support visible |
-# |---:|---:|
-# | 2,500 samples | 54.5% |
-# | 4,096 samples | 94.7% |
-# | 6,144 samples | 100.0% |
-#
-# Thus the 6,144-sample experiment tested classification with the event already
-# found and its entire annotated support visible. Its **84.0% macro-F1** cannot
-# be compared directly with detector mAP: mAP additionally penalises missed
-# events, background activations, box mismatch, duplicate proposals, and score
-# ranking.
-#
-# “Oracle” does not mean “perfectly clean.” Although the 475-event cohort had no
-# second MAD centre inside the crop, **81 crops (17.1%)** still intersected some
-# other annotated support. The pseudo-label itself also remained a MAD teacher
-# label. The experiment therefore removed localisation uncertainty; it did not
-# prove physical class separability under ideal observation.
-#
-# This distinction motivated a separate ROI classifier: first let the detector
-# propose a region of interest (ROI), then classify the crop. At inference that
-# crop is proposal-centred—not GT-centred—so the next experiment still had to
-# measure how much of the oracle advantage survived localisation error.
-#
-# > **Reading checkpoint.** A reader should now be able to list which unknowns
-# > the oracle supplies, explain why macro-F1 and detector mAP are not directly
-# > comparable, and state what proposal-centred ROI classification must recover.
-
-# %% [markdown]
-# ## 5 · Common proposals B1 and the first ROI classifier R1
-#
-# To test the class head without moving any box, the experiment created one
-# **common proposal set**. The retrained B0 detector emitted 512 dense cells;
-# class-agnostic non-maximum suppression (NMS) ranked them by objectness,
-# removed boxes overlapping above IoU 0.5, and retained at most 20 per trace.
-#
-# - **B1** kept the detector's native class probabilities.
-# - **R1** replaced only those probabilities with a Conv1DGAP-S prediction from
-#   a 6,144-sample, proposal-centred, locally z-scored crop.
-#
-# Both used the same box and objectness, with class score
-# $s_k=o\,p(k)$ for objectness $o$ and class $k$.
-
-# %%
 b1_root = (
     workspace.artifacts_root
     / "cross-project/remote-pfcalcul/notebook-cascade-section1-source-r1/extra"
     / "artifacts/cross-project/particle-mad-v21-common-proposals-b1-r1"
 )
-b1_run = json.loads((b1_root / "run.json").read_text(encoding="utf-8"))
-roi_input_run = json.loads((b1_root / "roi_inputs/run.json").read_text(encoding="utf-8"))
-threshold_selection = json.loads((b1_root / "threshold_selection.json").read_text(encoding="utf-8"))
-assert b1_run["status"] == "complete"
-assert b1_run["dataset"] == DATASET_KEY
-assert roi_input_run["splits_loaded"] == ["train", "val"]
-r1_crop_facts = roi_training_facts(roi_input_run)
-validation_results = validation_arm_results(threshold_selection)
-
-figure, axis = plt.subplots(figsize=(11.5, 4.0), constrained_layout=True)
-plot_b1_r1_design(r1_crop_facts, ax=axis)
-plt.show()
-
-# %% [markdown]
-# R1 training used the detector's distribution whenever possible: **2,856 of
-# 2,921 crops** were centred on a proposal matched to the GT at IoU ≥ 0.5. The
-# remaining **65** used a GT-centred fallback so every train/validation event
-# contributed. All crops contained the complete support; none had zero
-# variance. The fallback existed only for training—there is no GT centre at
-# inference.
-#
-# The validation operating points were frozen before test access:
-
-# %%
-validation_table = [
-    "| Arm | Event precision | Macro-F1 | 10 µm recall | 10→4 µm | Localised events |",
-    "|---|---:|---:|---:|---:|---:|",
-]
-for result in validation_results:
-    validation_table.append(
-        f"| {result.arm} | {result.event_precision:.1%} | {result.macro_f1:.1%} | "
-        f"{result.recall_10um:.1%} | {result.ten_to_four_rate:.1%} | "
-        f"{result.localized_events} |"
-    )
-display(Markdown("\n".join(validation_table)))
-
-# %% [markdown]
-# On validation, replacing only the class probabilities raised event precision
-# from **51.9% to 56.2%**, macro-F1 from **56.5% to 58.9%**, and 10 µm recall
-# from **39.8% to 61.2%**. The localised `10 µm → 4 µm` confusion fell from
-# **43.5% to 4.2%**. This was the first direct evidence that explicit regional
-# aggregation recovered useful class information.
-#
-# It was not yet a complete detector solution. R1 was trained only on event
-# crops, so it learned $P(k\mid\mathrm{event},\mathrm{ROI})$ but not whether a
-# proposal was background. Its 10 µm precision at this validation threshold was
-# only **35.3%**, and fewer events survived the higher operating threshold. The
-# next section examines why a classifier that fixes class confusion can still
-# leave the end-to-end cascade insufficient.
-#
-# > **Reading checkpoint.** A reader should now be able to explain why B1/R1 is
-# > a causal class-head comparison, where the 65 GT fallbacks are allowed, and
-# > which validation gains support ROI aggregation without proving a final
-# > detector.
-
-# %% [markdown]
-# ## 6 · Why R1 remained insufficient
-#
-# The sealed B0/B1/R1 evaluation was opened once after thresholds and hashes
-# were frozen. It is an internal replication on a historically consumed test,
-# not independent confirmation. This section reads only its summary—no test
-# prediction or waveform is reopened.
-
-# %%
 intermediate_root = workspace.artifacts_root / "cross-project/particle-mad-v21-b0-b1-r1-analysis-r1"
-intermediate_run = json.loads((intermediate_root / "run.json").read_text(encoding="utf-8"))
 intermediate_summary = json.loads(
     (intermediate_root / "metrics/summary.json").read_text(encoding="utf-8")
 )
-intermediate_decision = json.loads(
-    (
-        workspace.artifacts_root
-        / "cross-project/reviews/particle-mad-v21-b0-b1-r1-result-r1/review/decisions.json"
-    ).read_text(encoding="utf-8")
-)
-assert intermediate_run["status"] == "complete"
-assert intermediate_summary["test_opened_once"] is True
-assert intermediate_decision["complete"] is True
 r1_result = r1_intermediate_facts(intermediate_summary)
 
-figure, axis = plt.subplots(figsize=(10.5, 4.6), constrained_layout=True)
-plot_r1_tradeoffs(r1_result, ax=axis)
+assert best_preprocessing.macro_f1_delta < 0.07
+assert crop_facts.support_coverage_6144 == 1.0
+assert r1_result.map_ci95_low < 0.0 < r1_result.map_ci95_high
+
+figure, axis = plt.subplots(figsize=(11.5, 4.0), constrained_layout=True)
+plot_b1_r1_design(ax=axis)
 plt.show()
 
-# %% [markdown]
-# The causal check passed exactly: B1 and R1 had the same **71.0% class-agnostic
-# Event AP**, because they used identical boxes and objectness. R1 changed only
-# the class ranking. It raised class-aware mAP from **42.4% to 46.6%** and AP
-# 10 µm from **26.6% to 34.5%**, while reducing `10 µm → 4 µm` sharply.
-#
-# But the paired R1−B1 mAP gain was **+4.3 points with IC95
-# [−0.3; +9.9]**: the interval included zero. At the selected operating point,
-# proposal recall also fell from **83.8% to 75.8%**. Better conditional classes
-# did not create better boxes or recover missed events.
-#
-# ### The background-rejection warning
-#
-# On 164 MAD-v2.1-empty traces, activation fell from **31.1% for B1 to 20.1%
-# for R1** at each arm's own validation-selected threshold. However, R1 used a
-# much higher threshold (0.522 versus 0.402). At the common B0 threshold, R1
-# activated **37.8%** of empty traces versus **30.5%** for B1. The classifier
-# had changed score calibration; it had not learned an explicit event-versus-
-# background decision.
-#
-# The human checkpoint was therefore recorded as **`conditionally_supported`**:
-# ROI aggregation was supported, but localisation and background rejection
-# remained insufficient, and R1 was not retained as the final system. This
-# diagnosis directly motivated two orthogonal changes: a class-agnostic
-# localiser L1 and a proposal-aware classifier R2 with an explicit event head.
-#
-# > **Reading checkpoint.** A reader should now be able to separate geometry,
-# > class ranking, score calibration, and background rejection—and explain why
-# > correcting `10 µm → 4 µm` was necessary but not sufficient.
+# %%
+diagnostic_table = [
+    "| Observation | Frozen result | Practical meaning |",
+    "|---|---:|---|",
+    f"| Best preprocessing change | `{best_preprocessing.macro_f1_delta:+.1%}` macro-F1 | useful, but below the `+7 pt` gate |",
+    f"| Full support inside a 6,144 crop | `{crop_facts.support_coverage_6144:.0%}` | the oracle supplies localisation |",
+    f"| B1 → R1 class-aware mAP | `{r1_result.b1_map:.1%} → {r1_result.r1_map:.1%}` | ROI aggregation helps class ranking |",
+    f"| B1 / R1 Event AP | `{r1_result.common_event_ap:.1%}` for both | the boxes and objectness are unchanged |",
+]
+display(Markdown("\n".join(diagnostic_table)))
 
 # %% [markdown]
-# ## 7 · L1 class-agnostic localisation and R2 proposal-aware classification
-#
-# The R1 diagnosis separated two remaining failures. **L1** removes class
-# competition from localisation; **R2** adds the missing event-versus-background
-# decision to ROI classification. Neither changes MAD v2.1, crop length, or
-# local z-scoring.
+# R1 supported the architectural hypothesis, but not a complete solution. Its
+# mAP gain had a paired 95% interval crossing zero, and at a common threshold it
+# activated more MAD-empty traces than B1. The missing pieces were now clear:
+# improve localisation without class competition, and teach the ROI model what
+# background looks like.
 
 # %% [markdown]
-# ### L1: learn one event category
+# ## 4 · The final L1 + R2 cascade
 #
-# During L1 training, every GT class is remapped to class zero at runtime. Box
-# geometry is untouched, the YOLO head has one class channel, and the class-loss
-# weight is zero. The model therefore optimises objectness and box regression
-# without asking the same feature to separate 2/4/10 µm.
+# **L1** is a class-agnostic detector. During training every bead class is
+# remapped to one event category; objectness and box regression remain, while
+# size classification is removed from the localisation head.
 
 # %%
 toy_targets = [torch.tensor([[2.0, 0.30, 0.10], [1.0, 0.70, 0.20]])]
@@ -629,43 +373,32 @@ assert torch.equal(remapped_targets[0][:, 0], torch.zeros(2))
 l1_model = build_detector("swin1d", num_classes=1, head="yolo").cpu()
 l1_contract = inspect_detector_shapes(l1_model, input_length=16_384)
 assert l1_contract.output_shape == (1, 4, 512)
-display(Markdown(
-    f"**Executed contract.** Classes `{toy_targets[0][:, 0].tolist()}` become "
-    f"`{remapped_targets[0][:, 0].tolist()}` while centres and widths remain identical. "
-    f"The measured L1 output is `{l1_contract.output_shape}`: objectness, one event "
-    "channel, centre offset, and log-width."
-))
 
 # %% [markdown]
-# ### R2: learn background from the proposals seen at inference
+# **R2** is proposal-aware. It sees the same 6,144-sample, locally z-scored
+# crops available at inference and learns two outputs from one encoder:
 #
-# R2 removes the GT fallback. Every B1 development proposal receives a target
-# from its maximum IoU with a GT event:
+# - event versus background;
+# - 2/4/10 µm, only when the proposal is a positive event.
 #
-# - IoU ≥ 0.5: positive event, with its three-way class target;
-# - IoU < 0.1: background;
-# - 0.1 ≤ IoU < 0.5: ambiguous, excluded from both training losses.
-#
-# Crops remain proposal-centred. A shared Conv1DGAP-S encoder feeds one event
-# logit and three conditional class logits.
+# Proposals with IoU ≥ 0.5 are positive, those below 0.1 are background, and
+# the uncertain interval between them is excluded from both losses.
 
 # %%
 r2_model = ProposalAwareROIClassifier(input_length=6_144, num_classes=3).cpu()
 with torch.inference_mode():
     r2_event_logits, r2_class_logits = r2_model(torch.zeros(1, 1, 6_144))
-r2_parameters = sum(parameter.numel() for parameter in r2_model.parameters())
 assert r2_event_logits.shape == (1,) and r2_class_logits.shape == (1, 3)
+r2_parameters = sum(parameter.numel() for parameter in r2_model.parameters())
 
 r2_index_summary = summarize_r2_development_exports(
     b1_root / "development_detector/proposals.csv",
     b1_root / "development_detector/ground_truth.csv",
 )
-expected_r2_counts = {
-    "train": {"total": 39280, "positive": 4092, "background": 29274, "ambiguous": 5914},
-    "val": {"total": 6920, "positive": 750, "background": 5087, "ambiguous": 1083},
-}
-for split, expected in expected_r2_counts.items():
-    assert all(r2_index_summary["by_split"][split][key] == value for key, value in expected.items())
+train_index = r2_index_summary["by_split"]["train"]
+assert train_index["positive"] == 4092
+assert train_index["background"] == 29274
+assert train_index["ambiguous"] == 5914
 
 figure, axis = plt.subplots(figsize=(11.5, 4.0), constrained_layout=True)
 plot_l1_r2_design(
@@ -675,38 +408,170 @@ plot_l1_r2_design(
 )
 plt.show()
 
-# %%
-r2_table = [
-    "| Split | Proposals | Positive | Background | Ambiguous | On MAD-empty traces |",
-    "|---|---:|---:|---:|---:|---:|",
-]
-for split in ("train", "val"):
-    row = r2_index_summary["by_split"][split]
-    r2_table.append(
-        f"| {split} | {row['total']:,} | {row['positive']:,} | "
-        f"{row['background']:,} | {row['ambiguous']:,} | {row['on_empty_trace']:,} |"
-    )
-display(Markdown("\n".join(r2_table)))
+# %% [markdown]
+# The final score for class \(k\) is
+#
+# \[
+# s_k=o\,P(\mathrm{event}\mid\mathrm{ROI})\,
+# P(k\mid\mathrm{event},\mathrm{ROI}).
+# \]
+#
+# L1 can change proposal geometry and recall. R2 cannot move a box; it can only
+# reject it or re-rank its class. This separation gives each component one
+# responsibility and makes their effects independently measurable.
 
 # %% [markdown]
-# R2 trains event BCE on positives and background, and class CE only on
-# positives:
+# ## 5 · The causal comparison
 #
-# \[
-# \mathcal L_{R2}=\operatorname{BCE}(\mathrm{event})+
-# \mathbf 1_{\mathrm{positive}}\operatorname{CE}(\mathrm{class}).
-# \]
+# Rows change the localiser; columns change the ROI classifier. Horizontal
+# comparisons keep proposal IDs, boxes, and objectness exactly fixed. Vertical
+# comparisons keep the classifier and crop rule fixed.
+
+# %%
+final_result_root = workspace.artifacts_root / "cross-project/particle-mad-v21-final-cascade-analysis-r1"
+final_summary = json.loads(
+    (final_result_root / "metrics/summary.json").read_text(encoding="utf-8")
+)
+factorial_freeze = factorial_freeze_facts(final_summary)
+assert factorial_freeze.test_role == "descriptive_non_independent_replication"
+
+figure, axis = plt.subplots(figsize=(11.5, 4.8), constrained_layout=True)
+plot_factorial_design(ax=axis)
+plt.show()
+
+# %% [markdown]
+# The two horizontal differences isolate R2; the two vertical differences
+# isolate L1. Their interaction is the difference of those differences. All
+# four arms qualified on validation and were frozen before the final test was
+# read. The hashes and qualification mechanics remain in the run manifest
+# rather than in the pedagogical narrative.
+
+# %% [markdown]
+# ## 6 · Final comparison
+
+# %%
+results = final_arm_results(final_summary)
+figure, axis = plt.subplots(figsize=(11.5, 4.4), constrained_layout=True)
+plot_final_arm_results(results, ax=axis)
+plt.show()
+
+# %%
+baseline = results[0]
+final_cascade = results[-1]
+display(Markdown(
+    f"**L1 + R2:** mAP@0.5 `{final_cascade.map_50:.1%}`, Event AP@0.5 "
+    f"`{final_cascade.event_ap_50:.1%}`, and AP 10 µm `{final_cascade.ap_10um_50:.1%}`. "
+    f"Against B1 + R1, the gains are "
+    f"`{final_cascade.map_50 - baseline.map_50:+.1%}`, "
+    f"`{final_cascade.event_ap_50 - baseline.event_ap_50:+.1%}`, and "
+    f"`{final_cascade.ap_10um_50 - baseline.ap_10um_50:+.1%}` respectively."
+))
+
+# %% [markdown]
+# The result answers the original paradox: explicit ROI aggregation recovered
+# class information, class-agnostic training improved localisation, and the R2
+# event head supplied the background decision missing from R1. The full cascade
+# reached **60.9% macro-F1** and **60.8% event precision** at its frozen
+# operating threshold.
 #
-# At inference, the complete class score becomes
+# The aggregate gain is real, but it does not mean every event type or operating
+# condition is solved. The final section examines what remains difficult.
+
+# %% [markdown]
+# ## 7 · What the final cascade still gets wrong
 #
-# \[
-# s_k=o\,P(\mathrm{event}\mid\mathrm{ROI})\,P(k\mid\mathrm{event},\mathrm{ROI}).
-# \]
+# Three views expose the residual structure: class confusion after localisation,
+# ranking performance by event width, and false activation on MAD-empty traces.
+
+# %%
+figure, axes = plt.subplots(1, 3, figsize=(15.5, 4.2), constrained_layout=True)
+plot_final_error_anatomy(final_summary, axes=axes)
+plt.show()
+
+# %%
+final_arm = final_summary["arms"]["L1_R2"]
+stable = final_arm["by_event_status"]["stable"]
+new = final_arm["by_event_status"]["new"]
+empty_controls = final_summary["mad_empty_controls"]["v2.1_empty"]["L1_R2"]
+display(Markdown(
+    "\n".join([
+        "| Residual issue | Frozen observation |",
+        "|---|---:|",
+        f"| Localised 10 µm → 4 µm | `{final_arm['thresholded']['ten_to_four_rate']:.1%}` |",
+        f"| Stable-event mAP / new-event mAP | `{stable['mAP@0.5']:.1%}` / `{new['mAP@0.5']:.1%}` |",
+        f"| New MAD v2.1 events in test | `{new['events']}` |",
+        f"| MAD-empty activation at the selected threshold | `{empty_controls['own_threshold']['activation_rate']:.1%}` |",
+        f"| MAD-empty activation at the common B1+R1 threshold | `{empty_controls['common_B1_R1_threshold']['activation_rate']:.1%}` |",
+    ])
+))
+
+# %% [markdown]
+# The remaining errors are not uniform. Short events are hardest, the 19 newly
+# admitted MAD v2.1 events are much less stable than the inherited cohort, and
+# 10 µm still sometimes collapses into 4 µm. R2 strongly suppresses empty-trace
+# scores at a common threshold, but its lower validation-selected threshold
+# trades some of that suppression back for recall. Threshold choice therefore
+# remains part of the deployed behaviour, not a cosmetic post-processing step.
 #
-# L1 and R2 therefore address different failure modes: L1 can change proposal
-# geometry and recall; R2 cannot move a box but can suppress background and
-# re-rank its class. That separation makes a causal 2×2 comparison possible.
+# The following three cases are selected deterministically from **validation**:
+# the highest-scoring correct 10 µm event, the highest-scoring remaining
+# `10 µm → 4 µm` error, and the highest-objectness proposal rejected on a
+# MAD-empty trace. They illustrate behaviour; they do not add test evidence.
+
+# %%
+r2_development_root = (
+    workspace.artifacts_root
+    / "cross-project/remote-pfcalcul/20260816_mad_swin_fpr_inputs/extra"
+    / "artifacts/cross-project/particle-mad-v21-roi-r2-proposal-aware-s42-r1"
+)
+r2_development_meta = json.loads(
+    (r2_development_root / "l1_r2_proposals.json").read_text(encoding="utf-8")
+)
+assert r2_development_meta["splits_loaded"] == ["train", "val"]
+assert r2_development_meta["test_loaded"] is False
+
+validation_empty_ids = sorted(
+    row["output_stem"]
+    for row in v21_sources
+    if row["output_split"] == "val" and row["empty_mad_label"].lower() in {"1", "true"}
+)
+validation_cases = select_final_validation_cases(
+    b1_root / "development_detector/ground_truth.csv",
+    r2_development_root / "l1_r2_proposals.csv",
+    empty_trace_ids=validation_empty_ids,
+    threshold=float(final_arm["operating_threshold"]),
+)
+assert all(case.split == "val" for case in validation_cases)
+validation_signals = {
+    case.trace_id: np.load(
+        dataset_root / "val/signals" / f"{case.trace_id}.npy",
+        allow_pickle=False,
+    )
+    for case in validation_cases
+}
+
+figure, axes = plt.subplots(3, 1, figsize=(13.0, 8.8), constrained_layout=True)
+plot_cascade_validation_cases(validation_cases, validation_signals, axes=axes)
+plt.show()
+
+# %% [markdown]
+# The examples complete the metric-level picture. L1 can place a strong box on
+# both a genuine event and structured background; R2 usually separates them,
+# but a physically plausible 10 µm waveform can still receive a confident 4 µm
+# class. The remaining limitation is therefore not one missing trick: it mixes
+# difficult morphology, pseudo-label uncertainty, and operating-threshold
+# tradeoffs.
 #
-# > **Reading checkpoint.** A reader should now be able to reproduce the L1
-# > target remapping, derive every R2 training target from IoU, and explain why
-# > the two components can be evaluated independently.
+# The conclusion remains bounded:
+#
+# - MAD v2.1 is a deterministic teacher reference, not independent physical GT;
+# - the test had been consumed historically and is a descriptive replication;
+# - the four arms use one seed and one acquisition family;
+# - preprocessing, crop length, and calibration alternatives were investigated,
+#   but are not reproduced here because they did not change the central answer.
+#
+# **Supported conclusion.** Within this dataset and model family, separating
+# class-agnostic localisation, proposal validation, and ROI classification is
+# more effective than asking one cell-wise head to solve all three tasks.
+# Independent acquisition data with physically adjudicated labels is still
+# required to establish that this advantage generalises beyond MAD v2.1.
