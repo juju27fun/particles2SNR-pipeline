@@ -118,6 +118,13 @@ v1_record = select_record(workspace, DATASET_ID, "v1")
 v1_root = resolve_path(workspace, v1_record)
 with (v1_root / "source_manifest.csv").open(newline="", encoding="utf-8") as handle:
     v1_sources = list(csv.DictReader(handle))
+with (v1_root / "events.csv").open(newline="", encoding="utf-8") as handle:
+    v1_events = list(csv.DictReader(handle))
+v1_event_counts = {
+    split: sum(row["output_split"] == split for row in v1_events)
+    for split in ("train", "val", "test")
+}
+assert sum(v1_event_counts.values()) == 3749
 v1_assignments = {
     row["source_id"]: (row["output_split"], row["source_class"])
     for row in v1_sources
@@ -146,15 +153,17 @@ assert historical["val_samples"] == v21_trace_counts["val"]
 assert historical["test_samples"] == v21_trace_counts["test"]
 
 dataset_table = [
-    "| Split | Traces | MAD v2.1 events |",
-    "|---|---:|---:|",
+    "| Split | Traces | MAD v1 events | MAD v2.1 events |",
+    "|---|---:|---:|---:|",
 ]
 for split in ("train", "val", "test"):
     dataset_table.append(
-        f"| {split} | {v21_trace_counts[split]:,} | {EXPECTED_EVENT_COUNTS[split]:,} |"
+        f"| {split} | {v21_trace_counts[split]:,} | {v1_event_counts[split]:,} | "
+        f"{EXPECTED_EVENT_COUNTS[split]:,} |"
     )
 dataset_table.append(
     f"| **Total** | **{sum(v21_trace_counts.values()):,}** | "
+    f"**{sum(v1_event_counts.values()):,}** | "
     f"**{sum(EXPECTED_EVENT_COUNTS.values()):,}** |"
 )
 display(
@@ -169,6 +178,11 @@ display(
 # jointly predicted objectness, centre, width, and three class probabilities at
 # each of 512 grid cells. Training used balanced class weights and selected the
 # checkpoint with the best validation performance.
+#
+# **Average precision (AP)** is the area under a class precision–recall curve.
+# `AP@0.5` counts a prediction as localised when its intersection over union
+# (IoU) with a reference box reaches 0.5; **mAP** is the mean AP over the three
+# size classes.
 
 # %%
 training_table = [
@@ -295,6 +309,14 @@ plt.show()
 
 # %% [markdown]
 # ## 3 · Why a crop classifier was not enough
+#
+# The experiment names are deliberately compact:
+#
+# - **B0:** the joint Swin–YOLO detector retrained on MAD v2.1;
+# - **B1:** B0 proposals after class-agnostic non-maximum suppression (NMS),
+#   which removes strongly overlapping boxes, retaining native class scores;
+# - **R1:** the same B1 boxes, reclassified from a region-of-interest (ROI)
+#   crop without changing their geometry.
 #
 # Three intermediate observations narrowed the problem:
 #
@@ -448,6 +470,10 @@ plt.show()
 
 # %% [markdown]
 # ## 6 · Final comparison
+#
+# `B1 + R1` is the factorial reference on MAD v2.1, not the original MAD v1
+# detector from section 0. The four arms below differ only by localiser and ROI
+# classifier within the final experimental framework.
 
 # %%
 results = final_arm_results(final_summary)
@@ -557,7 +583,7 @@ plt.show()
 # %% [markdown]
 # The examples complete the metric-level picture. L1 can place a strong box on
 # both a genuine event and structured background; R2 usually separates them,
-# but a physically plausible 10 µm waveform can still receive a confident 4 µm
+# but a MAD-labelled 10 µm waveform can still receive a confident 4 µm
 # class. The remaining limitation is therefore not one missing trick: it mixes
 # difficult morphology, pseudo-label uncertainty, and operating-threshold
 # tradeoffs.
