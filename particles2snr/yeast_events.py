@@ -57,7 +57,15 @@ def review_calibrated_detection_config_v1() -> YeastDetectionConfig:
 
     Boundary expansion is off. Review yeast-boundary-expansion-review-r2
     labelled the extended region "extension_margin" on 76 of 76 reviewed
-    events, so the event keeps the frames activation selected, plus the pad.
+    events, so the event is exactly the frames activation selected.
+
+    ``boundary_pad_ms`` is 0.0, matching the published MAD v2/v2.1 detection
+    contract; the 0.04 generic dataclass default was never that contract's
+    value. With expansion off, the pad was the last mechanism that grew a box
+    beyond its active frames. Over 6172 traces and 13226 events it changed no
+    event count and flipped 8 labels, all in the same direction: the 160
+    padded samples had pushed an otherwise 1.984 ms event past the 2.0 ms
+    width cap, so removing the pad admits events the pad itself disqualified.
     """
     return YeastDetectionConfig(
         boundary_expansion_enabled=False,
@@ -65,6 +73,7 @@ def review_calibrated_detection_config_v1() -> YeastDetectionConfig:
         strict_min_snr=12.0,
         active_min_concentration=0.0,
         cluster_gap_ms=0.128,
+        boundary_pad_ms=0.0,
         max_width_ms=2.0,
         max_events_per_signal=5,
     )

@@ -95,7 +95,6 @@ print(f"{EVENT_ID}: {record.signal.size} samples, "
 # | STFT | N = 512, overlap 384 → hop H = 128 samples (64 µs) |
 # | Smoothing | 3 frames |
 # | Activation | z ≥ 3.5 |
-# | Boundaries | pad 0.04 ms = 80 samples per side |
 # | Grouping | bridge gaps ≤ 0.128 ms (2 frames) |
 # | Qualification | width 0.06–2.0 ms · max z ≥ 12 |
 # | Cap | keep the 5 strongest events by z — a silent cut, not a reported test |
@@ -107,12 +106,13 @@ print(f"{EVENT_ID}: {record.signal.size} samples, "
 # something to read now.
 #
 # Every setting listed is one that changes an outcome. The preset also carries
-# two thresholds that do not, and the table leaves them out rather than
-# implying they arbitrate anything: the frame-level concentration floor, set
-# to 0.0 and therefore inert by construction, and the event-level
-# concentration floor, measured in §7d against 13 226 yeast events without a
-# single one reaching it. Appendix A2 prints the full object, inert fields
-# included.
+# three that do not, and the table leaves them out rather than implying they
+# arbitrate anything: the frame-level concentration floor, set to 0.0 and
+# therefore inert by construction; the event-level concentration floor,
+# measured in §7d against 13 226 yeast events without a single one reaching
+# it; and the boundary pad, now 0.0 like the published MAD v2.1 contract, so
+# **a box is exactly the frames activation selected — nothing is ever added
+# to it**. Appendix A2 prints the full object, inert fields included.
 
 # %% [markdown]
 # ## Why energy first — the particles2SNR lesson
@@ -405,17 +405,18 @@ fig.plot_legacy_vs_energy(slow_trace, replay=replay_slow, mad_events=slow_events
 #   the final output contains only the fast particle: one box, no trace of
 #   the other event.
 # - The MAD chain **returns both intervals** — and marks the slow one
-#   `reject`, because at 2.256 ms it exceeds the 2.0 ms qualification cap.
+#   `reject`, because at 2.176 ms it exceeds the 2.0 ms qualification cap.
 #   What differs from the legacy is the bookkeeping: there the hypothesis
 #   vanished inside a cascade; here the event is localised, scored and
 #   rejected by one named cap you can read, argue with, or change.
 # - **Read the widths honestly, though.** The declared truths are 1.6 ms
-#   (slow) and 0.8 ms (fast); MAD's intervals are 2.256 ms and 1.552 ms. On
+#   (slow) and 0.8 ms (fast); MAD's intervals are 2.176 ms and 1.472 ms. On
 #   these smooth Gaussian envelopes the energy tails cross z = 3.5 well
 #   beyond the declared span, so MAD's boundaries run wide — nearly ×2 on
 #   the *normal* particle. The rejection above is that boundary width
 #   colliding with the cap, at least as much as the particle's atypicality.
-# - The z maxima printed on the bars (≈1.6·10³ and 7.3·10⁴) are what
+#   ("Running on your own data" decomposes that width, term by term.)
+# - The z maxima printed on the bars (≈1.6·10³ and 1.5·10⁴) are what
 #   near-noiseless synthetic signals produce; the real record of section 1
 #   peaks at z = 75.5. Thresholds like "max z ≥ 12" live at real-noise
 #   scale, not at toy scale.
@@ -683,10 +684,8 @@ print(f"peak z: original = {trace.energy_z.max():.1f}   "
 # A frame is **active** when it is unusual enough: a[m] = 1 if z[m] ≥ 3.5.
 # The shaded region below covers the exact samples the grouping step will
 # assign to the run — `left × hop` to `right × hop + N`, the last frame
-# contributing its whole window. Note what it does *not* yet include: the
-# 80-sample pad of 7b, which the final interval adds on each side. Three
-# spans therefore exist in this section, and 7b prints all three so they
-# never have to be guessed from a figure.
+# contributing its whole window. That region *is* the event: no later stage
+# widens it, so this figure and the interval of 7c agree to the sample.
 
 # %%
 fig.plot_activation(trace);
@@ -728,7 +727,7 @@ def _explore(z_thr: float) -> None:
 # %% [markdown]
 # ### 7b · GROUP — from selected frames to one bounded interval
 #
-# Three operations, each with one number from the preset.
+# Two operations, and that is the whole of it.
 #
 # **1 · Bridge short gaps.** A passage can dip below the threshold for a frame
 # or two without ending. `cluster_gap_ms = 0.128 ms` becomes a tolerance in
@@ -740,45 +739,46 @@ def _explore(z_thr: float) -> None:
 # `right × hop + N`: a frame is a 512-sample window, not an instant, so the
 # last frame contributes its whole window.
 #
-# **3 · Pad.** `boundary_pad_ms = 0.04 ms` = **80 samples** on each side.
-# This one is live and the cell below measures it: it adds 160 of the
-# interval's 2 336 samples, **6.8 %** of the final width. The bead dataset
-# v2.1 of the appendix sets it to 0.0 — its boxes are exactly the grouped
-# active frames, with no margin at all.
+# There is no third step. **The box is the active frames, and nothing is added
+# to it** — the same rule the published MAD v2.1 contract states for beads.
 #
-# > **A stage that used to sit here, and no longer does.** The detector once
-# > grew each interval outwards while z stayed above a second, lower threshold
-# > (1.5 against 3.5 for detection), on the reasoning that an event's quiet
-# > tails are still the event. Review `yeast-boundary-expansion-review-r2` put
-# > that to a human: on **76 of 76** reviewed events the extended region was
-# > judged `extension_margin` — margin, not signal — and never once
-# > `extension_signal`. The stage is off; it remains reachable behind
-# > `boundary_expansion_enabled` so that comparison stays reproducible.
+# > **Two mechanisms used to sit here, and neither does now.** The detector
+# > once grew each interval outwards while z stayed above a second, lower
+# > threshold (1.5 against 3.5 for detection), on the reasoning that an
+# > event's quiet tails are still the event; review
+# > `yeast-boundary-expansion-review-r2` put that to a human, who judged the
+# > extended region `extension_margin` on **76 of 76** events and never once
+# > `extension_signal`. A fixed 0.04 ms pad then added 80 further samples on
+# > each side. Both are off. Retiring the pad changed no event count over
+# > 6 172 traces and flipped 8 labels out of 13 226 — every one of them a
+# > 1.984 ms event that the pad had pushed past the 2.0 ms width cap, so the
+# > pad was disqualifying events by widening them. Both settings remain
+# > reachable in the config so the comparison below stays reproducible.
 
 # %%
 bounds, = event_bounds(trace, record.signal.size)
 group_left, group_right = bounds.group
 print(f"activation run : frames {group_left}–{group_right}  ({group_right - group_left + 1} frames)")
-for label, (a, b) in (("run, in samples", bounds.group_samples),
-                      ("after the pad  ", (bounds.start, bounds.end))):
-    print(f"{label}: [{a:5d}, {b:5d}]  {b - a:5d} samples  {(b - a) / 2e6 * 1000:.3f} ms")
-expanded, = event_bounds(detector_trace(
-    record.signal, replace(config, boundary_expansion_enabled=True)), record.signal.size)
-print(f"retired expansion on: [{expanded.start:5d}, {expanded.end:5d}]  — the reviewed span")
+print(f"the event      : [{bounds.start:5d}, {bounds.end:5d}]  {bounds.end - bounds.start:5d} "
+      f"samples  {(bounds.end - bounds.start) / 2e6 * 1000:.3f} ms")
+assert (bounds.start, bounds.end) == bounds.group_samples, "a stage widened the box"
+historical, = event_bounds(detector_trace(record.signal, replace(
+    config, boundary_expansion_enabled=True, boundary_pad_ms=0.04)), record.signal.size)
+print(f"both retired mechanisms back on: [{historical.start:5d}, {historical.end:5d}]"
+      f"  — the reviewed span, to the sample")
 
 # %% [markdown]
-# The interval is the activation run plus the pad — nothing else. Every
+# The assertion is the point: the interval *is* the activation run. Every
 # boundary in this notebook is a direct consequence of one threshold,
 # z ≥ 3.5, which is the whole point of section 6 having built z carefully.
 #
-# The last line is worth pausing on: **re-enable the retired expansion and
-# the bounds come out at [6704, 9296] — the reviewed support of section 1,
-# to the sample.** That is a provenance check, not an accuracy result: the
-# reviewed span *is* that older detector's own proposal, so reproducing it
-# is an identity (the right edges agree by construction — same frame 68
-# through the same formula). What the identity localises is the difference:
-# the 256 samples on the left are exactly the region review r2 judged to be
-# margin rather than signal.
+# The last line is worth pausing on: **switch the expansion and the pad back
+# on and the bounds come out at [6704, 9296] — the reviewed support of
+# section 1, to the sample.** That is a provenance check, not an accuracy
+# result: the reviewed span *is* that older detector's own proposal, so
+# reproducing it is an identity. What the identity localises is the
+# difference — 256 samples on the left from the expansion, 80 on each side
+# from the pad, and nothing else.
 #
 # ### 7c · The output, back on the record
 
@@ -789,28 +789,21 @@ fig.plot_detected_events(record.signal, record_events, config,
                          truth_spans_ms=[(event_start / 2e6 * 1000, event_end / 2e6 * 1000)]);
 
 # %% [markdown]
-# The green bar is the bounded event the notebook set out to produce. It sits
-# inside the blue reviewed span but does not fill it: the two agree on the
-# right edge and differ by the 256 left-edge samples that 7b just accounted
-# for, region by region. The visible gap is the retired expansion stage —
-# reviewed, and ruled margin.
-#
-# **Why the green bar is wider than the shading of 7a, and narrower than the
-# blue span.** Three different spans have appeared, each one strictly
-# containing the previous, and the whole of this section is the passage from
-# one to the next:
+# The green bar is the bounded event the notebook set out to produce. It is
+# **the same span the figure of 7a shaded** — [7040, 9216] — because nothing
+# between the two figures widens it. It sits inside the blue reviewed span
+# without filling it, and the difference is exactly what 7b just accounted
+# for:
 #
 # | Span | Samples | Width | Built by |
 # |---|---|---|---|
-# | activation run, shaded in 7a | [7040, 9216] | 1.088 ms | frames 55–68, last frame's window included |
-# | **the green bar here** | [6960, 9296] | 1.168 ms | + the 80-sample pad on each side (7b) |
-# | the blue span | [6704, 9296] | 1.296 ms | + 256 samples of retired expansion, on the left only |
+# | activation run, shaded in 7a — **and the green bar here** | [7040, 9216] | 1.088 ms | frames 55–68, last frame's window included |
+# | the blue span | [6704, 9296] | 1.296 ms | + 256 samples of expansion on the left, + an 80-sample pad on each side — both retired |
 #
-# So the green bar exceeds 7a's shading by exactly the pad, and falls short of
-# the blue span by exactly the retired stage. And note what the blue span is
-# here: **an older detector's own proposal, confirmed by a reviewer** — not an
-# independently measured boundary. The next section uses the same pale blue for
-# something different in kind, which is why it says so explicitly.
+# Note what the blue span is here: **an older detector's own proposal,
+# confirmed by a reviewer** — not an independently measured boundary. The
+# next section uses the same pale blue for something different in kind, which
+# is why it says so explicitly.
 #
 # ### 7d · QUALIFY — the interval still has to earn its label
 #
@@ -820,12 +813,52 @@ fig.plot_detected_events(record.signal, record_events, config,
 #
 # | Reported test | Preset | On this event |
 # |---|---|---|
-# | width within 0.06–2.0 ms | `min/max_width_ms` | 1.168 ms ✔ |
+# | width within 0.06–2.0 ms | `min/max_width_ms` | 1.088 ms ✔ |
 # | max z over the event ≥ 12 | `strict/medium_min_snr` | 75.5 ✔ |
 #
-# The slow particle of section 5 failed the width test at 2.256 ms and was
-# labelled `reject`; on the yeast corpus the z floor is what every other
-# rejection comes down to.
+# **Two z thresholds, two different jobs — this is the one thing to get
+# straight.** They are easy to confuse because they are the same quantity:
+#
+# | | z ≥ 3.5 (§7a) | max z ≥ 12 (here) |
+# |---|---|---|
+# | asked of | every **frame**, one at a time | the **event**, once it exists |
+# | question | is this frame part of an event? | is this event strong enough to keep? |
+# | decides | *where* the boundaries fall | *whether* there is a label at all |
+#
+# So 3.5 draws the box and 12 accepts or rejects it. Our record answers 75.5
+# to the second question, which looks like a strange thing to compare to 12 —
+# **and that is the correct reading: this event is not near the line.** A
+# clean single passage never is. The floor is not there for this event; it is
+# there for the intervals that activation localises out of a rise that is
+# real but far too weak to become a training label.
+#
+# **How live is that floor?** Over the whole registered acquisition, of the
+# 13 226 intervals the chain localises, **3 881 — 29 % — never reach z = 12
+# and are rejected**, and 826 of them land in the narrow window [10, 14)
+# where the decision is genuinely close. The median accepted event sits at
+# z = 47; 75.5 is an unremarkable strong passage. Here is a record where the
+# floor does the work at close range:
+
+# %%
+near_floor = load_reviewed_event(workspace, "864ceffff54958c218e8:02").signal
+near_events, near_reason = detect_yeast_events(near_floor, config)
+assert not near_reason, near_reason
+for e in near_events:
+    verdict = "accepted" if e.quality != "reject" else f"rejected ({e.rejection_reason})"
+    print(f"max z = {e.snr_proxy:5.1f}   vs floor {config.strict_min_snr:.0f}   → {verdict}")
+fig.plot_detected_events(near_floor, near_events, config);
+
+# %% [markdown]
+# Three intervals, all genuinely localised, all straddling the floor: 7.0 and
+# 9.1 are rejected, 14.5 is kept. Nothing separates them but that one number —
+# which is exactly what a threshold is, and why the notebook calls 12 a
+# development choice rather than a discovered constant. Elsewhere in the
+# corpus an event reaches **z = 11.7** and is rejected for it; move the floor
+# by 0.3 and it becomes a training label.
+#
+# The slow particle of section 5 failed the *width* test at 2.176 ms and was
+# labelled `reject`; on the yeast corpus every other rejection comes down to
+# the z floor.
 #
 # **A third test exists in the code and never binds.** `_quality` also
 # requires an *event concentration* — the share of the event's own excess
@@ -891,7 +924,7 @@ fig.plot_detected_events(record.signal, record_events, config,
 fig.plot_ssl_crop(record.signal, record_events[0], config);
 
 # %% [markdown]
-# - Pale green: the detected event, 2 336 samples. Pale blue: the
+# - Pale green: the detected event, 2 176 samples. Pale blue: the
 #   8 192-sample window handed to the model. Dashed line: the
 #   energy-weighted centre.
 # - Why the crop is wider than the event: a model given only the event would
@@ -976,8 +1009,6 @@ print(f"frames {left}–{right} still above z = {config.active_snr_z}, centre to
       f"  :  {centres_ms:6.3f} ms")
 print(f"+ half an STFT window at each end (N = {config.stft_nperseg})   : + "
       f"{2 * half_window / 2e6 * 1000:6.3f} ms")
-print(f"+ the boundary pad, 80 samples per side        : + "
-      f"{2 * config.boundary_pad_ms:6.3f} ms")
 print(f"detector interval                              = "
       f"{your_events[0].width_ms:6.3f} ms   "
       f"({your_events[0].width_ms / 0.8:.2f} × the declared span)")
@@ -1001,7 +1032,7 @@ print(f"— yet the frame still activates, because one STFT window spans {window
 # front end: no z threshold can produce a boundary sharper than the window
 # that measures it. **On real traces the effect is far smaller**, because a
 # real noise floor lifts the denominator — the record of section 1 peaks at
-# z = 75.5, not 73 000, and its interval is 1.168 ms. Read synthetic widths as
+# z = 75.5, not 73 000, and its interval is 1.088 ms. Read synthetic widths as
 # a property of smooth noiseless envelopes, and never calibrate a width
 # threshold on them.
 #
@@ -1076,7 +1107,6 @@ fig.plot_records_overview(entries, config);
 #
 # | | Yeast preset | Bead MAD v2.1 |
 # |---|---|---|
-# | boundary pad | 0.04 ms (80 samples/side) | **0.0** — boxes are exactly the grouped frames |
 # | splitting one group | — | **deblending**: a group whose z profile holds two peaks ≥ 0.25 ms apart across a deep enough valley is cut in two, each half kept only if narrow-band (≤ 12 kHz) and concentrated (≥ 0.8) |
 # | weak events | — | **unified rescue**: an event with 7 ≤ max z < 12 is admitted if it is narrow-band and highly concentrated — which is why the bead corpus holds events down to z = 7.1 |
 # | events per trace | 5 strongest kept | **no cap** — hence the 7-box trace below |
@@ -1174,7 +1204,7 @@ for name, value in asdict(config).items():
     print(f"{name:<32}{value!r:>12}{mark}")
 
 # %% [markdown]
-# The six marked lines are exactly what `review_calibrated_detection_config_v1()`
+# The seven marked lines are exactly what `review_calibrated_detection_config_v1()`
 # changes relative to a bare `YeastDetectionConfig()` — the six the "Running on
 # your own data" protocol warns about. Among them is
 # `active_min_concentration = 0.0`, the frame-level concentration gate this

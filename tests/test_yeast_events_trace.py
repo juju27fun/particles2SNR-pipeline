@@ -4,12 +4,20 @@ The golden candidate tuples pin detect_yeast_events under
 review_calibrated_detection_config_v1 on the four manifested review records.
 
 They were first captured before the detector_trace refactor and proved it
-behaviour-preserving. They were re-captured once, deliberately, when boundary
-expansion was switched off following review
-yeast-boundary-expansion-review-r2 (76 of 76 reviewed events labelled
-"extension_margin"). That change moved boundaries only: the event count and
-every quality label on these four records are the same before and after, and
-snr_proxy is bit-identical.
+behaviour-preserving. They have been re-captured twice since, each time
+deliberately, and each time for a change that moves boundaries only:
+
+1. boundary expansion switched off, following review
+   yeast-boundary-expansion-review-r2 (76 of 76 reviewed events labelled
+   "extension_margin");
+2. boundary_pad_ms set to 0.0 in the preset, aligning it with the published
+   MAD v2/v2.1 detection contract.
+
+Across both, the event count and every quality label on these four records
+are unchanged, and snr_proxy, energy_concentration, phase_coherence,
+center_index and every Doppler field are bit-identical. The second change
+subtracts exactly 80 samples from each bound, so every event_start rises by
+80 and every event_end falls by 80.
 """
 
 from __future__ import annotations
@@ -26,6 +34,7 @@ from particles2snr.yeast_events import (
     bandpass_yeast_signal,
     detect_yeast_events,
     detector_trace,
+    event_bounds,
     review_calibrated_detection_config_v1,
 )
 
@@ -149,33 +158,43 @@ def test_detector_reason_codes_are_preserved() -> None:
 
 GOLDEN_CANDIDATES = {
     "9459e76ce29342debc90:00": [
-        (0, 8249, 6960, 9296, 2336, 1.168, 75.53513989790409, 0.9674661867386373,
+        (0, 8249, 7040, 9216, 2176, 1.088, 75.53513989790409, 0.9674661867386373,
          0.4220391996204853, 2, 11718.75, 19531.25, 11718.75, "strict", ""),
     ],
     "214f4ce4967af98a954c:00": [
-        (0, 5005, 4144, 5968, 1824, 0.912, 137.88375771241945, 0.9779900552479162,
+        (0, 5005, 4224, 5888, 1664, 0.832, 137.88375771241945, 0.9779900552479162,
          0.9680505990982056, 1, 7812.5, 7812.5, 7812.5, "strict", ""),
     ],
     "e1b4603f8b9de6204003:02": [
-        (0, 1923, 1456, 2384, 928, 0.464, 5.066511954329469, 0.8850371830671583,
+        (0, 1923, 1536, 2304, 768, 0.384, 5.066511954329469, 0.8850371830671583,
          0.6668993681669235, 2, 11718.75, 19531.25, 19531.25, "reject",
          "quality_below_threshold"),
-        (1, 4673, 4272, 5072, 800, 0.4, 4.6372648854562595, 0.8579668343770815,
+        (1, 4673, 4352, 4992, 640, 0.32, 4.6372648854562595, 0.8579668343770815,
          1.0000001192092896, 1, 15625.0, 15625.0, 15625.0, "reject",
          "quality_below_threshold"),
-        (2, 11784, 10544, 13136, 2592, 1.296, 429.0063412603064, 0.9823605869852847,
+        (2, 11784, 10624, 13056, 2432, 1.216, 429.0063412603064, 0.9823605869852847,
          0.7330341339111328, 1, 11718.75, 11718.75, 11718.75, "strict", ""),
-        (3, 14922, 14384, 15440, 1056, 0.528, 19.570400710359653, 0.9508561707536479,
+        (3, 14922, 14464, 15360, 896, 0.448, 19.570400710359653, 0.9508561707536479,
          0.9996846914291382, 1, 19531.25, 19531.25, 19531.25, "strict", ""),
     ],
     "09f788a7473797b794f6:01": [
-        (0, 11189, 10288, 12112, 1824, 0.912, 87.9829139571677, 0.9723372135933122,
+        (0, 11189, 10368, 12032, 1664, 0.832, 87.9829139571677, 0.9723372135933122,
          0.7926072478294373, 1, 15625.0, 15625.0, 15625.0, "strict", ""),
-        (1, 12478, 12080, 12880, 800, 0.4, 3.899382774331652, 0.8764158315152341,
+        (1, 12478, 12160, 12800, 640, 0.32, 3.899382774331652, 0.8764158315152341,
          0.9999999403953552, 1, 11718.75, 11718.75, 11718.75, "reject",
          "quality_below_threshold"),
     ],
 }
+
+
+def test_preset_boxes_are_exactly_the_grouped_active_frames() -> None:
+    """No mechanism may grow a box beyond the frames activation selected."""
+    config = review_calibrated_detection_config_v1()
+    assert config.boundary_pad_ms == 0.0
+    assert config.boundary_expansion_enabled is False
+    trace = detector_trace(_synthetic_event(), config)
+    for bounds in event_bounds(trace, 16384):
+        assert (bounds.start, bounds.end) == bounds.group_samples
 
 
 def _load_workspace_or_skip():
