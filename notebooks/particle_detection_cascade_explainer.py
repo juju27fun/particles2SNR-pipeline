@@ -43,9 +43,12 @@ import json
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 from IPython.display import Markdown, display
 
+from detseg.models import build_detector
 from detseg.postprocess import rebuild_model
+from detseg.train_detection import remap_targets_class_agnostic
 from internship_workspace.config import Workspace
 from internship_workspace.mad_conv1dgap_training import (
     DATASET_KEY,
@@ -60,6 +63,7 @@ from internship_workspace.particle_detection_cascade_figures import (
     plot_b1_r1_design,
     plot_conditioned_classification_task,
     plot_grid_responsibility,
+    plot_l1_r2_design,
     plot_localized_misclassification,
     plot_preprocessing_deltas,
     plot_r1_tradeoffs,
@@ -68,8 +72,10 @@ from internship_workspace.particle_detection_cascade_figures import (
     r1_intermediate_facts,
     roi_training_facts,
     select_localized_misclassification,
+    summarize_r2_development_exports,
     validation_arm_results,
 )
+from p0.models import ProposalAwareROIClassifier
 
 # %%
 workspace = Workspace.load()
@@ -597,3 +603,110 @@ plt.show()
 # > **Reading checkpoint.** A reader should now be able to separate geometry,
 # > class ranking, score calibration, and background rejection—and explain why
 # > correcting `10 µm → 4 µm` was necessary but not sufficient.
+
+# %% [markdown]
+# ## 7 · L1 class-agnostic localisation and R2 proposal-aware classification
+#
+# The R1 diagnosis separated two remaining failures. **L1** removes class
+# competition from localisation; **R2** adds the missing event-versus-background
+# decision to ROI classification. Neither changes MAD v2.1, crop length, or
+# local z-scoring.
+
+# %% [markdown]
+# ### L1: learn one event category
+#
+# During L1 training, every GT class is remapped to class zero at runtime. Box
+# geometry is untouched, the YOLO head has one class channel, and the class-loss
+# weight is zero. The model therefore optimises objectness and box regression
+# without asking the same feature to separate 2/4/10 µm.
+
+# %%
+toy_targets = [torch.tensor([[2.0, 0.30, 0.10], [1.0, 0.70, 0.20]])]
+remapped_targets = remap_targets_class_agnostic(toy_targets)
+assert torch.equal(remapped_targets[0][:, 1:], toy_targets[0][:, 1:])
+assert torch.equal(remapped_targets[0][:, 0], torch.zeros(2))
+
+l1_model = build_detector("swin1d", num_classes=1, head="yolo").cpu()
+l1_contract = inspect_detector_shapes(l1_model, input_length=16_384)
+assert l1_contract.output_shape == (1, 4, 512)
+display(Markdown(
+    f"**Executed contract.** Classes `{toy_targets[0][:, 0].tolist()}` become "
+    f"`{remapped_targets[0][:, 0].tolist()}` while centres and widths remain identical. "
+    f"The measured L1 output is `{l1_contract.output_shape}`: objectness, one event "
+    "channel, centre offset, and log-width."
+))
+
+# %% [markdown]
+# ### R2: learn background from the proposals seen at inference
+#
+# R2 removes the GT fallback. Every B1 development proposal receives a target
+# from its maximum IoU with a GT event:
+#
+# - IoU ≥ 0.5: positive event, with its three-way class target;
+# - IoU < 0.1: background;
+# - 0.1 ≤ IoU < 0.5: ambiguous, excluded from both training losses.
+#
+# Crops remain proposal-centred. A shared Conv1DGAP-S encoder feeds one event
+# logit and three conditional class logits.
+
+# %%
+r2_model = ProposalAwareROIClassifier(input_length=6_144, num_classes=3).cpu()
+with torch.inference_mode():
+    r2_event_logits, r2_class_logits = r2_model(torch.zeros(1, 1, 6_144))
+r2_parameters = sum(parameter.numel() for parameter in r2_model.parameters())
+assert r2_event_logits.shape == (1,) and r2_class_logits.shape == (1, 3)
+
+r2_index_summary = summarize_r2_development_exports(
+    b1_root / "development_detector/proposals.csv",
+    b1_root / "development_detector/ground_truth.csv",
+)
+expected_r2_counts = {
+    "train": {"total": 39280, "positive": 4092, "background": 29274, "ambiguous": 5914},
+    "val": {"total": 6920, "positive": 750, "background": 5087, "ambiguous": 1083},
+}
+for split, expected in expected_r2_counts.items():
+    assert all(r2_index_summary["by_split"][split][key] == value for key, value in expected.items())
+
+figure, axis = plt.subplots(figsize=(11.5, 4.0), constrained_layout=True)
+plot_l1_r2_design(
+    ax=axis,
+    l1_output_channels=l1_contract.output_shape[1],
+    r2_parameters=r2_parameters,
+)
+plt.show()
+
+# %%
+r2_table = [
+    "| Split | Proposals | Positive | Background | Ambiguous | On MAD-empty traces |",
+    "|---|---:|---:|---:|---:|---:|",
+]
+for split in ("train", "val"):
+    row = r2_index_summary["by_split"][split]
+    r2_table.append(
+        f"| {split} | {row['total']:,} | {row['positive']:,} | "
+        f"{row['background']:,} | {row['ambiguous']:,} | {row['on_empty_trace']:,} |"
+    )
+display(Markdown("\n".join(r2_table)))
+
+# %% [markdown]
+# R2 trains event BCE on positives and background, and class CE only on
+# positives:
+#
+# \[
+# \mathcal L_{R2}=\operatorname{BCE}(\mathrm{event})+
+# \mathbf 1_{\mathrm{positive}}\operatorname{CE}(\mathrm{class}).
+# \]
+#
+# At inference, the complete class score becomes
+#
+# \[
+# s_k=o\,P(\mathrm{event}\mid\mathrm{ROI})\,P(k\mid\mathrm{event},\mathrm{ROI}).
+# \]
+#
+# L1 and R2 therefore address different failure modes: L1 can change proposal
+# geometry and recall; R2 cannot move a box but can suppress background and
+# re-rank its class. That separation makes a causal 2×2 comparison possible.
+#
+# > **Reading checkpoint.** A reader should now be able to reproduce the L1
+# > target remapping, derive every R2 training target from IoU, and explain why
+# > the two components can be evaluated independently.
