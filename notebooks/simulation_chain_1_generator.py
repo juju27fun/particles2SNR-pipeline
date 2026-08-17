@@ -192,12 +192,285 @@ def show_image(path, *, ax=None, title=None, figsize=(11, 5)):
 
 # %%
 # --- problem ---
-# Plot helpers for the opening section. Each takes ax=None or axes=None so a
-# cell can redraw without rebuilding a figure. No method lives here: these
-# functions receive numbers already measured by the section's cells.
+# Helpers for the opening section: the census bookkeeping, the print grammar of
+# its tables, and the plots. Each plot helper takes ax=None or axes=None so a
+# cell can redraw without rebuilding a figure. No method lives here — every
+# number arrives already measured by the section's cells, or is a counter over
+# rows the cell selected.
+
+import collections
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+from internship_workspace.notebook_evidence import sha256_file
+from internship_workspace.z8_coverage import read_rows
+
+
+def label_census(rows, *, group_key, class_field):
+    """Group annotated events by the recording they were detected in.
+
+    The grouping key is the argument that matters: a label is a property of the
+    recording, so counting recordings rather than events is what turns "2,194
+    labels" into however many independent decisions there really are.
+    """
+    per_recording = collections.Counter(row[group_key] for row in rows)
+    class_of = {row[group_key]: row[class_field] for row in rows}
+    classes_seen = collections.defaultdict(set)
+    for row in rows:
+        classes_seen[row[group_key]].add(row[class_field])
+
+    recordings_by_count = collections.defaultdict(collections.Counter)
+    events_by_count = collections.Counter()
+    for filename, count in per_recording.items():
+        recordings_by_count[str(count)][class_of[filename]] += 1
+        events_by_count[str(count)] += count
+
+    alone = sum(1 for count in per_recording.values() if count == 1)
+    return {
+        "recordings": per_recording,
+        "class_of": class_of,
+        "class_counts": collections.Counter(class_of.values()),
+        "distinct_classes_per_recording": max(len(seen) for seen in classes_seen.values()),
+        "recordings_by_event_count": {
+            key: dict(value) for key, value in recordings_by_count.items()
+        },
+        "events_by_event_count": dict(events_by_count),
+        "events_sharing_a_label_fraction": 1.0 - alone / len(rows),
+    }
+
+
+def describe_label_channel(census, *, summary, contract, events, physical, sampling_hz):
+    """The corpus in six lines: recordings, events, purity, duration."""
+    recordings = len(census["recordings"])
+    print(f"development recordings          {summary['development_signal_count']}")
+    print(f"recordings carrying an event    {recordings}"
+          f"  ({100 * recordings / summary['development_signal_count']:.1f} %)")
+    print(f"annotated events                {events}"
+          f"   ({physical} in the three physical classes,"
+          f" {events - physical} demoted to 'unclear')")
+    print(f"distinct physical classes in one recording   "
+          f"{census['distinct_classes_per_recording']}")
+    print(f"events sharing their label with a sibling    "
+          f"{100 * census['events_sharing_a_label_fraction']:.1f} %")
+    print(f"recording duration              {contract['source_length']} samples"
+          f" = {1000 * contract['source_length'] / sampling_hz:.3f} ms"
+          f" at {contract['sampling_frequency_hz'] / 1e6:.0f} MHz")
+
+
+def describe_entropy(counts, *, class_order, entropy_bits, total_bits, ceiling):
+    """The label channel priced in bits, and therefore in bytes."""
+    print(f"independent labels              {sum(counts.values())}")
+    print("class frequencies               "
+          + "  ".join(f"{name} {counts[name]}" for name in class_order))
+    print(f"entropy per label               {entropy_bits:.4f} bits"
+          f"  (ceiling log2(3) = {ceiling:.4f})")
+    print(f"whole real label channel        {total_bits:.0f} bits"
+          f" = {total_bits / 8:.0f} bytes")
+
+
+def blind_review(review_root, candidates):
+    """Join the reviewer's decisions to the stratum each candidate was drawn from.
+
+    Returns the decision rows, the per-stratum verdict tally and the overall one.
+    """
+    axis_of = {candidate["candidate_id"]: candidate["blind_evidence"]["failure_axis"]
+               for candidate in candidates}
+    decisions = [row for row in read_rows(review_root / "current_decisions.csv")
+                 if row["candidate_id"] in axis_of]
+    verdicts = collections.defaultdict(collections.Counter)
+    for row in decisions:
+        verdicts[axis_of[row["candidate_id"]]][row["existence"]] += 1
+    return decisions, verdicts, collections.Counter(row["existence"] for row in decisions)
+
+
+def describe_blind_review(decisions, overall, *, sealed_excluded):
+    """What one human confirmed, and — the point of the cell — what they did not."""
+    classed = sum(1 for row in decisions if row["estimated_class"])
+    reviewers = sorted({row["reviewer"] for row in decisions})
+    print(f"adjudicated on development      {len(decisions)}"
+          f"   (sealed test candidates excluded: {sealed_excluded})")
+    print(f"reviewers                       {', '.join(reviewers)}")
+    print("verdicts                        "
+          + "  ".join(f"{name} {count}" for name, count in overall.most_common()))
+    print(f"rejected as not a particle      "
+          f"{100 * overall['not_particle'] / len(decisions):.0f} %")
+    print(f"decisions carrying a class      {classed} / {len(decisions)}")
+    return classed
+
+
+def census_evidence(census, *, dataset, summary, events, physical, events_csv,
+                    entropy_bits, total_bits, datasets):
+    """The emission payload for the label-channel census, as (metrics, provenance).
+
+    Nothing here is a new number: it restates what the cells above printed, in
+    the shape `notebook_evidence.emit_run` records. The claim boundary stays in
+    the cell, because that is the part a reader has to agree with.
+    """
+    metrics = {
+        "schema_version": 1,
+        "analysis": "real-label-channel-census",
+        "population": {
+            "dataset": dataset,
+            "selection": "development train and val rows, all four label values",
+            "recordings_in_release": summary["development_signal_count"],
+            "recordings_with_events": len(census["recordings"]),
+            "events": events,
+            "events_in_physical_classes": physical,
+        },
+        "distinct_physical_classes_per_recording": census["distinct_classes_per_recording"],
+        "recordings_by_event_count": {
+            str(count): int(recordings)
+            for count, recordings in sorted(
+                collections.Counter(census["recordings"].values()).items()
+            )
+        },
+        "events_sharing_a_label_fraction": census["events_sharing_a_label_fraction"],
+        "label_channel": {
+            "independent_labels": sum(census["class_counts"].values()),
+            "entropy_bits_per_label": entropy_bits,
+            "total_bits": total_bits,
+            "class_counts": dict(census["class_counts"]),
+        },
+    }
+    provenance = {
+        "datasets": datasets,
+        "inputs": {"events_csv_sha256": sha256_file(events_csv)},
+        "parameters": {
+            "grouping_key": "source_filename",
+            "class_field": "physical_source_class",
+        },
+        "metric_definitions": {
+            "events_sharing_a_label_fraction": (
+                "fraction of annotated events found in a recording that produced "
+                "at least two events, so that their label is a single "
+                "recording-level decision replicated"
+            ),
+            "entropy_bits_per_label": (
+                "Shannon entropy of the physical class of the recordings that "
+                "produced at least one event, in bits"
+            ),
+        },
+    }
+    return metrics, provenance
+
+
+def describe_model_size(model, config, *, run_id, sampling_hz):
+    """Where the parameters of a masked reconstructor actually sit."""
+    total = sum(parameter.numel() for parameter in model.parameters())
+    decoder = sum(parameter.numel()
+                  for parameter in model.reconstruction_head.parameters())
+    length = config["data"]["input_length"]
+    print(f"config sha256 matches {run_id}")
+    print(f"window                          {length} samples"
+          f" = {1000 * length / sampling_hz:.3f} ms")
+    print(f"tokens                          {model.n_tokens}"
+          f" patches of {config['model']['patch_size']} samples")
+    print(f"parameters                      {total:,}")
+    print(f"  encoder, kept at inference    {total - decoder:,}"
+          f"  ({100 * (1 - decoder / total):.1f} %)")
+    print(f"  decoder, dropped              {decoder:,}"
+          f"  ({100 * decoder / total:.1f} %)")
+    return total, decoder
+
+
+def masking_geometry(examples, ssl_metrics):
+    """How many samples each stored example hides, and in how many patches.
+
+    Raises if the budget is not constant, because the P25 policy says it is.
+    """
+    masked_per_trace = examples["mask"].sum(axis=1)
+    if len(set(masked_per_trace.tolist())) != 1:
+        raise AssertionError("the P25 budget is not constant across examples")
+    return {
+        "hidden_per_trace": int(masked_per_trace[0]),
+        "spans": [int(np.count_nonzero(np.diff(row.astype(int)) == 1)) + int(row[0])
+                  for row in examples["mask"]],
+        "budget_from_metrics": (ssl_metrics["real_validation"]["model"]["masked_points"]
+                                / ssl_metrics["counts"]["real_validation"]),
+        "samples": int(examples["signal"].shape[1]),
+    }
+
+
+def describe_masking(geometry, rows, ssl_metrics):
+    """The masking policy as it reaches the network, read off the stored examples."""
+    hidden, spans = geometry["hidden_per_trace"], geometry["spans"]
+    print(f"examples                        {len(rows)} "
+          f"({', '.join(sorted({row['class_name'] for row in rows}))},"
+          f" split {', '.join(sorted({row['split'] for row in rows}))})")
+    print(f"hidden per trace                {hidden} of {geometry['samples']} samples"
+          f" = {100 * hidden / geometry['samples']:.1f} %")
+    print(f"mask geometry                   {set(spans)} disjoint patches of "
+          f"{hidden // spans[0]} samples")
+    print(f"reproduces the run's budget     "
+          f"{ssl_metrics['real_validation']['model']['masked_points']:.0f} masked points"
+          f" / {ssl_metrics['counts']['real_validation']} traces"
+          f" = {geometry['budget_from_metrics']:.0f}")
+
+
+def masked_mse(examples, key):
+    """Per-example mean squared error on the hidden samples only — the loss."""
+    hidden = examples["mask"].astype(bool)
+    return np.asarray([
+        float(np.mean((examples["signal"][index] - examples[key][index])[hidden[index]] ** 2))
+        for index in range(len(hidden))
+    ])
+
+
+def describe_reconstruction_error(model_mse, interpolation_mse, ssl_metrics):
+    """Six stored examples against the aggregate they cannot reproduce."""
+    published_model = ssl_metrics["real_validation"]["model"]["masked_mse"]
+    published_interpolation = ssl_metrics["real_validation"]["interpolation"]["masked_mse"]
+    print(f"stored examples, masked MSE     model {model_mse.min():.2e}–{model_mse.max():.2e}"
+          f"   interpolation {interpolation_mse.min():.2e}–{interpolation_mse.max():.2e}")
+    print(f"published over {ssl_metrics['counts']['real_validation']} traces"
+          f"       model {published_model:.2e}"
+          f"   interpolation {published_interpolation:.2e}")
+    if not model_mse.min() <= published_model <= model_mse.max():
+        print("note: the six stored examples do not bracket the published aggregate")
+
+
+def describe_data_appetite(*, corpus, train, validation, epochs, hidden_per_trace,
+                          events, labels, human_classes, label_bits):
+    """Both sides of the count: what reconstruction consumes, what labels supply."""
+    problems = train * epochs
+    print(f"synthetic corpus                {corpus:,} events"
+          f"  ({train:,} train + {validation:,} val)")
+    print(f"epochs                          {epochs}")
+    print("")
+    print("RECONSTRUCTION SIDE")
+    print(f"  trace-level problems / epoch  {train:,}")
+    print(f"  trace-level problems / run    {problems:,}   ({problems / 1e6:.2f} M)")
+    print(f"  hidden values / epoch         {train * hidden_per_trace:,}"
+          f"   ({train * hidden_per_trace / 1e6:.1f} M)")
+    print(f"  hidden values / run           {problems * hidden_per_trace:,}"
+          f"   ({problems * hidden_per_trace / 1e9:.2f} G)")
+    print("")
+    print("LABEL SIDE")
+    print(f"  annotated real events         {events:,}")
+    print(f"  independent real labels       {labels:,}")
+    print(f"  human event-level classes     {human_classes}")
+    print(f"  total label information       {label_bits:.0f} bits")
+    print("")
+    print(f"reconstruction problems per annotated real event   {problems / events:.0f}×")
+
+
+def describe_coverage_grid(knobs, volume, boundary, *, bins_per_knob, real, synthetic,
+                           max_knobs):
+    """The toy grid, and where two real corpus sizes land on it."""
+    for count, cells, surface in zip(knobs, volume, boundary):
+        print(f"k={count}   volume {cells:>7,}   boundary {surface:>7,}"
+              f"   ratio {cells // surface}")
+    reach = lambda size, cost: int(np.searchsorted(cost, size, side="right"))
+    print("")
+    print(f"at {bins_per_knob} bins per knob, {real:,} real events reach"
+          f" {reach(real, volume)} knobs as a volume,"
+          f" {reach(real, boundary)} as a boundary")
+    print(f"at {bins_per_knob} bins per knob, {synthetic:,} "
+          f"synthetic events reach {reach(synthetic, volume)} knobs as a volume")
+    print(f"inverted at k={max_knobs}: real events buy "
+          f"{real ** (1 / max_knobs):.2f} bins per knob,"
+          f" synthetic {synthetic ** (1 / max_knobs):.2f}")
 
 
 def plot_label_inheritance(census, *, class_colour, class_order, ax=None):
@@ -371,8 +644,15 @@ Gaussian envelope and the unit conversions here, which is the reimplementation
 the notebook contract forbids.
 """
 
+import time
+
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.decomposition import PCA
+from sklearn.metrics import r2_score
+from sklearn.model_selection import KFold, cross_val_predict
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.preprocessing import StandardScaler
 
 from p3_ssl.particle_equation_sweeps import (
     _example_indices_by_sweep_value,
@@ -390,6 +670,281 @@ def sweep_display(panel):
     return _single_param_display(panel)
 
 
+def reproduction_drift(panels, published):
+    """(signal drift, swept-value drift) of the regenerated family, in mV.
+
+    The published run stored every signal it encoded, so the family can be
+    checked signal for signal rather than in aggregate.
+    """
+    signal_drift = max(
+        float(np.max(np.abs(published[f"{panel.key}_signals"] - panel.encoded_signal)))
+        for panel in panels
+    )
+    value_drift = max(
+        float(np.max(np.abs(published[f"{panel.key}_color"] - panel.color_value)))
+        for panel in panels
+    )
+    return signal_drift, value_drift
+
+
+def report_family(panels, config, *, signal_drift, run_name):
+    """The family's shape and the drift against the run that published it."""
+    print(f"{len(panels)} knobs x {config['n_per_panel']} signals x "
+          f"{config['input_length']} samples, "
+          f"window {config['signal_window_duration_ms']} ms")
+    print("knobs:", ", ".join(panel.key for panel in panels))
+    print(f"reproduces {run_name} signal-for-signal "
+          f"(max |delta| = {signal_drift:.2e} mV, swept values exact)")
+
+
+def effective_snr_by_knob(panels, particle_wave, *, length, noise_std):
+    """20·log10(rms(clean) / σ) along every swept knob, not just the SNR one.
+
+    Only one row sweeps SNR explicitly, but amplitude is swept against a fixed
+    noise floor and τ changes the burst's energy, so both move the effective SNR
+    too. The clean waveform comes from the generator's own `particle_wave`.
+    """
+    t_norm = np.linspace(0.0, 1.0, int(length), dtype=np.float32)
+    output = {}
+    for panel in panels:
+        clean = particle_wave(
+            t_norm,
+            panel.params["A"],
+            panel.params["fD"],
+            panel.params["phi"],
+            panel.params["t0"],
+            panel.params["tau"],
+        )
+        rms = np.sqrt(np.mean(np.square(clean), axis=1))
+        sigma = (
+            panel.params["snr_noise_std"]
+            if panel.key == "snr_db"
+            else np.full(rms.shape, float(noise_std), dtype=np.float32)
+        )
+        output[panel.key] = 20.0 * np.log10(rms / sigma)
+    return output
+
+
+def report_sweep_ranges(panels, effective_snr, *, snr_check):
+    """Each knob's swept range beside the effective SNR that range implies."""
+    print(f"{'knob':<13}{'swept range':>26}{'effective SNR [dB]':>26}")
+    for panel in panels:
+        values, _, symbol, unit = sweep_display(panel)
+        span = effective_snr[panel.key]
+        suffix = f" {unit}" if unit else ""
+        print(
+            f"{panel.key:<13}"
+            f"{f'{symbol} {values.min():.2f} to {values.max():.2f}{suffix}':>26}"
+            f"{f'{span.min():+.1f} to {span.max():+.1f}':>26}"
+        )
+    print(
+        f"\nthe SNR formula reproduces the generator's own SNR column to "
+        f"{snr_check:.1e} dB, so the five other rows are on the same scale"
+    )
+
+
+def report_normalisation(panel, effective_snr):
+    """The two extreme windows of one knob, before and after the z-score."""
+    order = np.argsort(panel.color_value)
+    for name, index in (("weakest", int(order[0])), ("strongest", int(order[-1]))):
+        print(
+            f"{name:<10} A = {panel.color_value[index]:.2f} mV  "
+            f"raw std {float(np.std(panel.signal[index])):.3f} mV  "
+            f"model-input std {float(np.std(panel.encoded_signal[index])):.3f}  "
+            f"effective SNR {effective_snr[index]:+.1f} dB"
+        )
+    print(
+        "\nafter normalisation the two windows differ only in relative noise: "
+        "the A row is an SNR row with a different range"
+    )
+
+
+def report_training_geometry(backbone_config, config, *, sampling_hz, raw_crop):
+    """What the checkpoint was trained on, against what the sweep hands it."""
+    augmentation = backbone_config["augmentation"]
+    training_window_ms = raw_crop / sampling_hz * 1000.0
+    jitter_ms = training_window_ms * float(augmentation["jitter_frac"])
+    sweep_window_ms = float(config["signal_window_duration_ms"])
+    print(f"training input      : {backbone_config['input_representation_all_models']}")
+    print(f"training window     : {raw_crop} raw samples at "
+          f"{sampling_hz / 1e6:.0f} MHz = {training_window_ms:.3f} ms")
+    print(f"sweep window        : {int(config['input_length'])} samples "
+          f"= {sweep_window_ms:.3f} ms")
+    print(f"position jitter     : +/- {augmentation['jitter_frac']:.0%} of the window "
+          f"= +/- {jitter_ms:.3f} ms")
+    print(f"amplitude scale     : {augmentation['aug_scale_min']} to "
+          f"{augmentation['aug_scale_max']} (removed again by the z-score)")
+    print(f"augmentation noise  : {augmentation['aug_snr_db']} dB")
+    return training_window_ms, jitter_ms, sweep_window_ms
+
+
+def report_carrier_geometry(panels, *, training_window_ms, jitter_ms, sweep_window_ms):
+    """The same carrier counted in fringes, in both window geometries."""
+    carrier_khz = float(np.median(panels[0].params["fD"])) / sweep_window_ms
+    print(
+        f"\na {carrier_khz:.1f} kHz carrier shows "
+        f"{carrier_khz * sweep_window_ms:.0f} fringes in the swept window "
+        f"against {carrier_khz * training_window_ms:.0f} in the trained one"
+    )
+    print(
+        f"the jitter alone moves the carrier by {carrier_khz * jitter_ms:.0f} cycles, "
+        "so training randomised arrival time and phase together"
+    )
+
+
+def embed_panels(encoder, panels, extract, *, batch_size=256):
+    """Run the frozen encoder over every panel, reporting the cost per knob."""
+    started = time.time()
+    embeddings = {}
+    for panel in panels:
+        panel_started = time.time()
+        embeddings[panel.key] = extract(encoder, panel.encoded_signal,
+                                        batch_size=batch_size)
+        print(f"  embedded {panel.key:<13} in {time.time() - panel_started:5.1f} s")
+    print(f"total {time.time() - started:.1f} s on CPU")
+    return embeddings
+
+
+def latent_pca(panels, embeddings, *, seed, components=2):
+    """Standardise and project each knob's embeddings — the deck's own reduction."""
+    coordinates, variance = {}, {}
+    for panel in panels:
+        scaled = StandardScaler().fit_transform(embeddings[panel.key])
+        projector = PCA(n_components=components, random_state=int(seed))
+        coordinates[panel.key] = projector.fit_transform(scaled)
+        variance[panel.key] = float(np.sum(projector.explained_variance_ratio_))
+    return coordinates, variance
+
+
+def report_pca_reproduction(panels, variance, embeddings, published_embeddings,
+                            published_metrics):
+    """The reduction against the published one, knob by knob.
+
+    Returns the worst embedding and worst explained-variance deviation, so the
+    cell can assert on them rather than on a printed line.
+    """
+    print(f"{'knob':<13}{'PC1-PC2 variance':>20}{'published':>12}{'deviation':>12}")
+    worst_variance, worst_embedding = 0.0, 0.0
+    for panel in panels:
+        got = variance[panel.key]
+        want = published_metrics["reduction"][panel.key][
+            "pca_explained_variance_ratio_sum"
+        ]
+        worst_variance = max(worst_variance, abs(got - want))
+        worst_embedding = max(
+            worst_embedding,
+            float(np.max(np.abs(embeddings[panel.key]
+                                - published_embeddings[f"{panel.key}_embeddings"]))),
+        )
+        print(f"{panel.key:<13}{got:>20.6f}{want:>12.6f}{abs(got - want):>12.2e}")
+    return worst_embedding, worst_variance
+
+
+def knob_recovery(panels, *, latent, control, neighbours, folds, seed):
+    """Can the knob be read back from a point's neighbourhood, in each space?
+
+    Cross-validated R² of a k-nearest-neighbour regression of the swept knob on
+    the space. Phase is regressed as (cos φ, sin φ) so a wrap-around ordering
+    would still score high — the test is deliberately generous to the hypothesis
+    it is about to reject. One means the neighbourhood determines the knob; zero
+    means it says no more than the global mean does.
+    """
+    def target(panel):
+        values = panel.color_value.astype(np.float64)
+        if panel.key == "phase_phi":
+            return np.column_stack([np.cos(values), np.sin(values)])
+        return values.reshape(-1, 1)
+
+    def score(space, values):
+        predicted = cross_val_predict(
+            KNeighborsRegressor(n_neighbors=neighbours),
+            space,
+            values,
+            cv=KFold(n_splits=folds, shuffle=True, random_state=seed),
+        )
+        return float(r2_score(values, predicted, multioutput="variance_weighted"))
+
+    rows = []
+    for panel in panels:
+        values = target(panel)
+        rows.append({
+            "key": panel.key,
+            "label": sweep_display(panel)[1],
+            "latent": score(latent[panel.key], values),
+            "input": score(control[panel.key], values),
+        })
+    return rows
+
+
+def report_knob_recovery(rows, *, ordered_above=0.5):
+    """The verdict per knob: ordered by the encoder, discarded, or never there."""
+    print(f"{'knob':<13}{'latent R2':>12}{'input R2':>12}   verdict")
+    for row in rows:
+        ordered = row["latent"] >= ordered_above
+        verdict = "ordered by the encoder" if ordered else "discarded by the encoder"
+        if not ordered and row["input"] < ordered_above:
+            verdict = "absent from both"
+        print(f"{row['key']:<13}{row['latent']:>+12.3f}{row['input']:>+12.3f}   {verdict}")
+
+
+def knob_recovery_evidence(rows, *, variance, effective_snr, neighbours, folds,
+                           config, datasets, inputs):
+    """The emission payload for the knob-recovery measurement, as (metrics, provenance).
+
+    A restatement of what the cells printed, in the shape `emit_run` records.
+    The claim boundary stays in the cell: it is the part a reader must agree with.
+    """
+    metrics = {
+        "schema_version": 1,
+        "analysis": "neighbourhood recovery of analytical-family knobs",
+        "neighbours": neighbours,
+        "cross_validation_folds": folds,
+        "n_per_knob": int(config["n_per_panel"]),
+        "knobs": {
+            row["key"]: {
+                "latent_neighbourhood_r2": row["latent"],
+                "input_neighbourhood_r2": row["input"],
+                "pca_2d_explained_variance": variance[row["key"]],
+                "effective_snr_db_min": float(np.min(effective_snr[row["key"]])),
+                "effective_snr_db_max": float(np.max(effective_snr[row["key"]])),
+            }
+            for row in rows
+        },
+    }
+    provenance = {
+        "datasets": datasets,
+        "inputs": inputs,
+        "parameters": {
+            key: config[key]
+            for key in (
+                "n_per_panel",
+                "input_length",
+                "seed",
+                "noise_std",
+                "normalization",
+                "single_sweep_source",
+                "phase_profile",
+                "signal_window_duration_ms",
+                "realistic_figure_based_sweeps",
+            )
+        },
+        "metric_definitions": {
+            "latent_neighbourhood_r2": (
+                f"cross-validated R2 of a {neighbours}-nearest-neighbour regression "
+                "of the swept knob on the 512-D penultimate embedding; phase is "
+                "regressed as (cos phi, sin phi) and scored variance-weighted"
+            ),
+            "input_neighbourhood_r2": (
+                "the same regression on the 512 window-z-scored samples"
+            ),
+            "effective_snr_db": (
+                "20 log10(rms(clean signal) / noise standard deviation)"
+            ),
+        },
+    }
+    return metrics, provenance
+
+
 def _time_axis(panel):
     return np.linspace(0.0, panel.window_duration_ms, panel.signal.shape[1])
 
@@ -402,7 +957,16 @@ def _thin_axis(ax):
     ax.grid(False)
 
 
-def plot_signal_gallery(panels, *, examples_per_panel=5, axes=None):
+def _finish(axes, title, *, fontsize, rect):
+    """Title and lay out the figure a helper just filled, if it owns one."""
+    if title:
+        figure = np.asarray(axes).reshape(-1)[0].figure
+        figure.suptitle(title, fontsize=fontsize)
+        figure.tight_layout(rect=rect)
+    return axes
+
+
+def plot_signal_gallery(panels, *, examples_per_panel=5, axes=None, title=None):
     """One row per swept knob, five signals spanning that knob's range."""
     if axes is None:
         _, axes = plt.subplots(
@@ -429,10 +993,10 @@ def plot_signal_gallery(panels, *, examples_per_panel=5, axes=None):
                 ax.set_ylabel(row_label, fontsize=8)
             if row == len(panels) - 1:
                 ax.set_xlabel("time [ms]", fontsize=7)
-    return axes
+    return _finish(axes, title, fontsize=12, rect=(0, 0, 1, 0.97))
 
 
-def plot_normalisation_effect(panel, *, axes=None):
+def plot_normalisation_effect(panel, *, axes=None, title=None):
     """The lowest and highest value of one knob, before and after z-scoring."""
     values, _, symbol, unit = sweep_display(panel)
     order = np.argsort(panel.color_value)
@@ -459,10 +1023,11 @@ def plot_normalisation_effect(panel, *, axes=None):
             _thin_axis(axes[row, column])
     axes[0, 0].set_ylabel("raw signal\n[mV]", fontsize=8)
     axes[1, 0].set_ylabel("model input\n(window z-score)", fontsize=8)
-    return axes
+    return _finish(axes, title, fontsize=11, rect=(0, 0, 1, 0.94))
 
 
-def plot_latent_pca(panels, coordinates, variances, *, axes=None, columns=3):
+def plot_latent_pca(panels, coordinates, variances, *, axes=None, columns=3,
+                    title=None):
     """A PCA panel per knob, coloured by the value that knob was set to."""
     rows = int(np.ceil(len(panels) / columns))
     if axes is None:
@@ -495,10 +1060,10 @@ def plot_latent_pca(panels, coordinates, variances, *, axes=None, columns=3):
             bar.set_label(unit, fontsize=7)
     for position in range(len(panels), flat.size):
         flat[position].axis("off")
-    return axes
+    return _finish(axes, title, fontsize=12, rect=(0, 0, 1, 0.95))
 
 
-def plot_knob_recovery(rows, *, ax=None, floor=-2.6):
+def plot_knob_recovery(rows, *, ax=None, floor=-2.6, title=None):
     """Ten-neighbour recovery of each knob, in the latent and in the input."""
     if ax is None:
         _, ax = plt.subplots(figsize=(9.2, 4.2))
@@ -521,23 +1086,512 @@ def plot_knob_recovery(rows, *, ax=None, floor=-2.6):
     ax.legend(fontsize=8, loc="lower left", frameon=False)
     _thin_axis(ax)
     ax.tick_params(axis="both", labelsize=8)
+    if title:
+        ax.set_title(title, fontsize=11)
+        ax.figure.tight_layout()
     return ax
 
 
 # --- cholesky ---
-"""Plotting helpers for the Cholesky-generator section.
+"""Helpers for the Cholesky-generator section: table plumbing and plots.
 
-Every helper takes `ax=` or `axes=` so a cell can redraw into an existing
-figure without rebuilding one. No method lives here: the matrices, the
-populations and the deltas are all computed by installed packages in the
-section itself, and these functions only lay ink on them.
+Every plot helper takes ``ax=`` or ``axes=`` so a cell can redraw into an
+existing figure without rebuilding one. No method lives here: the matrices, the
+populations and the deltas are all computed by installed packages in the section
+itself, and these functions lay ink on them or print them. The one thing they do
+compute is bookkeeping — selecting rows, tallying reasons, assembling a matrix
+out of a published CSV — the steps that would otherwise bury the argument.
 """
+
+import csv
+import math
 
 import matplotlib.pyplot as plt
 import numpy as np
 
+from particles2snr.z8_cholesky_analysis import (
+    rows_for_population,
+    transformed_parameter_matrix,
+)
+
 CHOL_LABELS = ("log P₀", "f_D", "log τ", "SNR")
 CHOL_CLASS_LABEL = {"2um": "2 µm", "4um": "4 µm", "10um": "10 µm"}
+
+
+def _lay_out(axes, title, *, fontsize=11, tight=True):
+    """Title the figure a helper just filled, if it owns one."""
+    if title:
+        figure = np.ravel(axes)[0].figure
+        figure.suptitle(title, fontsize=fontsize)
+        if tight:
+            figure.tight_layout()
+    return axes
+
+
+def chol_series(rows, column):
+    """One float column of a list of event rows."""
+    return np.array([float(row[column]) for row in rows], dtype=np.float64)
+
+
+def report_population(rows, *, class_order, splits):
+    """The annotated population this section starts from, class by class."""
+    counts = {name: sum(1 for row in rows if row["class_name"] == name)
+              for name in class_order}
+    unclear = sum(1 for row in rows if row["class_name"] == "unclear")
+    print(f"{len(rows):,} annotated events, splits {splits} (no sealed test)")
+    print("  classified: "
+          + ", ".join(f"{name} {count:,}" for name, count in counts.items())
+          + f" = {sum(counts.values()):,}")
+    print(f"  plus {unclear:,} annotated 'unclear', kept aside for now")
+
+
+def censoring_split(rows, censored_events):
+    """Split the annotated rows on the published boundary-censoring verdict."""
+    censored_ids = {item["event_id"] for item in censored_events}
+    reasons = {}
+    for item in censored_events:
+        for reason in item["reasons"]:
+            reasons[reason] = reasons.get(reason, 0) + 1
+    keep = [row for row in rows if row["event_id"] not in censored_ids]
+    drop = [row for row in rows if row["event_id"] in censored_ids]
+    return keep, drop, reasons
+
+
+def report_censoring(keep_rows, drop_rows, reasons, *, rows, population, class_order,
+                     tau_threshold=0.30):
+    """What censoring removed: how many, why, and how differently it fitted."""
+    print(f"{population['boundary_censored_event_count']} of {len(rows):,} events "
+          f"censored, {population['eligible_event_count']:,} retained")
+    for reason, count in sorted(reasons.items()):
+        print(f"  {reason}: {count}")
+
+    print(f"\n{'class':6s} {'median τ (ms)':>26s} {'median SNR (dB)':>26s}")
+    shift = {}
+    for name in class_order:
+        keep = [row for row in keep_rows if row["class_name"] == name]
+        drop = [row for row in drop_rows if row["class_name"] == name]
+        entry = {
+            key: (float(np.median(chol_series(keep, key))),
+                  float(np.median(chol_series(drop, key))))
+            for key in ("tau_ms", "snr_db")
+        }
+        shift[name] = entry
+        print(f"{name:6s} {entry['tau_ms'][0]:11.3f} → {entry['tau_ms'][1]:<12.3f}"
+              f" {entry['snr_db'][0]:11.2f} → {entry['snr_db'][1]:<12.2f}")
+    print(f"pooled  {np.median(chol_series(keep_rows, 'tau_ms')):11.3f} → "
+          f"{np.median(chol_series(drop_rows, 'tau_ms')):<12.3f}"
+          f" {np.median(chol_series(keep_rows, 'snr_db')):11.2f} → "
+          f"{np.median(chol_series(drop_rows, 'snr_db')):<12.2f}")
+
+    wide = sum(1 for row in rows if float(row["tau_ms"]) > tau_threshold)
+    wide_censored = sum(1 for row in drop_rows if float(row["tau_ms"]) > tau_threshold)
+    print(f"  events fitted with τ > {tau_threshold:.2f} ms: {wide}, of which "
+          f"{wide_censored} boundary-censored")
+    return shift
+
+
+def report_class_populations(counts, *, class_order):
+    """How many events each class contributes under each population rule."""
+    for name in class_order:
+        entry = counts[name]
+        print(f"{name}: physical {entry['physical']:,}  "
+              f"inclusive {entry['inclusive']:,}"
+              f"  (+{entry['inclusive'] - entry['physical']} unclear)")
+
+
+def observed_range_drift(board, values, counts):
+    """Largest gap between the measured per-class ranges and the published board.
+
+    The board is the deck's own range table; a non-zero drift means this cell
+    and that table are describing different populations.
+    """
+    drift = 0.0
+    for name, entry in board["observed_ranges"].items():
+        assert entry["physical_events"] == counts[name]["physical"]
+        assert entry["snr_population"] == counts[name]["inclusive"]
+        for parameter, bounds in entry["ranges"].items():
+            key = "snr_db" if parameter == "snr_effective_fbase_db" else parameter
+            series = values[name][key]
+            drift = max(drift,
+                        abs(series.min() - bounds["minimum"]),
+                        abs(series.max() - bounds["maximum"]))
+    return drift
+
+
+def on_grid_fraction(values_hz, grid_hz):
+    """Share of frequencies sitting exactly on a transform-bin grid."""
+    ratio = np.asarray(values_hz, dtype=np.float64) / grid_hz
+    return float(np.mean(np.abs(ratio - np.round(ratio)) < 1e-9))
+
+
+def gaussian_mass_below_zero(series):
+    """Mass a Gaussian fitted to `series` puts on values the instrument cannot make."""
+    mean, deviation = float(series.mean()), float(series.std(ddof=1))
+    return 0.5 * (1.0 + math.erf(-mean / (deviation * math.sqrt(2.0))))
+
+
+def report_negative_mass(mass, *, class_order):
+    """Why the generator cannot work in the raw coordinates."""
+    for name in class_order:
+        print(f"{name}: a Gaussian on raw P₀ puts "
+              f"{100 * mass[name]['amplitude_p0']:5.2f}% of its mass below zero; "
+              f"on raw τ, {100 * mass[name]['tau_ms']:.2f}%")
+    print("\nIn log coordinates the constraint is structural: exp(x) > 0 for every x, "
+          "so no draw can be unphysical.")
+
+
+def published_correlations(path):
+    """The correlation run's own coefficient table, keyed by (class, population, pair)."""
+    with path.open(newline="", encoding="utf-8") as handle:
+        return {
+            (row["class_name"], row["population"],
+             row["x_parameter"], row["y_parameter"]):
+                (float(row["pearson_r"]), int(row["n_events"]))
+            for row in csv.DictReader(handle)
+        }
+
+
+def correlation_drift(matrices, published, counts, *, class_order, parameter_order):
+    """Largest gap between the recomputed Pearson triangles and the published ones."""
+    drift = 0.0
+    for name in class_order:
+        for i in range(len(parameter_order)):
+            for j in range(i + 1, len(parameter_order)):
+                want, count = published[
+                    (name, "physical", parameter_order[i], parameter_order[j])
+                ]
+                assert count == counts[name]["physical"]
+                drift = max(drift, abs(matrices[name][i, j] - want))
+    return drift
+
+
+def report_conditioning(path, populations, *, class_order):
+    """How close each measured correlation matrix came to failing to factorise."""
+    with path.open(newline="", encoding="utf-8") as handle:
+        conditioning = {
+            (row["class_name"], row["population"]): float(row["condition_number"])
+            for row in csv.DictReader(handle)
+            if row["positive_definite"] == "True"
+        }
+    print("\nfactorisation exists for every class without regularisation; condition κ(R):")
+    for name in class_order:
+        population = populations[name]
+        print(f"  {name:5s} {population:9s} κ = "
+              f"{conditioning[(name, population)]:6.1f}")
+
+
+def audit_deck_targets(deck_matrices, published, factors, populations, counts, *,
+                       class_order, parameter_order):
+    """Compare the deck's hard-coded triangles with the run, and with the generator.
+
+    Two separate questions, which the deck's caption conflates: whether the
+    digits match the correlation run's *physical* population, and whether that
+    population is the one the generator was actually handed.
+    """
+    audit = {}
+    for name, (label, deck_n, triangle) in zip(class_order, deck_matrices):
+        used = factors[name] @ factors[name].T
+        rounding, mismatch, worst = 0.0, 0.0, None
+        for i, deck_row in enumerate(triangle):
+            for j, deck_value in enumerate(deck_row):
+                if j >= i:
+                    continue
+                physical = published[
+                    (name, "physical", parameter_order[j], parameter_order[i])
+                ][0]
+                rounding = max(rounding, abs(deck_value - physical))
+                gap = abs(deck_value - used[i, j])
+                if gap > mismatch:
+                    mismatch, worst = gap, (parameter_order[j], parameter_order[i])
+        audit[name] = {
+            "label": label,
+            "deck_n": deck_n,
+            "generator_population": populations[name],
+            "generator_n": counts[name][populations[name]],
+            "max_deck_minus_physical": rounding,
+            "max_deck_minus_generator_target": mismatch,
+            "worst_pair": worst,
+        }
+    return audit
+
+
+def report_deck_audit(audit):
+    """Per class: the population the deck implies against the one that was used."""
+    for entry in audit.values():
+        print(f"{entry['label']:5s} deck n = {entry['deck_n']:,} · generator used "
+              f"'{entry['generator_population']}' n = {entry['generator_n']:,}")
+        print(f"      |deck − physical r| ≤ {entry['max_deck_minus_physical']:.4f} "
+              f"(2-decimal rounding) · |deck − generator target| ≤ "
+              f"{entry['max_deck_minus_generator_target']:.4f}")
+
+
+def report_deck_ranking(audit, *, threshold=0.01):
+    """The same audit ranked worst first, which is how a reviewer reads it."""
+    for name, entry in sorted(audit.items(),
+                              key=lambda item: item[1]["max_deck_minus_generator_target"],
+                              reverse=True):
+        flag = "MISMATCH" if entry["max_deck_minus_generator_target"] > threshold else "ok"
+        print(f"{name:5s} {flag:9s} deck n={entry['deck_n']:,} vs generator "
+              f"{entry['generator_population']} n={entry['generator_n']:,} · "
+              f"max gap {entry['max_deck_minus_generator_target']:.3f}"
+              + (f" at {entry['worst_pair']}" if flag == "MISMATCH" else ""))
+
+
+def off_diagonal(validation):
+    """The rows of a correlation-validation table that carry dependence."""
+    return [row for row in validation
+            if row["row_parameter"] != row["column_parameter"]]
+
+
+def report_independent_control(validation):
+    """What the marginals alone reproduce once the Cholesky factor is removed."""
+    rows = off_diagonal(validation)
+    worst_delta = max(abs(row["delta"]) for row in rows)
+    seen = max(abs(row["realized_correlation"]) for row in rows)
+    print(f"independent draws: max realised |r| = {seen:.3f}, "
+          f"max |realised − target| = {worst_delta:.3f}")
+    return worst_delta, seen
+
+
+def dependence_panels(records, name, *, measured, colour, label):
+    """(log P₀, SNR) for one class, in the three populations the figure compares."""
+    def columns(source):
+        selected = [row for row in source if row["class_name"] == name]
+        return (np.array([row["log_amplitude_p0"] for row in selected]),
+                np.array([row["snr_db"] for row in selected]))
+
+    independent, correlated = records
+    return [
+        (f"measured · {label} (n = {measured.shape[0]:,})",
+         measured[:, 0], measured[:, 3], colour),
+        ("independent draws", *columns(independent), "#9ca3af"),
+        ("Cholesky draws", *columns(correlated), "#0f766e"),
+    ]
+
+
+def published_deltas(path):
+    """The generation run's own realised-minus-target table, keyed by cell."""
+    with path.open(newline="", encoding="utf-8") as handle:
+        return {
+            (row["class_name"], row["row_parameter"], row["column_parameter"]):
+                float(row["delta"])
+            for row in csv.DictReader(handle)
+        }
+
+
+def delta_matrices(validation, *, class_order, parameter_order):
+    """The validation table folded back into one matrix per class, for drawing."""
+    matrices = {name: np.zeros((len(parameter_order), len(parameter_order)))
+                for name in class_order}
+    for row in validation:
+        matrices[row["class_name"]][
+            parameter_order.index(row["row_parameter"]),
+            parameter_order.index(row["column_parameter"]),
+        ] = row["delta"]
+    return matrices
+
+
+def dependence_mechanism(validation, budgets, rejections, *, class_order):
+    """Rejection rate against dependence error, in units of the sampling error.
+
+    The standard error of a Pearson coefficient at the target r is
+    (1 − r²)/√(n − 1); dividing the worst delta by it separates "the frequency
+    band reshaped the joint" from "a finite draw was unlucky".
+    """
+    print(f"{'class':6s} {'n':>6s} {'rejected':>9s} {'rate':>7s} {'max|Δ|':>8s} {'z':>6s}")
+    mechanism = {}
+    for name in class_order:
+        count, rejected = budgets[name], rejections[name]
+        worst, worst_z = 0.0, 0.0
+        for row in off_diagonal(validation):
+            if row["class_name"] != name:
+                continue
+            error = (1.0 - row["target_correlation"] ** 2) / math.sqrt(count - 1)
+            if abs(row["delta"]) > worst:
+                worst, worst_z = abs(row["delta"]), abs(row["delta"]) / error
+        mechanism[name] = {
+            "rejection_rate": rejected / (rejected + count),
+            "max_abs_delta": worst,
+            "sampling_error_multiples": worst_z,
+        }
+        print(f"{name:6s} {count:6,d} {rejected:9,d} "
+              f"{100 * mechanism[name]['rejection_rate']:6.1f}% {worst:8.3f} "
+              f"{worst_z:6.1f}")
+    return mechanism
+
+
+def read_generated_records(path):
+    """The generated parameter table, as the shipped validation functions want it."""
+    fields = ("log_amplitude_p0", "frequency_khz", "log_tau_ms", "snr_db",
+              "amplitude_p0", "tau_ms", "phi_rad")
+    with path.open(newline="", encoding="utf-8") as handle:
+        return [
+            {"class_name": row["class_name"],
+             **{field: float(row[field]) for field in fields}}
+            for row in csv.DictReader(handle)
+        ]
+
+
+def report_shipped_deltas(records, validation, pilot, *, class_order):
+    """The shipped dataset's dependence error beside the pilot's, class by class."""
+    counts = {name: sum(1 for row in records if row["class_name"] == name)
+              for name in class_order}
+    shipped = {
+        name: max(abs(row["delta"]) for row in off_diagonal(validation)
+                  if row["class_name"] == name)
+        for name in class_order
+    }
+    print(f"@v3: {len(records):,} events {counts}")
+    for name in class_order:
+        print(f"  {name:5s} max |Δ|: pilot {pilot[name]['max_abs_delta']:.4f}"
+              f"  →  shipped {shipped[name]:.4f}")
+    return counts, shipped
+
+
+def gallery_waveforms(gallery, signals):
+    """The selected roles' waveforms, in one array, in the order they were selected."""
+    order = [index for entries in gallery.values() for _, index in entries]
+    return order, np.asarray(signals[order], dtype=np.float64)
+
+
+def join_shortfall(order, waveforms, records, *, offset=0):
+    """How far each selected waveform's peak falls short of its row's stated P₀.
+
+    Nothing in the dataset format guarantees that events.csv row *i* is
+    signals_raw_4096.npy row *i*; it is a convention of the writer. Shifting the
+    join by `offset` rows is the control that makes the aligned figure worth
+    reading.
+    """
+    worst = 0.0
+    for position, index in enumerate(order):
+        record = records[(index + offset) % len(records)]
+        peak = float(np.abs(waveforms[position]).max())
+        worst = max(worst, (record["amplitude_p0"] - peak) / peak)
+    return worst
+
+
+def report_gallery(gallery, signals, *, sampling_hz, aligned, shifted):
+    """The corpus of waveforms, the join check, and which role each index plays."""
+    print(f"{signals.shape[0]:,} × {signals.shape[1]} raw samples at "
+          f"{sampling_hz / 1e6:.0f} MHz")
+    print(f"  aligned join   : worst P₀ shortfall {100 * aligned:5.1f}%")
+    print(f"  join shifted +1: worst P₀ shortfall {100 * shifted:5.1f}%")
+    for name, entries in gallery.items():
+        roles = ", ".join(f"{role}→{index}" for role, index in entries)
+        print(f"  {name:5s} {roles}")
+
+
+def envelope_widening(targets, eligible, *, class_order, parameter_order):
+    """Fitted envelope σ divided by the measured σ, per class and coordinate.
+
+    The comparison follows the estimation policy: the first three coordinates
+    are measured on the physical population, SNR on the inclusive one, because
+    that is where each target came from.
+    """
+    widening = {}
+    for name in class_order:
+        physical = transformed_parameter_matrix(
+            rows_for_population(eligible, name, "physical")
+        )
+        inclusive = transformed_parameter_matrix(
+            rows_for_population(eligible, name, "inclusive")
+        )
+        measured = np.array([physical[:, 0].std(ddof=1), physical[:, 1].std(ddof=1),
+                             physical[:, 2].std(ddof=1), inclusive[:, 3].std(ddof=1)])
+        ratio = np.asarray(targets[name]["sigma"]) / measured
+        widening[name] = {parameter: float(value)
+                          for parameter, value in zip(parameter_order, ratio)}
+        print(f"{name:5s} envelope σ / measured σ: "
+              + "  ".join(f"{short} {value:.2f}×" for short, value
+                          in zip(("logP0", "f", "logtau", "SNR"), ratio)))
+    span = (min(value for row in widening.values() for value in row.values()),
+            max(value for row in widening.values() for value in row.values()))
+    print(f"\nwidening spans {span[0]:.2f}× to {span[1]:.2f}× across all classes "
+          f"and coordinates")
+    return widening
+
+
+def generated_outside_range(records, board, *, class_order):
+    """Share of generated events falling outside each class's measured range."""
+    columns = (("amplitude_p0", "amplitude_p0"), ("frequency_khz", "frequency_khz"),
+               ("tau_ms", "tau_ms"), ("snr_effective_fbase_db", "snr_db"))
+    outside = {}
+    for name in class_order:
+        bounds = board["observed_ranges"][name]["ranges"]
+        generated = [row for row in records if row["class_name"] == name]
+        row = {}
+        for parameter, column in columns:
+            series = np.array([entry[column] for entry in generated])
+            low, high = bounds[parameter]["minimum"], bounds[parameter]["maximum"]
+            row[parameter] = float(np.mean((series < low) | (series > high)))
+        outside[name] = row
+        print(f"{name:5s} generated outside the measured range: "
+              + "  ".join(f"{key.split('_')[0]} {100 * value:4.1f}%"
+                          for key, value in row.items()))
+    return outside
+
+
+def cholesky_evidence(audit, *, pilot, shipped, control, widening, outside,
+                      frequency, runs, seed, budgets, parameter_order, populations,
+                      datasets, approved_population):
+    """The emission payload for this section, as (metrics, provenance).
+
+    A restatement of what the cells printed, in the shape `emit_run` records;
+    the claim boundary stays in the cell.
+    """
+    metrics = {
+        "schema_version": 1,
+        "analysis": "deck dependence-target transcription audit and shipped 4-D "
+                    "generator dependence error",
+        "deck_transcription_audit": {
+            name: {
+                "deck_event_count": entry["deck_n"],
+                "generator_population": entry["generator_population"],
+                "generator_event_count": entry["generator_n"],
+                "max_deck_minus_physical_r": entry["max_deck_minus_physical"],
+                "max_deck_minus_generator_target_r":
+                    entry["max_deck_minus_generator_target"],
+                "worst_pair": list(entry["worst_pair"]),
+            }
+            for name, entry in audit.items()
+        },
+        "pilot_dependence_error": pilot,
+        "shipped_v3_dependence_error": shipped,
+        "independent_marginal_control": control,
+        "envelope_widening_ratio": widening,
+        "generated_outside_measured_range_fraction": outside,
+        "frequency_quantisation": frequency,
+    }
+    provenance = {
+        "datasets": datasets,
+        "inputs": {**runs,
+                   "approved_population": approved_population,
+                   "deck_recipe": "src/internship_workspace/presentation/recipes/"
+                                  "pearson_targets.py"},
+        "parameters": {
+            "seed": seed,
+            "class_budgets": budgets,
+            "transformed_coordinates": list(parameter_order),
+            "dependency_population_by_class": populations,
+        },
+        "metric_definitions": {
+            "max_deck_minus_physical_r": "largest absolute gap between a deck "
+            "constant and the correlation run's physical-population Pearson r",
+            "max_deck_minus_generator_target_r": "largest absolute gap between a "
+            "deck constant and the Pearson r the generator was actually given",
+            "max_absolute_off_diagonal_delta": "largest absolute realised-minus-"
+            "target Pearson r over off-diagonal cells and classes",
+            "sampling_error_multiples": "max |delta| divided by (1 - r^2)/"
+            "sqrt(n - 1) at the target r",
+            "envelope_widening_ratio": "fitted Gaussian envelope sigma divided "
+            "by the measured standard deviation, per transformed coordinate",
+            "generated_outside_measured_range_fraction": "share of generated "
+            "events falling outside the measured per-class observed range",
+            "frequency_quantisation": "share of Doppler frequencies that are "
+            "exact multiples of the 4096-point transform bin at 2 MHz",
+        },
+    }
+    return metrics, provenance
 
 
 def _triangle(ax, matrix, *, labels, vmax, title, decimals=2, units=""):
@@ -574,7 +1628,7 @@ def _triangle(ax, matrix, *, labels, vmax, title, decimals=2, units=""):
     return image
 
 
-def plot_parameter_marginals(values_by_class, colours, *, axes=None):
+def plot_parameter_marginals(values_by_class, colours, *, axes=None, title=None):
     """Class-conditional marginals of the four fitted parameters.
 
     `values_by_class[class][parameter]` is a 1-D array of measured values.
@@ -590,7 +1644,7 @@ def plot_parameter_marginals(values_by_class, colours, *, axes=None):
     if axes is None:
         _, axes = plt.subplots(1, 4, figsize=(15, 3.4))
     axes = np.ravel(axes)
-    for ax, parameter, title in zip(axes, order, titles):
+    for ax, parameter, title_text in zip(axes, order, titles):
         pooled = np.concatenate(
             [values_by_class[name][parameter] for name in values_by_class]
         )
@@ -609,17 +1663,17 @@ def plot_parameter_marginals(values_by_class, colours, *, axes=None):
                 color=colours[name],
                 label=CHOL_CLASS_LABEL.get(name, name),
             )
-        ax.set_title(title, fontsize=10)
+        ax.set_title(title_text, fontsize=10)
         ax.set_yticks([])
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
         ax.spines["left"].set_visible(False)
     axes[0].set_ylabel("density", fontsize=9)
     axes[0].legend(frameon=False, fontsize=9)
-    return axes
+    return _lay_out(axes, title)
 
 
-def plot_censoring_shift(eligible, censored, *, axes=None):
+def plot_censoring_shift(eligible, censored, *, axes=None, title=None):
     """What the boundary-censored events look like next to the retained ones."""
     panels = (
         ("tau_ms", "Fitted envelope width τ (ms)", True),
@@ -628,7 +1682,7 @@ def plot_censoring_shift(eligible, censored, *, axes=None):
     if axes is None:
         _, axes = plt.subplots(1, 2, figsize=(11, 3.6))
     axes = np.ravel(axes)
-    for ax, (parameter, title, logscale) in zip(axes, panels):
+    for ax, (parameter, panel_title, logscale) in zip(axes, panels):
         keep, drop = eligible[parameter], censored[parameter]
         pooled = np.concatenate([keep, drop])
         if logscale:
@@ -655,16 +1709,16 @@ def plot_censoring_shift(eligible, censored, *, axes=None):
         )
         ax.axvline(np.median(keep), color="#334155", linewidth=1.0, linestyle="--")
         ax.axvline(np.median(drop), color="#b45309", linewidth=1.0, linestyle="--")
-        ax.set_title(title, fontsize=10)
+        ax.set_title(panel_title, fontsize=10)
         ax.set_yticks([])
         ax.legend(frameon=False, fontsize=8)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
         ax.spines["left"].set_visible(False)
-    return axes
+    return _lay_out(axes, title)
 
 
-def plot_correlation_triangles(matrices, counts, populations, *, axes=None):
+def plot_correlation_triangles(matrices, counts, populations, *, axes=None, title=None):
     """One Pearson lower triangle per class, in the transformed coordinates."""
     if axes is None:
         _, axes = plt.subplots(1, 3, figsize=(13, 3.9))
@@ -685,10 +1739,10 @@ def plot_correlation_triangles(matrices, counts, populations, *, axes=None):
         axes[-1].figure.colorbar(
             image, ax=list(axes), fraction=0.022, pad=0.02, label="Pearson r"
         )
-    return axes
+    return _lay_out(axes, title, tight=False)
 
 
-def plot_delta_triangles(deltas, counts, *, scale=0.15, axes=None):
+def plot_delta_triangles(deltas, counts, *, scale=0.15, axes=None, title=None):
     """Realised minus target Pearson r, saturating at the deck's +/- 0.15."""
     if axes is None:
         _, axes = plt.subplots(1, 3, figsize=(13, 3.9))
@@ -714,14 +1768,16 @@ def plot_delta_triangles(deltas, counts, *, scale=0.15, axes=None):
             pad=0.02,
             label="realised − target r",
         )
-    return axes
+    return _lay_out(axes, title, tight=False)
 
 
-def plot_signal_gallery_cholesky(selections, records, signals, sampling_hz, *, axes=None):
+def plot_generated_gallery(selections, records, waveforms, order, sampling_hz, *,
+                           axes=None, title=None):
     """One generated waveform per (class, role), with its Gaussian envelope.
 
-    `selections[class]` is the shipped `select_gallery_indices` output: a list
-    of (role label, index) pairs into `records` and `signals`.
+    `selections[class]` is the shipped `select_gallery_indices` output: a list of
+    (role label, index) pairs into `records`. `order` is the same indices in the
+    order `waveforms` holds them.
     """
     names = list(selections)
     width = max(len(entries) for entries in selections.values())
@@ -730,7 +1786,8 @@ def plot_signal_gallery_cholesky(selections, records, signals, sampling_hz, *, a
             len(names), width, figsize=(19, 8.4), sharex=True, constrained_layout=True
         )
     axes = np.asarray(axes).reshape(len(names), width)
-    length = signals.shape[1]
+    position_of = {index: position for position, index in enumerate(order)}
+    length = waveforms.shape[1]
     time_ms = (
         (np.arange(length, dtype=np.float64) - (length - 1) / 2.0) / sampling_hz * 1000.0
     )
@@ -741,7 +1798,8 @@ def plot_signal_gallery_cholesky(selections, records, signals, sampling_hz, *, a
             envelope = record["amplitude_p0"] * np.exp(
                 -0.5 * np.square(time_ms / record["tau_ms"])
             )
-            ax.plot(time_ms, signals[index], color="#2563eb", linewidth=0.55)
+            ax.plot(time_ms, waveforms[position_of[index]], color="#2563eb",
+                    linewidth=0.55)
             ax.plot(time_ms, envelope, color="#f97316", linewidth=1.0)
             ax.plot(time_ms, -envelope, color="#f97316", linewidth=1.0)
             ax.text(
@@ -769,40 +1827,56 @@ def plot_signal_gallery_cholesky(selections, records, signals, sampling_hz, *, a
         )
     for ax in axes[-1]:
         ax.set_xlabel("time from t₀ (ms)", fontsize=8)
+    if title:
+        axes[0, 0].figure.suptitle(title, fontsize=12)
     return axes
 
 
-def plot_dependence_scatter(panels, *, axes=None):
+def plot_dependence_scatter(panels, *, axes=None, title=None):
     """(log P0, SNR) for one class: measured, independent draw, Cholesky draw."""
     if axes is None:
         _, axes = plt.subplots(1, 3, figsize=(13, 3.9), sharex=True, sharey=True)
     axes = np.ravel(axes)
-    for ax, (title, x_values, y_values, colour) in zip(axes, panels):
+    for ax, (panel_title, x_values, y_values, colour) in zip(axes, panels):
         correlation = float(np.corrcoef(x_values, y_values)[0, 1])
         ax.scatter(x_values, y_values, s=6, alpha=0.35, color=colour, linewidths=0)
-        ax.set_title(f"{title}\nr = {correlation:+.3f}", fontsize=10)
+        ax.set_title(f"{panel_title}\nr = {correlation:+.3f}", fontsize=10)
         ax.set_xlabel("log P₀", fontsize=9)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
     axes[0].set_ylabel("SNR (dB)", fontsize=9)
-    return axes
+    return _lay_out(axes, title)
 
 
 # --- asymmetry ---
-"""Plotting helpers for the waveform-asymmetry section.
+"""Helpers for the waveform-asymmetry section: statistics, plumbing and plots.
 
-Every helper takes ``ax=None`` or ``axes=None`` so a cell can redraw into an
-existing figure without rebuilding it. No mathematics lives here: the helpers
-receive arrays that the section computed from installed packages.
+Every plot helper takes ``ax=None`` or ``axes=None`` so a cell can redraw into an
+existing figure without rebuilding it. The fitting, the injection and the
+generation all live in `internship_workspace.z8_parametric_asymmetry`; what lives
+here is the model-free statistic subsection 1 needs (which no shipped module
+provides), the crop and batching the cells would otherwise repeat, and the table
+formatting.
 """
+
+import collections
+from datetime import datetime
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.signal import hilbert, sosfiltfilt
+
+from internship_workspace.z8_parametric_asymmetry import (
+    asymmetric_gaussian_cosine,
+    fit_parametric_asymmetry,
+    inject_asymmetry_into_noise_carrier,
+)
 
 ASYMMETRY_CLASS_ORDER = ("2um", "4um", "10um")
 ASYMMETRY_CLASS_COLOUR = {"2um": "#2563eb", "4um": "#0f766e", "10um": "#b45309"}
 ASYMMETRY_CLASS_LABEL = {"2um": "2 µm", "4um": "4 µm", "10um": "10 µm"}
 NULL_COLOUR = "#94a3b8"
+RAW_LENGTH = 4096
 
 
 def _class_axes(axes, count=3, figsize=(13.5, 4.0)):
@@ -810,6 +1884,673 @@ def _class_axes(axes, count=3, figsize=(13.5, 4.0)):
         _, axes = plt.subplots(1, count, figsize=figsize, constrained_layout=True)
     return np.atleast_1d(axes)
 
+
+def _finite(values):
+    """Drop the events the statistic could not be computed on, rather than zero them."""
+    array = np.asarray(values)
+    return array[np.isfinite(array)]
+
+
+# --- the model-free statistic, and the crop the cells measure it on -----------
+
+def envelope_skew(values, tau_s, *, sampling_hz, half_width=3.0, recentre=True):
+    """Energy-weighted third moment of the analytic envelope. No fit involved.
+
+    Takes the instantaneous amplitude e(t) from the Hilbert transform, weights
+    time by e(t)² inside ±`half_width`·τ of the envelope peak, and returns the
+    standardised third moment γ. A symmetric envelope gives γ = 0; a longer
+    right-hand tail gives γ > 0. Nothing is fitted, which is the point: an
+    estimator that looks for skew reports some on pure noise.
+
+    Re-centring on the smoothed energy peak is deliberate — the annotation centre
+    is not the envelope peak, and without it a timing error reads as skew.
+    """
+    envelope = np.abs(hilbert(np.asarray(values, dtype=np.float64)))
+    count = envelope.size
+    # Multiply by the sampling interval rather than divide by the rate: the two
+    # differ in the last bit, and the published statistics were taken this way.
+    time_s = (np.arange(count) - (count - 1) / 2.0) * (1.0 / sampling_hz)
+    centre = 0.0
+    if recentre:
+        span = int(max(8, round(0.5 * tau_s * sampling_hz)))
+        smoothed = np.convolve(np.square(envelope),
+                               np.ones(2 * span + 1) / (2 * span + 1), mode="same")
+        centre = float(time_s[int(np.argmax(smoothed))])
+    inside = np.abs(time_s - centre) <= half_width * tau_s
+    if int(inside.sum()) < 32:
+        return np.nan
+    weight = np.square(envelope[inside])
+    axis = time_s[inside]
+    total = float(weight.sum())
+    mean = float((weight * axis).sum() / total)
+    deviation = axis - mean
+    variance = float((weight * deviation**2).sum() / total)
+    if variance <= 0.0:
+        return np.nan
+    return float((weight * deviation**3).sum() / total / variance**1.5)
+
+
+def reflect_crop(values, centre, length=RAW_LENGTH):
+    """The 4,096-sample window the analyses use, reflected at file edges.
+
+    Kept in float64 rather than the float32 of the shipped tool: the source
+    recordings are float64, and the fits below are asserted against published
+    per-event values, so the crop must not lose a bit before the estimator sees
+    it.
+    """
+    array = np.asarray(values, dtype=np.float64).reshape(-1)
+    start = int(round(float(centre))) - length // 2
+    if start >= 0 and start + length <= array.size:
+        return array[start : start + length].copy()
+    padded = np.pad(array, (length, length), mode="reflect")
+    return padded[start + length : start + length + length].copy()
+
+
+def report_census(rows, *, class_order):
+    """The real population this section measures, before anything is fitted."""
+    print(f"real Z8 events, three physical classes: {len(rows)}")
+    print("split census:", dict(collections.Counter(row["split"] for row in rows)))
+    print("class census:",
+          {name: sum(row["class_name"] == name for row in rows)
+           for name in class_order})
+
+
+def real_envelope_skew(rows, signal_root, *, sampling_hz, class_order):
+    """γ of every real event, class by class, reading each recording once."""
+    cache, skew = {}, collections.defaultdict(list)
+    for row in rows:
+        relative = row["source_signal_relative_path"]
+        if relative not in cache:
+            cache[relative] = np.load(signal_root / relative, allow_pickle=False)
+        crop = reflect_crop(cache[relative], float(row["center_sample"]))
+        skew[row["class_name"]].append(
+            envelope_skew(crop, float(row["tau_ms"]) / 1000.0, sampling_hz=sampling_hz)
+        )
+    return {name: _finite(skew[name]) for name in class_order}
+
+
+def null_envelope_skew(events, raw, bandpass, *, per_class, seed, sampling_hz,
+                       class_order):
+    """γ of a draw of symmetric-generator events — what noise alone buys.
+
+    The 4-D generator's envelope is symmetric by construction and its events sit
+    on real recorded noise at the same signal-to-noise, so its spread in γ is the
+    null the real distribution has to beat.
+    """
+    positions = collections.defaultdict(list)
+    for position, row in enumerate(events):
+        positions[row["class_name"]].append(position)
+    generator = np.random.default_rng(seed)
+    skew = collections.defaultdict(list)
+    for name in class_order:
+        for position in generator.choice(positions[name], per_class, replace=False):
+            filtered = sosfiltfilt(bandpass,
+                                   np.asarray(raw[int(position)], dtype=np.float64))
+            skew[name].append(
+                envelope_skew(filtered,
+                              float(events[int(position)]["tau_ms"]) / 1000.0,
+                              sampling_hz=sampling_hz)
+            )
+    return {name: _finite(skew[name]) for name in class_order}
+
+
+def report_envelope_skew(real, null, *, class_order, mannwhitneyu, quantile=0.95):
+    """Real spread against the null's, and how often real events leave its band."""
+    summary = {}
+    for name in class_order:
+        observed, reference = real[name], null[name]
+        band = float(np.quantile(np.abs(reference), quantile))
+        summary[name] = {
+            "real_count": int(observed.size),
+            "null_count": int(reference.size),
+            "real_standard_deviation": float(observed.std(ddof=1)),
+            "null_standard_deviation": float(reference.std(ddof=1)),
+            "null_absolute_q95": band,
+            "real_fraction_beyond_null_q95": float(np.mean(np.abs(observed) > band)),
+            "mann_whitney_p_value": float(
+                mannwhitneyu(np.abs(observed), np.abs(reference)).pvalue
+            ),
+        }
+        values = summary[name]
+        print(
+            f"{name:>5}: real sd {values['real_standard_deviation']:.3f} vs "
+            f"symmetric-generator sd {values['null_standard_deviation']:.3f} · "
+            f"{100 * values['real_fraction_beyond_null_q95']:.1f} % of real events "
+            f"beyond ±{band:.2f} (5 % expected) · "
+            f"p = {values['mann_whitney_p_value']:.1e}"
+        )
+    return summary
+
+
+# --- the estimator, its configurations and its demonstration event -----------
+
+def report_estimator_config(frozen, shipped, deployed, *, search_fields, search_gap):
+    """Which configuration was calibrated, and which one runs on real events."""
+    for field in search_fields:
+        assert getattr(frozen, field) == getattr(shipped, field), field
+    print("the calibrated configuration is the shipped default for every search "
+          "parameter:")
+    print(f"  band-pass {frozen.band_low_hz / 1e3:.0f}–{frozen.band_high_hz / 1e3:.0f} "
+          f"kHz, zero-phase order {frozen.filter_order} · decimate by "
+          f"{frozen.decimation} · {frozen.asymmetry_grid_points}-point grid on a · "
+          f"|a| ≤ {frozen.asymmetry_bound}")
+    print("\nbut the configuration graded by that calibration is not the one run on "
+          "real events:")
+    for field in search_gap:
+        print(f"  {field:<20} calibration {str(getattr(frozen, field)):<5} → "
+              f"real events {getattr(deployed, field)}")
+    print("this gap is measured in section 3; it does not change the model, only "
+          "the search.")
+
+
+def fit_real_event(row, events_by_id, signal_root, config):
+    """Refit one published real event from its own recording, through the shipped fit."""
+    event = events_by_id[row["event_id"]]
+    crop = reflect_crop(
+        np.load(signal_root / event["source_signal_relative_path"], allow_pickle=False),
+        float(event["center_sample"]),
+    )
+    return crop, fit_parametric_asymmetry(
+        crop,
+        initial_frequency_hz=float(event["frequency_hz"]),
+        initial_tau_s=float(event["tau_ms"]) / 1000.0,
+        config=config,
+    )
+
+
+def refit_candidates(candidates, events_by_id, signal_root, config, *, tolerance=1e-9):
+    """Refit every demonstration candidate and keep the ones that reproduce exactly."""
+    print("candidate demonstration events, refitted here against the published value:")
+    exact = []
+    for row in candidates:
+        _, attempt = fit_real_event(row, events_by_id, signal_root, config)
+        gap = abs(attempt.asymmetry - float(row["estimated_asymmetry"]))
+        print(f"  {row['event_id']} published â {float(row['estimated_asymmetry']):+.5f} "
+              f"→ refitted {attempt.asymmetry:+.5f} (gap {gap:.1e})")
+        if gap < tolerance:
+            exact.append(row)
+    return exact
+
+
+def report_demo_event(row, event, fit, symmetric_fit, *, deviation, run_id):
+    """The chosen event: what it reproduces, what shape it implies, what it costs."""
+    ratio = float(np.exp(2 * fit.asymmetry))
+    shape = (f"decay {ratio:.1f}× the rise" if ratio >= 1.0
+             else f"rise {1 / ratio:.1f}× the decay")
+    print(f"\nchosen: {row['event_id']} · {event['class_name']} · "
+          f"split {event['split']} · SNR {float(event['snr_db']):.1f} dB · "
+          f"confidence {float(row['confidence_probability']):.3f}")
+    print(f"reproduces {run_id} exactly: â = {fit.asymmetry:.12f} "
+          f"(gap {deviation:.1e})")
+    print(f"half-width ratio implied: e^(2â) = {ratio:.2f} — {shape}")
+    print(f"robust residual: symmetric model {symmetric_fit.objective:.4e} → free model "
+          f"{fit.objective:.4e}, a drop of "
+          f"{100 * (1 - fit.objective / symmetric_fit.objective):.1f} %")
+    print("\nsome candidates do not reproduce to the last digit; section 3 measures why.")
+    return shape
+
+
+def reconstruct(fit, *, sampling_hz, length=RAW_LENGTH):
+    """The fitted model in the observed domain, from the shipped closed form."""
+    core = asymmetric_gaussian_cosine(
+        length, frequency_hz=fit.frequency_hz, tau_s=fit.tau_s,
+        asymmetry=fit.asymmetry, amplitude=fit.amplitude, phase_rad=fit.phase_rad,
+        center_offset_samples=fit.center_offset_samples,
+        sampling_frequency_hz=sampling_hz,
+    )
+    axis = (np.arange(length) - (length - 1) / 2.0) / length
+    return core + fit.offset + fit.drift * axis
+
+
+# --- calibration ------------------------------------------------------------
+
+def coefficient_of_determination(truth, estimate):
+    """1 − residual sum of squares over total sum of squares, on the truth's mean."""
+    truth, estimate = np.asarray(truth), np.asarray(estimate)
+    return 1.0 - float(np.sum(np.square(truth - estimate))
+                       / np.sum(np.square(truth - truth.mean())))
+
+
+def calibration_summary(rows, *, class_order, strong_truth=0.20, error_threshold=0.15):
+    """Per-class recovery of the injected skew, and the panels the figure needs."""
+    summary, panels = {}, {}
+    for name in class_order:
+        selected = [row for row in rows if row["class_name"] == name]
+        truth = np.asarray([float(row["true_asymmetry"]) for row in selected])
+        estimate = np.asarray([float(row["estimated_asymmetry"]) for row in selected])
+        snr = np.asarray([float(row["snr_db"]) for row in selected])
+        error = np.abs(estimate - truth)
+        strong = np.abs(truth) >= strong_truth
+        determination = coefficient_of_determination(truth, estimate)
+        summary[name] = {
+            "r_squared": determination,
+            "median_absolute_error": float(np.median(error)),
+            "q95_absolute_error": float(np.quantile(error, 0.95)),
+            "median_bias": float(np.median(estimate - truth)),
+            "sign_accuracy_abs_truth_ge_0p2": float(
+                np.mean(np.sign(truth[strong]) == np.sign(estimate[strong]))
+            ),
+            "mean_absolute_error": float(error.mean()),
+            "fraction_error_above_0p15": float(np.mean(error > error_threshold)),
+        }
+        panels[name] = (truth, estimate, snr, determination)
+    return summary, panels
+
+
+def calibration_drift(summary, published, published_r_squared, *, class_order):
+    """Largest gap between the recomputed calibration and the two published runs."""
+    fields = ("median_absolute_error", "q95_absolute_error", "median_bias",
+              "sign_accuracy_abs_truth_ge_0p2")
+    drift = 0.0
+    for name in class_order:
+        reference = published["classes"][name]
+        for key in fields:
+            drift = max(drift, abs(summary[name][key] - reference[key]))
+        drift = max(drift, abs(summary[name]["r_squared"] - published_r_squared[name]))
+    return drift
+
+
+def report_calibration(summary, *, class_order):
+    """The deck's three headline numbers, with the mean beside the median."""
+    print(f"{'class':>6} {'R²':>6} {'median|e|':>10} {'mean|e|':>9} {'q95|e|':>8} "
+          f"{'sign≥0.2':>9} {'|e|>0.15':>9}")
+    for name in class_order:
+        values = summary[name]
+        print(f"{name:>6} {values['r_squared']:6.2f} "
+              f"{values['median_absolute_error']:10.3f} "
+              f"{values['mean_absolute_error']:9.3f} "
+              f"{values['q95_absolute_error']:8.3f} "
+              f"{100 * values['sign_accuracy_abs_truth_ge_0p2']:8.1f}% "
+              f"{100 * values['fraction_error_above_0p15']:8.1f}%")
+
+
+def report_calibration_gate(published, *, class_order):
+    """The run's own frozen thresholds against what it measured — its own verdict."""
+    thresholds = published["thresholds"]
+    print("frozen acceptance thresholds and what the run measured:\n")
+    print(f"{'class':>6} {'median|e|≤0.05':>16} {'q95|e|≤0.15':>14} {'|bias|≤0.03':>13} "
+          f"{'sign≥0.90':>11} {'pass':>6}")
+    for name in class_order:
+        reference = published["classes"][name]
+        print(f"{name:>6} {reference['median_absolute_error']:16.3f} "
+              f"{reference['q95_absolute_error']:14.3f} "
+              f"{abs(reference['median_bias']):13.3f} "
+              f"{reference['sign_accuracy_abs_truth_ge_0p2']:11.3f} "
+              f"{str(reference['calibration_pass']):>6}")
+    print(f"\nrun-level calibration_pass: {published['calibration_pass']}")
+    print(f"q95 threshold {thresholds['q95_absolute_error_maximum']} is exceeded by "
+          f"every class; 2 µm also misses the median gate "
+          f"{thresholds['median_absolute_error_maximum']}")
+
+
+def error_by_snr_quartile(panels, *, class_order, error_threshold=0.15):
+    """Where the recovery error lives, once events are ranked by signal-to-noise."""
+    print(f"{'class':>6} {'SNR quartile':>14} {'n':>4} {'median|e|':>10} {'|e|>0.15':>9}")
+    structure = {}
+    for name in class_order:
+        truth, estimate, snr, _ = panels[name]
+        error = np.abs(estimate - truth)
+        edges = np.quantile(snr, [0.0, 0.25, 0.5, 0.75, 1.0])
+        structure[name] = []
+        for index in range(4):
+            upper = snr <= edges[index + 1] if index == 3 else snr < edges[index + 1]
+            inside = (snr >= edges[index]) & upper
+            structure[name].append({
+                "quartile": index + 1,
+                "low_db": float(edges[index]),
+                "high_db": float(edges[index + 1]),
+                "count": int(inside.sum()),
+                "median_absolute_error": float(np.median(error[inside])),
+                "fraction_above_0p15": float(np.mean(error[inside] > error_threshold)),
+            })
+            record = structure[name][-1]
+            print(f"{name:>6} "
+                  f"{f'Q{index + 1} [{edges[index]:+.0f},{edges[index + 1]:+.0f}) dB':>14} "
+                  f"{record['count']:4d} {record['median_absolute_error']:10.3f} "
+                  f"{100 * record['fraction_above_0p15']:8.1f}%")
+    return structure
+
+
+def reinject_and_refit(row, donor, raw_signal, config):
+    """Rebuild one published injection here, and refit it, exactly as the run did."""
+    injected = inject_asymmetry_into_noise_carrier(
+        np.asarray(raw_signal),
+        frequency_hz=float(donor["frequency_khz"]) * 1000.0,
+        tau_s=float(donor["tau_ms"]) / 1000.0,
+        asymmetry=float(row["true_asymmetry"]),
+        amplitude=float(donor["amplitude_p0"]),
+        phase_rad=float(donor["phi_rad"]),
+        target_snr_db=float(donor["snr_db"]),
+    )
+    refit = fit_parametric_asymmetry(
+        injected,
+        initial_frequency_hz=float(donor["frequency_khz"]) * 1000.0,
+        initial_tau_s=float(donor["tau_ms"]) / 1000.0,
+        config=config,
+    )
+    return refit.asymmetry
+
+
+def report_reproduction(reproduction, *, class_order, drift_threshold=1.0e-3):
+    """Per-event drift across environments, and whether the aggregate survives it."""
+    summary = {}
+    for name in class_order:
+        truth, published_estimate, refitted = (
+            np.asarray(column) for column in zip(*reproduction[name])
+        )
+        drift = np.abs(published_estimate - refitted)
+        summary[name] = {
+            "count": int(truth.size),
+            "maximum_per_event_drift": float(np.max(drift)),
+            "fraction_drift_above_1e_3": float(np.mean(drift > drift_threshold)),
+            "published_median_absolute_error": float(
+                np.median(np.abs(published_estimate - truth))
+            ),
+            "refitted_median_absolute_error": float(np.median(np.abs(refitted - truth))),
+            "published_r_squared": coefficient_of_determination(truth,
+                                                               published_estimate),
+            "refitted_r_squared": coefficient_of_determination(truth, refitted),
+        }
+        values = summary[name]
+        print(f"{name:>5}: per-event drift up to "
+              f"{values['maximum_per_event_drift']:.2e} "
+              f"({100 * values['fraction_drift_above_1e_3']:.0f} % of events above "
+              f"1e-3) · median|e| {values['published_median_absolute_error']:.4f} → "
+              f"{values['refitted_median_absolute_error']:.4f} · "
+              f"R² {values['published_r_squared']:.4f} → "
+              f"{values['refitted_r_squared']:.4f}")
+    return summary
+
+
+def report_estimator_noise(variant_rows, confidence_rows, *, threshold, class_order,
+                           small_truth=0.15):
+    """The error distribution of the configuration that actually runs on real events."""
+    noise = {}
+    for name in class_order:
+        selected = [row for row in variant_rows if row["class_name"] == name]
+        accepted = [
+            row for row in selected
+            if float(confidence_rows[row["sample_id"]]["confidence_probability"])
+            >= threshold
+        ]
+        error = np.asarray([float(row["signed_error"]) for row in accepted])
+        magnitude = np.abs([float(row["true_asymmetry"]) for row in accepted])
+        noise[name] = error
+        small = error[magnitude < small_truth]
+        print(f"{name:>5}: {len(accepted):4d}/{len(selected)} injections pass the same "
+              f"confidence gate · error sd {error.std(ddof=1):.4f} "
+              f"(sd on |a|<{small_truth:.2f} only: {small.std(ddof=1):.4f}, "
+              f"n={small.size})")
+    print("\nthe error spread barely moves with the injected skew, so the pooled error "
+          "distribution is a fair null for real events whose skew is concentrated "
+          "near zero")
+    return noise
+
+
+def report_operational_gate(gates, deployment, *, class_order, development_success):
+    """The deployed threshold against the gate the recalibration set for itself."""
+    print("\nand its own operational gate, at the threshold the real-event pipeline "
+          "deploys:")
+    print(f"{'class':>6} {'coverage':>9} {'required':>9} {'q90|e|':>8} {'allowed':>8} "
+          f"{'meets gate':>11}")
+    operational = {}
+    for name in class_order:
+        gate, measured = gates[name], deployment[name]
+        passes = bool(measured["coverage"] >= gate["minimum_coverage"]
+                      and measured["q90_error"] <= gate["maximum_conditional_q90_error"])
+        operational[name] = {
+            "coverage": measured["coverage"],
+            "minimum_coverage": gate["minimum_coverage"],
+            "q90_absolute_error": measured["q90_error"],
+            "maximum_q90_absolute_error": gate["maximum_conditional_q90_error"],
+            "meets_gate": passes,
+        }
+        print(f"{name:>6} {measured['coverage']:9.3f} {gate['minimum_coverage']:9.2f} "
+              f"{measured['q90_error']:8.3f} "
+              f"{gate['maximum_conditional_q90_error']:8.2f} {str(passes):>11}")
+    print(f"run-level development_success: {development_success}")
+    return operational
+
+
+# --- the fifth coordinate ---------------------------------------------------
+
+def published_statistics_drift(observed, reference, *, class_order):
+    """Gap between the accepted real â measured here and the published statistics."""
+    drift = 0.0
+    for name in class_order:
+        values = observed[name]
+        assert values.size == reference[name]["accepted_count"], name
+        for key, value in (("standard_deviation", values.std(ddof=1)),
+                           ("median", np.median(values)),
+                           ("minimum", values.min()),
+                           ("maximum", values.max())):
+            drift = max(drift, abs(value - reference[name][key]))
+    return drift
+
+
+def deconvolve_estimator_noise(observed, noise, statistics, gaussian_targets, *,
+                               class_order):
+    """Subtract the estimator's variance from the observed variance of real â.
+
+    var(â) = var(skew) + var(error) if the two are independent, so what is left
+    after the subtraction is the skew the events actually carry — on the model's
+    own scale, in units the generator can consume.
+    """
+    print(f"{'class':>6} {'accepted':>9} {'coverage':>9} {'sd(â)':>7} {'sd(noise)':>10} "
+          f"{'sd(skew)':>9} {'real share':>11}")
+    deconvolution, support = {}, {}
+    for name in class_order:
+        values = observed[name]
+        noise_variance = float(noise[name].var(ddof=1))
+        true_variance = max(values.var(ddof=1) - noise_variance, 0.0)
+        support[name] = (float(values.min()), float(values.max()))
+        deconvolution[name] = {
+            "accepted_count": int(values.size),
+            "requested_count": int(statistics[name]["requested_count"]),
+            "coverage": float(statistics[name]["coverage"]),
+            "observed_standard_deviation": float(values.std(ddof=1)),
+            "estimator_noise_standard_deviation": float(np.sqrt(noise_variance)),
+            "skew_standard_deviation": float(np.sqrt(true_variance)),
+            "variance_share_real_skew": float(true_variance / values.var(ddof=1)),
+            "gaussian_sigma_transformed":
+                gaussian_targets[name]["gaussian_sigma_transformed"],
+            "observed_support": support[name],
+        }
+        entry = deconvolution[name]
+        print(f"{name:>6} {entry['accepted_count']:9d} "
+              f"{100 * entry['coverage']:8.1f}% "
+              f"{entry['observed_standard_deviation']:7.3f} "
+              f"{entry['estimator_noise_standard_deviation']:10.3f} "
+              f"{entry['skew_standard_deviation']:9.3f} "
+              f"{100 * entry['variance_share_real_skew']:10.1f}%")
+    return deconvolution, support
+
+
+def report_governance(targets_manifest, generation_manifest, targets_metrics, *,
+                      targets_run_id, generation_run_id):
+    """The two run manifests, unedited, and how far apart they were written."""
+    print(f"{targets_run_id} · claim_boundary")
+    print(f"  {targets_manifest['claim_boundary']}\n")
+    print(f"  strict accepted counts: {targets_metrics['strict_accepted_counts']}")
+    print(f"  minimum_50_strict_per_class: "
+          f"{targets_metrics['minimum_50_strict_per_class']}")
+    print(f"  status: {targets_manifest['status']}\n")
+    print(f"{generation_run_id} · claim_boundary")
+    print(f"  {generation_manifest.get('claim_boundary', '(no claim_boundary field in the manifest)')}")
+    print(f"  status: {generation_manifest['status']}")
+    print(f"  targets consumed: "
+          f"{targets_run_id in generation_manifest['command']}")
+    written = [datetime.fromisoformat(manifest["created_at"])
+               for manifest in (targets_manifest, generation_manifest)]
+    print(f"  written {(written[1] - written[0]).total_seconds() / 60.0:.0f} minutes "
+          f"after the run that forbade it")
+
+
+def report_exposure(generated, anchors, *, class_order, strong=0.2):
+    """What the v5 dataset carries per class, against the anchors that set it."""
+    print(f"{'class':>6} {'v5 events':>10} {'share':>7} {'generated a range':>22} "
+          f"{'sd':>7} {'|a|≥0.2':>9} {'anchors':>8}")
+    total = sum(values.size for values in generated.values())
+    exposure = {}
+    for name in class_order:
+        values = generated[name]
+        exposure[name] = {
+            "generated_count": int(values.size),
+            "generated_share": float(values.size / total),
+            "generated_minimum": float(values.min()),
+            "generated_maximum": float(values.max()),
+            "generated_standard_deviation": float(values.std(ddof=1)),
+            "generated_fraction_abs_ge_0p2": float(np.mean(np.abs(values) >= strong)),
+            "anchor_count": int(anchors[name]),
+        }
+        record = exposure[name]
+        print(f"{name:>6} {record['generated_count']:10d} "
+              f"{100 * record['generated_share']:6.1f}% "
+              f"{f'[{values.min():+.3f}, {values.max():+.3f}]':>22} "
+              f"{record['generated_standard_deviation']:7.3f} "
+              f"{100 * record['generated_fraction_abs_ge_0p2']:8.1f}% "
+              f"{record['anchor_count']:8d}")
+    return exposure
+
+
+def subsample_support(pool, *, size, draws, generator):
+    """Half-range and spread of many random subsamples of a larger anchor set."""
+    halves, spreads = np.empty(draws), np.empty(draws)
+    for index in range(draws):
+        draw = generator.choice(pool, size, replace=False)
+        halves[index] = max(-draw.min(), draw.max())
+        spreads[index] = draw.std(ddof=1)
+    return halves, spreads
+
+
+def report_subsample(name, halves, spreads, *, observed_half_range, observed_spread,
+                     size):
+    """What a `size`-event draw from a large class would have reported."""
+    record = {
+        "median_half_range": float(np.median(halves)),
+        "probability_half_range_at_most_observed": float(
+            np.mean(halves <= observed_half_range)
+        ),
+        "median_standard_deviation": float(np.median(spreads)),
+        "probability_standard_deviation_at_most_observed": float(
+            np.mean(spreads <= observed_spread)
+        ),
+    }
+    print(f"{name:>5} subsampled to n={size}: half-range median "
+          f"{record['median_half_range']:.3f}, "
+          f"P(≤ 10 µm's {observed_half_range:.3f}) = "
+          f"{record['probability_half_range_at_most_observed']:.3f} · "
+          f"sd median {record['median_standard_deviation']:.3f}, "
+          f"P(≤ 10 µm's) = "
+          f"{record['probability_standard_deviation_at_most_observed']:.3f}")
+    return record
+
+
+def paired_field_mismatches(v5_events, v4_events, frozen_fields):
+    """Re-verify every generated event against its v4 twin, field by field."""
+    baseline = {position: row for position, row in enumerate(v4_events)}
+    return sum(
+        1 for row in v5_events
+        if any(str(baseline[int(row["paired_baseline_index"])][field]) != str(row[field])
+               for field in frozen_fields)
+    )
+
+
+def dependence_significance(rows, *, class_order, parameters, anchor_counts):
+    """Realised − target correlation, and what it is worth in anchor standard errors.
+
+    Fisher's transform gives a standard error of 1/√(n−3) on a correlation
+    estimated from n anchors, so the same discrepancy is worth very different
+    evidence at n = 1129 and at n = 40 — which is the direction that matters here.
+    """
+    size = len(parameters)
+    deltas, zscores, dependence = {}, {}, {}
+    for name in class_order:
+        delta = np.zeros((size, size))
+        target = np.zeros((size, size))
+        realised = np.zeros((size, size))
+        for row in rows:
+            if row["class_name"] != name:
+                continue
+            i = parameters.index(row["row_parameter"])
+            j = parameters.index(row["column_parameter"])
+            delta[i, j] = float(row["delta"])
+            target[i, j] = float(row["target_correlation"])
+            realised[i, j] = float(row["realized_correlation"])
+        standard_error = 1.0 / np.sqrt(anchor_counts[name] - 3)
+        transform = lambda values: np.arctanh(np.clip(values, -0.999999, 0.999999))
+        zscore = (transform(realised) - transform(target)) / standard_error
+        np.fill_diagonal(zscore, 0.0)
+        deltas[name], zscores[name] = delta, zscore
+        off_diagonal = np.abs(delta - np.diag(np.diag(delta)))
+        dependence[name] = {
+            "anchor_count": anchor_counts[name],
+            "anchor_standard_error": float(standard_error),
+            "maximum_absolute_delta": float(off_diagonal.max()),
+            "asymmetry_row_maximum_absolute_delta": float(np.abs(delta[-1, :-1]).max()),
+            "asymmetry_row_maximum_absolute_z": float(np.abs(zscore[-1, :-1]).max()),
+            "frozen_block_maximum_absolute_z": float(np.abs(zscore[:-1, :-1]).max()),
+            "delta_undetectable_at_two_sigma": float(np.tanh(2.0 * standard_error)),
+        }
+        values = dependence[name]
+        print(f"{name:>5}: n={values['anchor_count']:4d} · asymmetry row max |Δr| "
+              f"{values['asymmetry_row_maximum_absolute_delta']:.3f} → |z| "
+              f"{values['asymmetry_row_maximum_absolute_z']:.2f} · frozen 4-D block "
+              f"max |z| {values['frozen_block_maximum_absolute_z']:.1f} · a difference "
+              f"up to {values['delta_undetectable_at_two_sigma']:.2f} would pass "
+              f"unnoticed at 2σ")
+    return deltas, zscores, dependence
+
+
+def asymmetry_evidence(*, skew_summary, deconvolution, snr_structure, reproduction,
+                       exposure, support_artefact, dependence, operational,
+                       observed_half_range, confidence_threshold, datasets, inputs,
+                       subsample_size, subsample_draws, null_per_class,
+                       reproduction_rows):
+    """The emission payload for this section, as (metrics, provenance)."""
+    metrics = {
+        "schema_version": 1,
+        "analysis": "waveform-asymmetry explainer measurements",
+        "model_free_envelope_skew": skew_summary,
+        "estimator_noise_deconvolution": deconvolution,
+        "calibration_error_by_snr_quartile": snr_structure,
+        "cross_environment_reproduction": reproduction,
+        "generated_asymmetry_exposure": exposure,
+        "small_sample_support_artefact": {
+            "observed_10um_half_range": observed_half_range,
+            "donors": support_artefact,
+            "subsample_size": subsample_size,
+            "draws": subsample_draws,
+        },
+        "dependence_delta_significance": dependence,
+        "deployed_configuration_operational_gate": operational,
+        "sealed_test_accessed": False,
+        "real_z8_data_read": True,
+    }
+    provenance = {
+        "datasets": datasets,
+        "inputs": inputs,
+        "parameters": {
+            "envelope_skew_window_tau": 3.0,
+            "envelope_skew_null_per_class": null_per_class,
+            "reproduction_rows_per_class": reproduction_rows,
+            "subsample_size": subsample_size,
+            "subsample_draws": subsample_draws,
+            "confidence_threshold": confidence_threshold,
+            "seeds": {"envelope_skew_null": 20260815, "reproduction": 20260816,
+                      "subsampling": 20260817},
+        },
+        "metric_definitions": {
+            "envelope_skew": "energy-weighted standardised third moment of the analytic envelope within ±3τ, no fit",
+            "skew_standard_deviation": "sqrt(var(accepted real â) − var(domain-aligned confidence-accepted estimator error))",
+            "delta_undetectable_at_two_sigma": "tanh(2/sqrt(n−3)): correlation difference still passing a two-sigma anchor test",
+            "cross_environment_reproduction": "re-running the shipped estimator on published injections in this environment",
+        },
+    }
+    return metrics, provenance
+
+
+# --- plots -------------------------------------------------------------------
 
 def plot_envelope_skew(real, null, *, axes=None, limit=1.2):
     """Model-free envelope skew: real events against the symmetric generator.
@@ -1020,144 +2761,117 @@ def plot_delta_triptych(deltas, zscores, labels, counts, *, axes=None, scale=0.1
 # %% [markdown]
 # ### 1. The label problem — measured
 #
-# The real corpus is a set of 8.192 ms recordings, one file per acquisition,
-# named after the bead population that was flowing: `HFocusing_5_10_2um2_0_1000.npy`
-# is a 2 µm acquisition. That filename **is** the label. Nobody looked at the
-# trace and decided it contained a 2 µm bead; a suspension of 2 µm beads was
-# put through the instrument and the resulting file inherited the name.
+# **The open question.** The corpus is a set of 8.192 ms recordings, one file
+# per acquisition, named after the bead population that was flowing:
+# `HFocusing_5_10_2um2_0_1000.npy` is a 2 µm acquisition. That filename **is**
+# the label. Nobody looked at a trace and decided it contained a 2 µm bead; a
+# suspension of 2 µm beads went through the instrument and the file inherited
+# the name. Whether that still counts as per-event supervision is not a matter
+# of opinion — it depends on how many events share one file.
 #
-# Events inside the file are then found by an automatic detector (`dual-clean`
-# peak evidence, then the `z8` selection policy — both defined in the glossary),
-# and each detected event inherits the recording's label. The first cell counts
-# what that inheritance actually costs.
+# **What is done.** Events are found inside each file by an automatic detector
+# (`dual-clean` peak evidence, then the `z8` selection policy — both in the
+# glossary), and each inherits its recording's label. So the census groups
+# events by `source_filename`, counts how many independent decisions are behind
+# them, and checks that no recording carries two physical classes.
 
 # %%
-import collections
 import math
 
-real_key = "particles2snr-fbase-dual-clean-z8-events-3class-plus-unclear-development@v2"
-real_root = dataset_root(real_key)
+from internship_workspace.chain_data import read_rows  # the shipped CSV reader
 
-with (real_root / "events.csv").open(newline="") as handle:
-    event_rows = list(csv.DictReader(handle))
+REAL_EVENTS = (
+    "particles2snr-fbase-dual-clean-z8-events-3class-plus-unclear-development@v2"
+)
+real_root = dataset_root(REAL_EVENTS)
+
+event_rows = read_rows(real_root / "events.csv")
 if any(row["split"] == "test" for row in event_rows):
     raise PermissionError("sealed test rows are forbidden")
-
-summary = json.loads((real_root / "dataset_summary.json").read_text())
-contract = json.loads((real_root / "input_contract.json").read_text())
-
 physical_rows = [row for row in event_rows if row["class_name"] in CLASS_ORDER]
-recording_class = {row["source_filename"]: row["physical_source_class"]
-                   for row in event_rows}
-events_per_recording = collections.Counter(row["source_filename"]
-                                           for row in event_rows)
-classes_per_recording = collections.defaultdict(set)
-for row in event_rows:
-    classes_per_recording[row["source_filename"]].add(row["physical_source_class"])
 
-distinct_classes = max(len(values) for values in classes_per_recording.values())
-if distinct_classes != 1:
+census = label_census(event_rows, group_key="source_filename",
+                      class_field="physical_source_class")
+if census["distinct_classes_per_recording"] != 1:
     raise AssertionError("a recording carries more than one physical class")
 
-alone = sum(1 for count in events_per_recording.values() if count == 1)
-shared_fraction = 1.0 - alone / len(event_rows)
-
-print(f"development recordings          {summary['development_signal_count']}")
-print(f"recordings carrying an event    {len(events_per_recording)}"
-      f"  ({100 * len(events_per_recording) / summary['development_signal_count']:.1f} %)")
-print(f"annotated events                {len(event_rows)}"
-      f"   ({len(physical_rows)} in the three physical classes,"
-      f" {len(event_rows) - len(physical_rows)} demoted to 'unclear')")
-print(f"distinct physical classes in one recording   {distinct_classes}")
-print(f"events sharing their label with a sibling    {100 * shared_fraction:.1f} %")
-print(f"recording duration              {contract['source_length']} samples"
-      f" = {1000 * contract['source_length'] / SAMPLING_HZ:.3f} ms"
-      f" at {contract['sampling_frequency_hz'] / 1e6:.0f} MHz")
+describe_label_channel(
+    census,
+    summary=json.loads((real_root / "dataset_summary.json").read_text()),
+    contract=json.loads((real_root / "input_contract.json").read_text()),
+    events=len(event_rows),
+    physical=len(physical_rows),
+    sampling_hz=SAMPLING_HZ,
+)
 
 # %% [markdown]
 # Three numbers decide the framing.
 #
-# **2,073** events across the three physical classes — that is the entire real
-# *development* corpus of this project, train and val together, and every later
-# comparison is against it. The release is development-only by construction; no
-# sealed test events exist in this lineage to fall back on.
+# **2,073** events across the three physical classes — the entire real
+# *development* corpus of this project, train and val together, and the
+# reference every later comparison is made against. The release is
+# development-only by construction; no sealed test events exist in this lineage
+# to fall back on.
 #
-# **One** distinct class per recording, checked rather than assumed: no
-# recording in the corpus contains events of two classes, because the class is
-# not a property the detector measures. It is the name of the file.
+# **One** distinct class per recording, checked rather than assumed: the class
+# is not a property the detector measures. It is the name of the file.
 #
-# **70 %** of the annotated events share their label with at least one sibling
-# found in the same recording. Their labels are not independent observations;
-# they are 1,234 recording-level decisions replicated across 2,194 events. A
-# classifier trained on them is partly learning to recognise the acquisition,
-# which is the failure the deck states and this cell quantifies.
-#
-# The remaining 121 events are labelled `unclear`. That too is a rule, not a
-# judgement: any event whose fitted SNR falls below −10 dB is relabelled,
-# whatever it looks like.
+# **70 %** of annotated events share their label with at least one sibling from
+# the same recording. Those labels are not independent observations; they are
+# 1,234 recording-level decisions replicated across 2,194 events. A classifier
+# trained on them is partly learning to recognise the acquisition — the failure
+# the deck states and this cell quantifies. The remaining 121 events are
+# labelled `unclear`, which is also a rule rather than a judgement: any event
+# whose fitted SNR falls below −10 dB is relabelled, whatever it looks like.
 
 # %%
-recordings_by_event_count = collections.defaultdict(collections.Counter)
-events_by_event_count = collections.Counter()
-for filename, count in events_per_recording.items():
-    recordings_by_event_count[str(count)][recording_class[filename]] += 1
-    events_by_event_count[str(count)] += count
-
-label_census = {
-    "recordings_by_event_count": {key: dict(value)
-                                  for key, value in recordings_by_event_count.items()},
-    "events_by_event_count": dict(events_by_event_count),
-    "events_sharing_a_label_fraction": shared_fraction,
-}
-plot_label_inheritance(label_census, class_colour=CLASS_COLOUR,
-                       class_order=CLASS_ORDER)
+plot_label_inheritance(census, class_colour=CLASS_COLOUR, class_order=CLASS_ORDER)
+plt.show()
 
 # %% [markdown]
 # #### How much information is in the label channel, exactly
 #
-# The label channel can be bounded rather than described. There are 1,234
-# independent labels (one per recording that produced an event), drawn from
-# three classes with the observed frequencies. The entropy of that sequence is
-# an upper bound on everything supervision can ever extract from the real
-# corpus.
+# "Not independent" is still qualitative, and the framing deserves a number. The
+# label channel can be bounded instead: there are 1,234 independent labels, one
+# per recording that produced an event, drawn from three classes at the observed
+# frequencies. The entropy of that sequence is an upper bound on everything
+# supervision can ever extract from the real corpus.
 
 # %%
-recording_classes = collections.Counter(recording_class.values())
-total_recordings = sum(recording_classes.values())
+frequencies = census["class_counts"]
+total_recordings = sum(frequencies.values())
 entropy_bits = -sum(
     (count / total_recordings) * math.log2(count / total_recordings)
-    for count in recording_classes.values()
+    for count in frequencies.values()
 )
 label_bits = total_recordings * entropy_bits
 
-print(f"independent labels              {total_recordings}")
-print(f"class frequencies               "
-      + "  ".join(f"{name} {recording_classes[name]}" for name in CLASS_ORDER))
-print(f"entropy per label               {entropy_bits:.4f} bits"
-      f"  (ceiling log2(3) = {math.log2(3):.4f})")
-print(f"whole real label channel        {label_bits:.0f} bits"
-      f" = {label_bits / 8:.0f} bytes")
+describe_entropy(frequencies, class_order=CLASS_ORDER, entropy_bits=entropy_bits,
+                 total_bits=label_bits, ceiling=math.log2(3))
 
 # %% [markdown]
-# **231 bytes.** Everything a supervised classifier could ever be told about
-# the real corpus, by these labels, fits in a quarter of a kilobyte. That is
-# the size of the supervision this project is asked to work from — and it is an
-# upper bound, since it credits every label as an independent observation of
-# its event, which the previous cell showed is false.
+# **231 bytes.** Everything a supervised classifier could ever be told about the
+# real corpus, by these labels, fits in a quarter of a kilobyte — and that is an
+# upper bound, since it credits every label as an independent observation of its
+# event, which the previous cell showed is false.
+#
+# Which leaves the obvious objection standing: a person could label the events
+# properly. That is not a hypothetical here, so it is answered with the record.
 
 # %% [markdown]
 # #### What a human actually confirmed
 #
-# The obvious objection: a person could label the events. One did. In July 2026
-# a blind review queue was built — the reviewer sees the trace and a fixed set
-# of evidence fields, not the detector's verdict — and 120 candidate events,
-# one per recording, were adjudicated by hand.
+# **The open question.** Does event-level class supervision exist if someone
+# sits down and produces it? In July 2026 someone did: a blind review queue was
+# built — the reviewer sees the trace and a fixed set of evidence fields, never
+# the detector's verdict — and 120 candidate events, one per recording, were
+# adjudicated by hand.
 #
-# **Sixty of those 120 sit on the sealed test split.** They are excluded here
-# and their decisions are never read; only the development half is used, and
-# the cell raises if a sealed row reaches the population. That halves the
-# evidence and is worth stating plainly rather than quietly using the full
-# tally that the session summary reports.
+# **What is done, and on how much.** **Sixty of those 120 sit on the sealed test
+# split.** They are excluded here and their decisions are never read; only the
+# development half is used, and the cell raises if a sealed row reaches the
+# population. That halves the evidence, and saying so is better than quietly
+# quoting the full tally the session summary reports.
 
 # %%
 review_root = run_dir("dual-clean-tuning-review-120-v2-jlb")
@@ -1168,34 +2882,18 @@ development = [candidate for candidate in queue["candidates"]
 if any(candidate["source_split"] == "test" or candidate["filtered_split"] == "test"
        for candidate in development):
     raise PermissionError("sealed test rows are forbidden")
-sealed_excluded = len(queue["candidates"]) - len(development)
 
-axis_of = {candidate["candidate_id"]: candidate["blind_evidence"]["failure_axis"]
-           for candidate in development}
-with (review_root / "current_decisions.csv").open(newline="") as handle:
-    decisions = [row for row in csv.DictReader(handle)
-                 if row["candidate_id"] in axis_of]
-
-verdicts = collections.defaultdict(collections.Counter)
-for row in decisions:
-    verdicts[axis_of[row["candidate_id"]]][row["existence"]] += 1
-overall = collections.Counter(row["existence"] for row in decisions)
-classed = sum(1 for row in decisions if row["estimated_class"])
-reviewers = {row["reviewer"] for row in decisions}
-
-print(f"adjudicated on development      {len(decisions)}"
-      f"   (sealed test candidates excluded: {sealed_excluded})")
-print(f"reviewers                       {', '.join(sorted(reviewers))}")
-print(f"verdicts                        "
-      + "  ".join(f"{name} {count}" for name, count in overall.most_common()))
-print(f"rejected as not a particle      "
-      f"{100 * overall['not_particle'] / len(decisions):.0f} %")
-print(f"decisions carrying a class      {classed} / {len(decisions)}")
+decisions, verdicts, overall = blind_review(review_root, development)
+classed = describe_blind_review(
+    decisions, overall,
+    sealed_excluded=len(queue["candidates"]) - len(development),
+)
 
 # %%
 plot_human_verdicts(verdicts,
                     order=["eligible", "low_filtered", "low_clean",
                            "association", "saturation"])
+plt.show()
 
 # %% [markdown]
 # Two things are visible, and only one of them was expected.
@@ -1220,70 +2918,36 @@ plot_human_verdicts(verdicts,
 # hard 60-event sample of development recordings. It bounds nothing about
 # accuracy. It establishes that per-event class labels were not produced, which
 # is all the argument needs.
+#
+# So the label channel is small, dependent, and cannot be enlarged by asking a
+# human. The next subsection takes the only remaining source of supervision:
+# the signal itself.
 
 # %% [markdown]
-# The label-channel census above belongs to no existing run — the deck asserts
-# the inheritance, the dataset summary counts events, but nothing measures how
-# many independent labels those events actually carry. So this subsection emits
-# it as manifested evidence. That happens only under
-# `workspace notebooks execute`; a live kernel prints the refusal and moves on.
+# The label-channel census belongs to no existing run — the deck asserts the
+# inheritance, the dataset summary counts events, but nothing measures how many
+# independent labels those events actually carry. So this subsection emits it as
+# manifested evidence. That happens only under `workspace notebooks execute`; a
+# live kernel prints the refusal and moves on.
 
 # %%
-census_metrics = {
-    "schema_version": 1,
-    "analysis": "real-label-channel-census",
-    "population": {
-        "dataset": real_key,
-        "selection": "development train and val rows, all four label values",
-        "recordings_in_release": summary["development_signal_count"],
-        "recordings_with_events": len(events_per_recording),
-        "events": len(event_rows),
-        "events_in_physical_classes": len(physical_rows),
-    },
-    "distinct_physical_classes_per_recording": distinct_classes,
-    "recordings_by_event_count": {
-        str(count): int(recordings)
-        for count, recordings in sorted(
-            collections.Counter(events_per_recording.values()).items()
-        )
-    },
-    "events_sharing_a_label_fraction": shared_fraction,
-    "label_channel": {
-        "independent_labels": total_recordings,
-        "entropy_bits_per_label": entropy_bits,
-        "total_bits": label_bits,
-        "class_counts": dict(recording_classes),
-    },
-}
-
+census_metrics, census_provenance = census_evidence(
+    census,
+    dataset=REAL_EVENTS,
+    summary=json.loads((real_root / "dataset_summary.json").read_text()),
+    events=len(event_rows),
+    physical=len(physical_rows),
+    events_csv=real_root / "events.csv",
+    entropy_bits=entropy_bits,
+    total_bits=label_bits,
+    datasets=dataset_provenance(),
+)
 try:
     emitted = notebook_evidence.emit_run(
         workspace,
         section="label-channel-census",
         metrics=census_metrics,
-        provenance={
-            "datasets": dataset_provenance(),
-            "inputs": {
-                "events_csv_sha256": notebook_evidence.sha256_file(
-                    real_root / "events.csv"
-                ),
-            },
-            "parameters": {
-                "grouping_key": "source_filename",
-                "class_field": "physical_source_class",
-            },
-            "metric_definitions": {
-                "events_sharing_a_label_fraction": (
-                    "fraction of annotated events found in a recording that "
-                    "produced at least two events, so that their label is a "
-                    "single recording-level decision replicated"
-                ),
-                "entropy_bits_per_label": (
-                    "Shannon entropy of the physical class of the recordings "
-                    "that produced at least one event, in bits"
-                ),
-            },
-        },
+        provenance=census_provenance,
         claim_boundary=(
             "Counts the structure of the real label channel on the z8 "
             "development event table: how many recordings, how many events "
@@ -1299,22 +2963,23 @@ except WorkspaceError as error:
 # %% [markdown]
 # ### 2. Self-supervised learning, mechanically
 #
-# If the label cannot be trusted but the signal can, train on the signal.
+# **The open question.** If the label cannot be trusted but the signal can,
+# train on the signal — but "train on the signal" is a slogan until the training
+# target is written down. What exactly is predicted, and what is kept?
 #
-# **Masked reconstruction** is the concrete form used here. Take a 4,096-sample
-# window. Hide a quarter of it. Pass what remains through an **encoder**, which
-# compresses the window into a latent vector *z*; pass *z* through a
-# **decoder**, which writes samples back out. The loss reads **only the hidden
-# samples**: the network is scored on what it could not see. No label enters
-# anywhere.
+# **What is done.** **Masked reconstruction.** Take a 4,096-sample window. Hide
+# a quarter of it. Pass what remains through an **encoder**, which compresses the
+# window into a latent vector *z*; pass *z* through a **decoder**, which writes
+# samples back out. The loss reads **only the hidden samples** — the network is
+# scored on what it could not see — and no label enters anywhere. At inference
+# the decoder is thrown away: the deliverable is the frozen encoder and its
+# latent space, which later sections use for probes, retrieval and eventually
+# classification.
 #
-# At inference the decoder is thrown away. The deliverable is the frozen
-# encoder and its latent space — what later sections use for probes, retrieval
-# and, eventually, classification.
-#
-# The deck draws that as a symmetric pair of trapezoids. The next cell
-# instantiates the actual model from the training run's own configuration
-# (verified byte-identical by hash) and counts what each half costs.
+# The deck draws that as a symmetric pair of trapezoids. The cell instantiates
+# the actual model from the training run's own configuration — verified
+# byte-identical by hash, so this is that run's architecture and not a
+# lookalike — and counts what each half costs.
 
 # %%
 import hashlib  # noqa: E402  (kept beside the section that needs it)
@@ -1323,31 +2988,20 @@ from p3_ssl.bead_ssl import make_model  # noqa: E402
 from p3_ssl.config import REPOSITORY_ROOT as P3_SSL_ROOT, load_config  # noqa: E402
 
 SSL_RUN = "bead-ssl-v2-p25-full-s42-e30-matched-r1"
+SSL_CONFIG = "configs/bead_ssl_z8_v5_v2.yaml"
+
 ssl_root = run_dir(SSL_RUN)
 ssl_run = json.loads((ssl_root / "run.json").read_text())
 ssl_metrics = json.loads((ssl_root / "metrics.json").read_text())
 
-config_relative = "configs/bead_ssl_z8_v5_v2.yaml"
-config_sha = hashlib.sha256((P3_SSL_ROOT / config_relative).read_bytes()).hexdigest()
+config_sha = hashlib.sha256((P3_SSL_ROOT / SSL_CONFIG).read_bytes()).hexdigest()
 if config_sha != ssl_run["source_sha256"]["config"]:
     raise AssertionError("the local config is not the one this run trained with")
 
-ssl_config = load_config(config_relative)
-model = make_model(ssl_config)
-total_parameters = sum(parameter.numel() for parameter in model.parameters())
-decoder_parameters = sum(parameter.numel()
-                         for parameter in model.reconstruction_head.parameters())
-
-print(f"config sha256 matches {SSL_RUN}")
-print(f"window                          {ssl_config['data']['input_length']} samples"
-      f" = {1000 * ssl_config['data']['input_length'] / SAMPLING_HZ:.3f} ms")
-print(f"tokens                          {model.n_tokens}"
-      f" patches of {ssl_config['model']['patch_size']} samples")
-print(f"parameters                      {total_parameters:,}")
-print(f"  encoder, kept at inference    {total_parameters - decoder_parameters:,}"
-      f"  ({100 * (1 - decoder_parameters / total_parameters):.1f} %)")
-print(f"  decoder, dropped              {decoder_parameters:,}"
-      f"  ({100 * decoder_parameters / total_parameters:.1f} %)")
+ssl_config = load_config(SSL_CONFIG)
+total_parameters, decoder_parameters = describe_model_size(
+    make_model(ssl_config), ssl_config, run_id=SSL_RUN, sampling_hz=SAMPLING_HZ
+)
 
 # %% [markdown]
 # The schema is right about the direction and wrong about the proportions.
@@ -1357,9 +3011,10 @@ print(f"  decoder, dropped              {decoder_parameters:,}"
 # survives. The expensive thing about masked reconstruction is not the decoder;
 # it is the data, which is the subject of subsection 3.
 #
-# Now the mechanism on a real trace. The run stored six reconstruction
+# Before that, the mechanism on a real trace. The run stored six reconstruction
 # examples; they are validation-split 2 µm events, and the cell checks that
-# before touching them.
+# before touching them, then checks that their masks carry the same budget the
+# run reports over all 444 validation traces.
 
 # %%
 examples = np.load(ssl_root / "real_reconstruction_examples.npz", allow_pickle=False)
@@ -1368,30 +3023,10 @@ example_rows = [event_by_id[str(sample_id)] for sample_id in examples["sample_id
 if any(row["split"] == "test" for row in example_rows):
     raise PermissionError("sealed test rows are forbidden")
 
-masked_per_trace = examples["mask"].sum(axis=1)
-if len(set(masked_per_trace.tolist())) != 1:
-    raise AssertionError("the P25 budget is not constant across examples")
-hidden_per_trace = int(masked_per_trace[0])
-
-spans = [int(np.count_nonzero(np.diff(row.astype(int)) == 1)) + int(row[0])
-         for row in examples["mask"]]
-budget_from_metrics = (ssl_metrics["real_validation"]["model"]["masked_points"]
-                       / ssl_metrics["counts"]["real_validation"])
-if hidden_per_trace != budget_from_metrics:
+geometry = masking_geometry(examples, ssl_metrics)
+if geometry["hidden_per_trace"] != geometry["budget_from_metrics"]:
     raise AssertionError("stored masks disagree with the run's masked-point budget")
-
-print(f"examples                        {len(example_rows)} "
-      f"({', '.join(sorted({row['class_name'] for row in example_rows}))},"
-      f" split {', '.join(sorted({row['split'] for row in example_rows}))})")
-print(f"hidden per trace                {hidden_per_trace} of "
-      f"{examples['signal'].shape[1]} samples"
-      f" = {100 * hidden_per_trace / examples['signal'].shape[1]:.1f} %")
-print(f"mask geometry                   {set(spans)} disjoint patches of "
-      f"{hidden_per_trace // spans[0]} samples")
-print(f"reproduces the run's budget     "
-      f"{ssl_metrics['real_validation']['model']['masked_points']:.0f} masked points"
-      f" / {ssl_metrics['counts']['real_validation']} traces"
-      f" = {budget_from_metrics:.0f}")
+describe_masking(geometry, example_rows, ssl_metrics)
 
 # %%
 example_index = 0
@@ -1404,30 +3039,16 @@ plot_masked_reconstruction(
     sampling_hz=SAMPLING_HZ,
     title=(f"{example_row['event_id']} · {example_row['class_name']} ·"
            f" SNR {float(example_row['snr_db']):.1f} dB ·"
-           f" {hidden_per_trace} samples hidden in {spans[example_index]} patches"),
+           f" {geometry['hidden_per_trace']} samples hidden in"
+           f" {geometry['spans'][example_index]} patches"),
 )
 
 # %%
-hidden = examples["mask"].astype(bool)
-model_mse = np.asarray([
-    float(np.mean((examples["signal"][index] - examples["model"][index])[hidden[index]] ** 2))
-    for index in range(len(example_rows))
-])
-interpolation_mse = np.asarray([
-    float(np.mean((examples["signal"][index]
-                   - examples["interpolation"][index])[hidden[index]] ** 2))
-    for index in range(len(example_rows))
-])
-published_model = ssl_metrics["real_validation"]["model"]["masked_mse"]
-published_interpolation = ssl_metrics["real_validation"]["interpolation"]["masked_mse"]
-
-print(f"stored examples, masked MSE     model {model_mse.min():.2e}–{model_mse.max():.2e}"
-      f"   interpolation {interpolation_mse.min():.2e}–{interpolation_mse.max():.2e}")
-print(f"published over {ssl_metrics['counts']['real_validation']} traces"
-      f"       model {published_model:.2e}"
-      f"   interpolation {published_interpolation:.2e}")
-if not model_mse.min() <= published_model <= model_mse.max():
-    print("note: the six stored examples do not bracket the published aggregate")
+describe_reconstruction_error(
+    masked_mse(examples, "model"),
+    masked_mse(examples, "interpolation"),
+    ssl_metrics,
+)
 
 # %% [markdown]
 # The six examples bracket the published aggregate; they do not reproduce it,
@@ -1446,70 +3067,63 @@ if not model_mse.min() <= published_model <= model_mse.max():
 # sample counts above are exact and unaffected; any conversion of the mask
 # geometry into microseconds is not, and the masking section takes that up as
 # alignment A4.
+#
+# The mechanism is now concrete, and with it the cost: 1,024 real numbers to
+# predict per window instead of one class out of three. Subsection 3 prices
+# that difference on this corpus.
 
 # %% [markdown]
 # ### 3. Why reconstruction is hungrier for data than classification
 #
-# This is the step that motivates the entire simulation chain, and it has been
-# rejected once for being asserted rather than shown. So: the claim first, as a
-# chain that can be checked link by link, then both sides counted.
+# **The open question.** This is the step that motivates the entire simulation
+# chain, and it has been rejected once for being asserted rather than shown. So:
+# the claim as a chain that can be checked link by link, then both sides
+# counted.
 #
 # A **classifier** learns p(class | signal). There are three possible answers.
 # Any factor of the signal that does not separate the classes may be ignored at
-# no cost — a phase, a noise realisation, an amplitude offset that all three
-# classes share. Examples matter mostly near the frontier, because that is
-# where the answer changes.
+# no cost — a phase, a noise realisation, an amplitude offset all three classes
+# share. Examples matter mostly near the frontier, because that is where the
+# answer changes.
 #
 # A **reconstructor** learns p(hidden | visible). There are 1,024 answers per
-# trace, each a real number. Now every knob of the signal shapes the answer,
-# and ignoring one is paid *wherever that knob varies* — not just at a
-# frontier, because there is no frontier. Examples are therefore needed
-# everywhere the knobs have mass, and needed **jointly**: knowing what a large
-# amplitude looks like at high SNR says little about a large amplitude at low
-# SNR if the two co-occur.
+# trace, each a real number. Now every knob of the signal shapes the answer, and
+# ignoring one is paid *wherever that knob varies* — not just at a frontier,
+# because there is no frontier. Examples are needed everywhere the knobs have
+# mass, and needed **jointly**: knowing what a large amplitude looks like at high
+# SNR says little about a large amplitude at low SNR if the two co-occur.
 #
 # The conclusion follows: covering a distribution scales with the **volume** of
-# joint variability, not with the number of classes. Three classes cost the
-# same whether the signal has one knob or five. A volume does not.
+# joint variability, not with the number of classes. Three classes cost the same
+# whether the signal has one knob or five. A volume does not.
 #
-# Both sides are countable in this project. Here they are.
+# **What is done.** Both sides are countable in this project, so the cell counts
+# them: the reconstruction side from the training run's own split sizes and
+# epoch count, the label side from the census above.
 
 # %%
-synthetic_key = "particles2snr-fbase-z8-cholesky-physicalcorr-effective-snr-synthetic-events@v5"
-synthetic_root = dataset_root(synthetic_key)
-synthetic_summary = json.loads((synthetic_root / "dataset_summary.json").read_text())
-
+SYNTHETIC = (
+    "particles2snr-fbase-z8-cholesky-physicalcorr-effective-snr-synthetic-events@v5"
+)
+synthetic_summary = json.loads(
+    (dataset_root(SYNTHETIC) / "dataset_summary.json").read_text()
+)
 train_traces = ssl_metrics["counts"]["simulation_train"]
 validation_traces = ssl_metrics["counts"]["simulation_validation"]
-epochs = ssl_run["epochs"]
 if train_traces + validation_traces != synthetic_summary["event_count"]:
     raise AssertionError("the run's splits do not exhaust the registered corpus")
 
-hidden_per_epoch = train_traces * hidden_per_trace
-problems_per_training = train_traces * epochs
-hidden_per_training = problems_per_training * hidden_per_trace
-
-print(f"synthetic corpus                {synthetic_summary['event_count']:,} events"
-      f"  ({train_traces:,} train + {validation_traces:,} val)")
-print(f"epochs                          {epochs}")
-print("")
-print("RECONSTRUCTION SIDE")
-print(f"  trace-level problems / epoch  {train_traces:,}")
-print(f"  trace-level problems / run    {problems_per_training:,}"
-      f"   ({problems_per_training / 1e6:.2f} M)")
-print(f"  hidden values / epoch         {hidden_per_epoch:,}"
-      f"   ({hidden_per_epoch / 1e6:.1f} M)")
-print(f"  hidden values / run           {hidden_per_training:,}"
-      f"   ({hidden_per_training / 1e9:.2f} G)")
-print("")
-print("LABEL SIDE")
-print(f"  annotated real events         {len(physical_rows):,}")
-print(f"  independent real labels       {total_recordings:,}")
-print(f"  human event-level classes     {classed}")
-print(f"  total label information       {label_bits:.0f} bits")
-print("")
-print(f"reconstruction problems per annotated real event   "
-      f"{problems_per_training / len(physical_rows):.0f}×")
+describe_data_appetite(
+    corpus=synthetic_summary["event_count"],
+    train=train_traces,
+    validation=validation_traces,
+    epochs=ssl_run["epochs"],
+    hidden_per_trace=geometry["hidden_per_trace"],
+    events=len(physical_rows),
+    labels=total_recordings,
+    human_classes=classed,
+    label_bits=label_bits,
+)
 
 # %% [markdown]
 # **A correction, since the number circulates in two forms.** The deck's
@@ -1525,6 +3139,10 @@ print(f"reconstruction problems per annotated real event   "
 # decisions and zero human class judgements. The reconstruction task consumes
 # **566 trace-level problems for every annotated real event in existence**.
 # There is no version of this corpus that supplies them.
+#
+# That prices the gap but not its shape: a shortfall of 566× could in principle
+# be closed by collecting more events. Whether it can is a question about how
+# the cost grows with the number of knobs.
 
 # %% [markdown]
 # #### The toy that shows why five knobs is the problem
@@ -1539,7 +3157,8 @@ print(f"reconstruction problems per annotated real event   "
 # m^(k−1). The ratio is *m*, at every k: the volume task is one whole factor of
 # the density more expensive, and that factor compounds with each knob added.
 #
-# The arithmetic is the content here, so it is computed rather than cited.
+# The arithmetic is the content here, so it is computed rather than cited, and
+# the two corpus sizes are placed on the same grid.
 
 # %%
 BINS_PER_KNOB = 8
@@ -1549,25 +3168,11 @@ knob_counts = np.arange(1, MAX_KNOBS + 1)
 volume_cost = BINS_PER_KNOB ** knob_counts
 boundary_cost = BINS_PER_KNOB ** (knob_counts - 1)
 
-real_reach = len(physical_rows) ** (1 / MAX_KNOBS)
-synthetic_reach = synthetic_summary["event_count"] ** (1 / MAX_KNOBS)
-real_volume_knobs = int(np.searchsorted(volume_cost, len(physical_rows), side="right"))
-real_boundary_knobs = int(np.searchsorted(boundary_cost, len(physical_rows),
-                                          side="right"))
-synthetic_knobs = int(np.searchsorted(volume_cost, synthetic_summary["event_count"],
-                                      side="right"))
-
-for count, volume, boundary in zip(knob_counts, volume_cost, boundary_cost):
-    print(f"k={count}   volume {volume:>7,}   boundary {boundary:>7,}"
-          f"   ratio {volume // boundary}")
-print("")
-print(f"at {BINS_PER_KNOB} bins per knob, {len(physical_rows):,} real events reach"
-      f" {real_volume_knobs} knobs as a volume,"
-      f" {real_boundary_knobs} as a boundary")
-print(f"at {BINS_PER_KNOB} bins per knob, {synthetic_summary['event_count']:,} "
-      f"synthetic events reach {synthetic_knobs} knobs as a volume")
-print(f"inverted at k={MAX_KNOBS}: real events buy {real_reach:.2f} bins per knob,"
-      f" synthetic {synthetic_reach:.2f}")
+describe_coverage_grid(knob_counts, volume_cost, boundary_cost,
+                       bins_per_knob=BINS_PER_KNOB,
+                       real=len(physical_rows),
+                       synthetic=synthetic_summary["event_count"],
+                       max_knobs=MAX_KNOBS)
 
 # %%
 plot_coverage_scaling(
@@ -1579,6 +3184,7 @@ plot_coverage_scaling(
          f"{synthetic_summary['event_count']:,} synthetic events", "#2563eb"),
     ),
 )
+plt.show()
 
 # %% [markdown]
 # Read the crossings, not the curves. At eight bins per knob, the same 2,073
@@ -1614,8 +3220,11 @@ plot_coverage_scaling(
 # the resolution the reconstruction task requires. Whether that declared
 # distribution lands where real events actually live is not an assumption this
 # section is allowed to make — it is the measurement the coverage chain
-# performs later, and the retrieval section tightens event by event. This
-# section establishes only why those measurements are the ones that matter.
+# performs later, and the retrieval section tightens event by event.
+#
+# What is left open is everything about the generator itself: whether a learned
+# space orders its knobs at all, what those knobs are, and how measured events
+# become one. That is the rest of this notebook, in that order.
 
 # %% [markdown]
 # ### Glossary
@@ -1674,19 +3283,19 @@ plot_coverage_scaling(
 # %% [markdown]
 # ## One analytical family, six knobs, and what a trained encoder keeps
 #
-# Everything else in this notebook compares a synthetic domain against a real
-# one. That comparison presumes something that has not been established yet:
-# that a space learned from raw signals orders the physics at all. If the
-# encoder's geometry were unrelated to the generator's parameters, no distance
-# measured in it would mean anything, and the coverage question would be moot.
+# **The open question.** Everything else in this notebook compares a synthetic
+# domain against a real one, and that comparison presumes something section 1
+# never established: that a space learned from raw signals orders the physics at
+# all. If the encoder's geometry were unrelated to the generator's parameters,
+# no distance measured in it would mean anything, and the coverage question
+# would be moot.
 #
-# The cheapest honest way to settle it is not to argue but to build a family
-# whose truth is known by construction, turn one knob at a time, and look at
-# what happens to the embeddings. That is what this section does, and it does
-# it live: the deck this notebook replaces showed the same experiment as a
-# bitmap cropped out of an ODP file, whose provenance record literally reads
-# `"command": "manual import"`. Nothing in it could be re-run, checked, or
-# disagreed with.
+# **What is done.** The cheapest honest way to settle it is not to argue but to
+# build a family whose truth is known by construction, turn one knob at a time,
+# and look at what happens to the embeddings — live. The deck this notebook
+# replaces showed the same experiment as a bitmap cropped out of an ODP file,
+# whose provenance record literally reads `"command": "manual import"`. Nothing
+# in it could be re-run, checked, or disagreed with.
 
 # %% [markdown]
 # ### The equation
@@ -1724,9 +3333,10 @@ plot_coverage_scaling(
 #
 # None of this is restated here as code. `particle_wave` in
 # `p3_ssl.particle_equation_sweeps` is the implementation that produced the
-# published sweep, and it is the one imported below; the notebook only chooses
-# the arguments — and it reads even those from the published run's own
-# configuration file rather than retyping them.
+# published sweep, and it is the one imported below; the cell only chooses the
+# arguments — and it reads even those from the published run's own configuration
+# file rather than retyping them, then asserts that the regenerated family
+# matches the stored one signal for signal.
 
 # %%
 from p3_ssl.particle_equation_sweeps import (
@@ -1760,29 +3370,13 @@ panels = generate_single_particle_panels(
     signal_window_duration_ms=float(CONFIG["signal_window_duration_ms"]),
     realistic_figure_based_sweeps=bool(CONFIG["realistic_figure_based_sweeps"]),
 )
-KNOBS = [panel.key for panel in panels]
 
 published_signals = np.load(SWEEP_RUN / "synthetic_signals_encoded.npz")
-signal_drift = max(
-    float(np.max(np.abs(published_signals[f"{p.key}_signals"] - p.encoded_signal)))
-    for p in panels
-)
-value_drift = max(
-    float(np.max(np.abs(published_signals[f"{p.key}_color"] - p.color_value)))
-    for p in panels
-)
+signal_drift, value_drift = reproduction_drift(panels, published_signals)
 assert signal_drift < 1.0e-5, f"signal reproduction drifted by {signal_drift:.3e}"
 assert value_drift == 0.0, f"swept values drifted by {value_drift:.3e}"
-
-print(
-    f"{len(panels)} knobs x {CONFIG['n_per_panel']} signals x "
-    f"{CONFIG['input_length']} samples, window {CONFIG['signal_window_duration_ms']} ms"
-)
-print("knobs:", ", ".join(KNOBS))
-print(
-    "reproduces single_n1800_figure_based signal-for-signal "
-    f"(max |delta| = {signal_drift:.2e} mV, swept values exact)"
-)
+report_family(panels, CONFIG, signal_drift=signal_drift,
+              run_name="single_n1800_figure_based")
 
 # %% [markdown]
 # ### The ranges are measured, not invented — with one exception
@@ -1799,49 +3393,22 @@ print(
 # the sweep design, not of the encoder, and it is worth stating before reading
 # the $\tau$ panel: it probes envelopes narrower than any real crossing.
 #
-# The knobs also interact. Only the SNR row sweeps SNR explicitly; but $A$ is
-# swept against a *fixed* noise floor $\sigma_n = 0.02$ mV, and $\tau$ changes
-# the energy of the burst, so both move the effective SNR too. Measuring that
-# is one line, and it decides how the panels may be read.
+# The knobs also interact, which decides how the panels may be read at all. Only
+# the SNR row sweeps SNR explicitly; but $A$ is swept against a *fixed* noise
+# floor $\sigma_n = 0.02$ mV, and $\tau$ changes the energy of the burst, so
+# both move the effective SNR too. The cell computes it along every row from the
+# generator's own clean waveform, and checks the formula against the generator's
+# own SNR column before quoting the other five.
 
 # %%
-t_norm = np.linspace(0.0, 1.0, int(CONFIG["input_length"]), dtype=np.float32)
-effective_snr = {}
-for panel in panels:
-    clean = particle_wave(
-        t_norm,
-        panel.params["A"],
-        panel.params["fD"],
-        panel.params["phi"],
-        panel.params["t0"],
-        panel.params["tau"],
-    )
-    rms = np.sqrt(np.mean(np.square(clean), axis=1))
-    sigma = (
-        panel.params["snr_noise_std"]
-        if panel.key == "snr_db"
-        else np.full(rms.shape, float(CONFIG["noise_std"]), dtype=np.float32)
-    )
-    effective_snr[panel.key] = 20.0 * np.log10(rms / sigma)
-
-snr_panel = next(p for p in panels if p.key == "snr_db")
+effective_snr = effective_snr_by_knob(
+    panels, particle_wave,
+    length=CONFIG["input_length"], noise_std=CONFIG["noise_std"],
+)
+snr_panel = next(panel for panel in panels if panel.key == "snr_db")
 snr_check = float(np.max(np.abs(effective_snr["snr_db"] - snr_panel.color_value)))
 assert snr_check < 1.0e-3, f"effective-SNR formula disagrees by {snr_check:.3e} dB"
-
-print(f"{'knob':<13}{'swept range':>26}{'effective SNR [dB]':>26}")
-for panel in panels:
-    values, _, symbol, unit = sweep_display(panel)
-    span = effective_snr[panel.key]
-    suffix = f" {unit}" if unit else ""
-    print(
-        f"{panel.key:<13}"
-        f"{f'{symbol} {values.min():.2f} to {values.max():.2f}{suffix}':>26}"
-        f"{f'{span.min():+.1f} to {span.max():+.1f}':>26}"
-    )
-print(
-    f"\nthe SNR formula reproduces the generator's own SNR column to "
-    f"{snr_check:.1e} dB, so the five other rows are on the same scale"
-)
+report_sweep_ranges(panels, effective_snr, snr_check=snr_check)
 
 # %% [markdown]
 # ### The gallery
@@ -1860,11 +3427,7 @@ print(
 # change what the encoder receives. That detail comes back below.
 
 # %%
-gallery_axes = plot_signal_gallery(panels)
-gallery_axes[0, 0].figure.suptitle(
-    "The analytical family: five signals per swept knob", fontsize=12
-)
-gallery_axes[0, 0].figure.tight_layout(rect=(0, 0, 1, 0.97))
+plot_signal_gallery(panels, title="The analytical family: five signals per swept knob")
 plt.show()
 
 # %% [markdown]
@@ -1878,28 +3441,13 @@ plt.show()
 # is swept.
 
 # %%
-amplitude_panel = next(p for p in panels if p.key == "amplitude_A")
-normalisation_axes = plot_normalisation_effect(amplitude_panel)
-normalisation_axes[0, 0].figure.suptitle(
-    "Window z-scoring removes the amplitude and leaves the noise", fontsize=11
+amplitude_panel = next(panel for panel in panels if panel.key == "amplitude_A")
+plot_normalisation_effect(
+    amplitude_panel,
+    title="Window z-scoring removes the amplitude and leaves the noise",
 )
-normalisation_axes[0, 0].figure.tight_layout(rect=(0, 0, 1, 0.94))
 plt.show()
-
-order = np.argsort(amplitude_panel.color_value)
-low, high = int(order[0]), int(order[-1])
-for name, index in (("weakest", low), ("strongest", high)):
-    raw_std = float(np.std(amplitude_panel.signal[index]))
-    input_std = float(np.std(amplitude_panel.encoded_signal[index]))
-    print(
-        f"{name:<10} A = {amplitude_panel.color_value[index]:.2f} mV  "
-        f"raw std {raw_std:.3f} mV  model-input std {input_std:.3f}  "
-        f"effective SNR {effective_snr['amplitude_A'][index]:+.1f} dB"
-    )
-print(
-    "\nafter normalisation the two windows differ only in relative noise: "
-    "the A row is an SNR row with a different range"
-)
+report_normalisation(amplitude_panel, effective_snr["amplitude_A"])
 
 # %% [markdown]
 # ### The encoder
@@ -1925,7 +3473,8 @@ print(
 #
 # Two facts about how this checkpoint was trained decide how the panels below
 # may be read, so they are read off its own run configuration rather than
-# recalled.
+# recalled: the window it was trained on, and how hard the training jittered
+# that window.
 
 # %%
 import re
@@ -1937,29 +3486,14 @@ BACKBONE_RUN = (
     / "particles2snr_f_3class_native_params_moment_patchtst_conv1dgap"
 )
 backbone_config = json.loads((BACKBONE_RUN / "run_config.json").read_text())
-representation = backbone_config["input_representation_all_models"]
-augmentation = backbone_config["augmentation"]
-raw_crop = int(re.search(r"raw (\d+)", representation).group(1))
+raw_crop = int(re.search(r"raw (\d+)",
+                         backbone_config["input_representation_all_models"]).group(1))
 
-training_window_ms = raw_crop / SAMPLING_HZ * 1000.0
-jitter_ms = training_window_ms * float(augmentation["jitter_frac"])
-sweep_window_ms = float(CONFIG["signal_window_duration_ms"])
-carrier_khz = float(np.median(panels[0].params["fD"])) / sweep_window_ms
-
-print(f"training input      : {representation}")
-print(f"training window     : {raw_crop} raw samples at {SAMPLING_HZ/1e6:.0f} MHz = {training_window_ms:.3f} ms")
-print(f"sweep window        : {int(CONFIG['input_length'])} samples = {sweep_window_ms:.3f} ms")
-print(f"position jitter     : +/- {augmentation['jitter_frac']:.0%} of the window = +/- {jitter_ms:.3f} ms")
-print(f"amplitude scale     : {augmentation['aug_scale_min']} to {augmentation['aug_scale_max']} (removed again by the z-score)")
-print(f"augmentation noise  : {augmentation['aug_snr_db']} dB")
-print(
-    f"\na {carrier_khz:.1f} kHz carrier shows {carrier_khz * sweep_window_ms:.0f} fringes in the swept window "
-    f"against {carrier_khz * training_window_ms:.0f} in the trained one"
+training_window_ms, jitter_ms, sweep_window_ms = report_training_geometry(
+    backbone_config, CONFIG, sampling_hz=SAMPLING_HZ, raw_crop=raw_crop
 )
-print(
-    f"the jitter alone moves the carrier by {carrier_khz * jitter_ms:.0f} cycles, "
-    "so training randomised arrival time and phase together"
-)
+report_carrier_geometry(panels, training_window_ms=training_window_ms,
+                        jitter_ms=jitter_ms, sweep_window_ms=sweep_window_ms)
 
 # %% [markdown]
 # Two consequences, one a limit and one a prediction.
@@ -1981,58 +3515,26 @@ print(
 # the deck's "$\varphi$ and $t_0$ do not come out ordered" to that standard.
 
 # %%
-CHECKPOINT = (
-    workspace.artifacts_root
-    / "unsupervised-learning-flow-cytometry"
-    / "pretrained_backbones-10dB"
-    / "particles2snr_f_3class_native_params_moment_patchtst_conv1dgap"
-    / "conv1dgap_same_input_3class"
-    / "best_model.pt"
-)
+CHECKPOINT = BACKBONE_RUN / "conv1dgap_same_input_3class" / "best_model.pt"
 published_embeddings = np.load(MODEL_RUN / "embeddings.npz")
 published_metrics = json.loads((MODEL_RUN / "reduction_metrics.json").read_text())
 
-embeddings, embedding_source = {}, "recomputed"
+embedding_source = "recomputed"
 if CHECKPOINT.is_file():
-    started = time.time()
     encoder = load_frozen_classifier(CHECKPOINT)
     print(f"checkpoint sha256 {sha256_file(CHECKPOINT)[:16]}... accepted")
-    for panel in panels:
-        panel_started = time.time()
-        embeddings[panel.key] = extract_penultimate_embeddings(
-            encoder, panel.encoded_signal, batch_size=256
-        )
-        print(f"  embedded {panel.key:<13} in {time.time() - panel_started:5.1f} s")
-    print(f"total {time.time() - started:.1f} s on CPU")
+    embeddings = embed_panels(encoder, panels, extract_penultimate_embeddings)
 else:
     embedding_source = "published"
     print(f"LIMIT: checkpoint absent at {CHECKPOINT.name}; reading published embeddings")
-    for panel in panels:
-        embeddings[panel.key] = published_embeddings[f"{panel.key}_embeddings"]
+    embeddings = {panel.key: published_embeddings[f"{panel.key}_embeddings"]
+                  for panel in panels}
 
 # %%
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
-
-pca_coordinates, pca_variance = {}, {}
-for panel in panels:
-    scaled = StandardScaler().fit_transform(embeddings[panel.key])
-    projector = PCA(n_components=2, random_state=int(CONFIG["seed"]))
-    pca_coordinates[panel.key] = projector.fit_transform(scaled)
-    pca_variance[panel.key] = float(np.sum(projector.explained_variance_ratio_))
-
-print(f"{'knob':<13}{'PC1-PC2 variance':>20}{'published':>12}{'deviation':>12}")
-worst_variance, worst_embedding = 0.0, 0.0
-for panel in panels:
-    got = pca_variance[panel.key]
-    want = published_metrics["reduction"][panel.key]["pca_explained_variance_ratio_sum"]
-    worst_variance = max(worst_variance, abs(got - want))
-    worst_embedding = max(
-        worst_embedding,
-        float(np.max(np.abs(embeddings[panel.key] - published_embeddings[f"{panel.key}_embeddings"]))),
-    )
-    print(f"{panel.key:<13}{got:>20.6f}{want:>12.6f}{abs(got - want):>12.2e}")
-
+pca_coordinates, pca_variance = latent_pca(panels, embeddings, seed=CONFIG["seed"])
+worst_embedding, worst_variance = report_pca_reproduction(
+    panels, pca_variance, embeddings, published_embeddings, published_metrics
+)
 if embedding_source == "recomputed":
     assert worst_embedding < 1.0e-4, f"embeddings drifted by {worst_embedding:.3e}"
     assert worst_variance < 1.0e-5, f"explained variance drifted by {worst_variance:.3e}"
@@ -2043,11 +3545,10 @@ if embedding_source == "recomputed":
     )
 
 # %%
-pca_axes = plot_latent_pca(panels, pca_coordinates, pca_variance)
-pca_axes[0, 0].figure.suptitle(
-    "The frozen encoder's latent space, one swept knob at a time (PCA)", fontsize=12
+plot_latent_pca(
+    panels, pca_coordinates, pca_variance,
+    title="The frozen encoder's latent space, one swept knob at a time (PCA)",
 )
-pca_axes[0, 0].figure.tight_layout(rect=(0, 0, 1, 0.95))
 plt.show()
 
 # %% [markdown]
@@ -2074,63 +3575,31 @@ plt.show()
 # One means the neighbourhood determines the knob; zero means the neighbourhood
 # says no more than the global mean does.
 #
-# The same measurement on the encoder's *input* — the 512 z-scored samples —
-# is the control that turns a description into an argument, because it
-# separates "the encoder cannot see this knob" from "the encoder chose to throw
-# it away". $\varphi$ is treated as the circular pair $(\cos\varphi,
-# \sin\varphi)$ so that a wrap-around ordering would still score high; the test
-# is deliberately generous to the hypothesis it is about to reject.
+# The same measurement on the encoder's *input* — the 512 z-scored samples the
+# network is handed — is the control that turns a description into an argument,
+# because it separates "the encoder cannot see this knob" from "the encoder
+# chose to throw it away". $\varphi$ is treated as the circular pair
+# $(\cos\varphi, \sin\varphi)$ so that a wrap-around ordering would still score
+# high; the test is deliberately generous to the hypothesis it is about to
+# reject.
 
 # %%
-from sklearn.metrics import r2_score
-from sklearn.model_selection import KFold, cross_val_predict
-from sklearn.neighbors import KNeighborsRegressor
-
 NEIGHBOURS, FOLDS = 10, 5
 
-
-def knob_target(panel):
-    """The knob as a regression target; phase is put on the unit circle."""
-    values = panel.color_value.astype(np.float64)
-    if panel.key == "phase_phi":
-        return np.column_stack([np.cos(values), np.sin(values)])
-    return values.reshape(-1, 1)
-
-
-def neighbourhood_r2(space, target, seed):
-    folds = KFold(n_splits=FOLDS, shuffle=True, random_state=seed)
-    predicted = cross_val_predict(
-        KNeighborsRegressor(n_neighbors=NEIGHBOURS), space, target, cv=folds
-    )
-    return float(r2_score(target, predicted, multioutput="variance_weighted"))
-
-
-recovery = []
-for panel in panels:
-    target = knob_target(panel)
-    recovery.append(
-        {
-            "key": panel.key,
-            "label": sweep_display(panel)[1],
-            "latent": neighbourhood_r2(embeddings[panel.key], target, int(CONFIG["seed"])),
-            "input": neighbourhood_r2(panel.encoded_signal, target, int(CONFIG["seed"])),
-        }
-    )
-
-print(f"{'knob':<13}{'latent R2':>12}{'input R2':>12}   verdict")
-for row in recovery:
-    ordered = row["latent"] >= 0.5
-    verdict = "ordered by the encoder" if ordered else "discarded by the encoder"
-    if not ordered and row["input"] < 0.5:
-        verdict = "absent from both"
-    print(f"{row['key']:<13}{row['latent']:>+12.3f}{row['input']:>+12.3f}   {verdict}")
+recovery = knob_recovery(
+    panels,
+    latent=embeddings,
+    control={panel.key: panel.encoded_signal for panel in panels},
+    neighbours=NEIGHBOURS,
+    folds=FOLDS,
+    seed=int(CONFIG["seed"]),
+)
+report_knob_recovery(recovery)
 
 # %%
-recovery_ax = plot_knob_recovery(recovery)
-recovery_ax.set_title(
-    "Can the knob be read back from a point's ten nearest neighbours?", fontsize=11
+plot_knob_recovery(
+    recovery, title="Can the knob be read back from a point's ten nearest neighbours?"
 )
-recovery_ax.figure.tight_layout()
 plt.show()
 
 # %% [markdown]
@@ -2181,61 +3650,33 @@ plt.show()
 # measuring distances in one, not enough to validate any measurement made with
 # it. The $R^2$ values are a property of this family, this checkpoint and this
 # normalisation; a different noise model would move them.
+#
+# Which leaves the next question standing: real crossings are not this family.
+# Turning measured events into a generator — four fitted numbers, their
+# dependence, and the waveforms drawn from them — is what the next section does.
 
 # %%
+recovery_metrics, recovery_provenance = knob_recovery_evidence(
+    recovery,
+    variance=pca_variance,
+    effective_snr=effective_snr,
+    neighbours=NEIGHBOURS,
+    folds=FOLDS,
+    config=CONFIG,
+    datasets=dataset_provenance(),
+    inputs={
+        "checkpoint": sha256_file(CHECKPOINT),
+        "run_config": sha256_file(SWEEP_RUN / "run_config.json"),
+        "reduction_metrics": sha256_file(MODEL_RUN / "reduction_metrics.json"),
+        "backbone_run_config": sha256_file(BACKBONE_RUN / "run_config.json"),
+    },
+)
 try:
     emitted = notebook_evidence.emit_run(
         workspace,
         section="latent-knob-recovery",
-        metrics={
-            "schema_version": 1,
-            "analysis": "neighbourhood recovery of analytical-family knobs",
-            "neighbours": NEIGHBOURS,
-            "cross_validation_folds": FOLDS,
-            "n_per_knob": int(CONFIG["n_per_panel"]),
-            "knobs": {
-                row["key"]: {
-                    "latent_neighbourhood_r2": row["latent"],
-                    "input_neighbourhood_r2": row["input"],
-                    "pca_2d_explained_variance": pca_variance[row["key"]],
-                    "effective_snr_db_min": float(np.min(effective_snr[row["key"]])),
-                    "effective_snr_db_max": float(np.max(effective_snr[row["key"]])),
-                }
-                for row in recovery
-            },
-        },
-        provenance={
-            "datasets": dataset_provenance(),
-            "inputs": {
-                "checkpoint": sha256_file(CHECKPOINT),
-                "run_config": sha256_file(SWEEP_RUN / "run_config.json"),
-                "reduction_metrics": sha256_file(MODEL_RUN / "reduction_metrics.json"),
-                "backbone_run_config": sha256_file(BACKBONE_RUN / "run_config.json"),
-            },
-            "parameters": {
-                key: CONFIG[key]
-                for key in (
-                    "n_per_panel",
-                    "input_length",
-                    "seed",
-                    "noise_std",
-                    "normalization",
-                    "single_sweep_source",
-                    "phase_profile",
-                    "signal_window_duration_ms",
-                    "realistic_figure_based_sweeps",
-                )
-            },
-            "metric_definitions": {
-                "latent_neighbourhood_r2": (
-                    "cross-validated R2 of a 10-nearest-neighbour regression of the "
-                    "swept knob on the 512-D penultimate embedding; phase is "
-                    "regressed as (cos phi, sin phi) and scored variance-weighted"
-                ),
-                "input_neighbourhood_r2": "the same regression on the 512 window-z-scored samples",
-                "effective_snr_db": "20 log10(rms(clean signal) / noise standard deviation)",
-            },
-        },
+        metrics=recovery_metrics,
+        provenance=recovery_provenance,
         claim_boundary=(
             "Measures which knobs of the analytical single-particle family are "
             "recoverable from a neighbourhood of the frozen Conv1D-GAP-L latent "
@@ -2253,22 +3694,22 @@ except WorkspaceError as error:
 # %% [markdown]
 # ## From measured events to a generator
 #
-# The previous sections established what an event is and what a trained encoder
-# can read off one. This one answers the question that makes simulation possible
-# at all: **once a real event has been measured, what exactly do we keep, and
-# how do we turn a few hundred kept events per class into an unlimited stream of
-# new ones that behave like them?**
+# **The open question.** The previous sections established what an event is and
+# that a learned space can order the physics behind one. Neither says where
+# synthetic events come from. So: **once a real event has been measured, what
+# exactly do we keep, and how do we turn a few hundred kept events per class
+# into an unlimited stream of new ones that behave like them?**
 #
-# The answer is four numbers per event, a Gaussian envelope over those four
+# **What is done.** Four numbers per event, a Gaussian envelope over those four
 # numbers in a transformed coordinate system, and a Cholesky factor that carries
 # the dependence between them. Everything below is imported from
 # `particles2snr` — the same functions the manifested analysis and generation
 # runs called — so a cell that disagrees with a published run is a real
-# disagreement, not a transcription difference.
+# disagreement, not a transcription difference. The first cell loads the
+# annotated population those estimates are made on, and refuses to proceed if a
+# sealed test row is in it.
 
 # %%
-import math
-
 from particles2snr.z8_cholesky_analysis import (
     PARAMETER_ORDER,
     pearson_correlation_matrix,
@@ -2282,6 +3723,7 @@ from particles2snr.z8_cholesky_generation import (
     generate_parameters,
     load_gaussian_targets,
     load_recommended_cholesky,
+    select_gallery_indices,
 )
 from particles2snr.z8_parameter_analysis import (
     load_approved_estimation_population,
@@ -2306,18 +3748,7 @@ chol_rows = read_events(chol_root / "events.csv", dataset_summary=chol_summary)
 chol_splits = sorted({row["split"] for row in chol_rows})
 if "test" in chol_splits:
     raise RuntimeError("sealed test rows reached the parameter population")
-chol_counts = {
-    name: sum(1 for row in chol_rows if row["class_name"] == name)
-    for name in CLASS_ORDER
-}
-chol_unclear = sum(1 for row in chol_rows if row["class_name"] == "unclear")
-print(f"{len(chol_rows):,} annotated events, splits {chol_splits} (no sealed test)")
-print(
-    "  classified: "
-    + ", ".join(f"{name} {count:,}" for name, count in chol_counts.items())
-    + f" = {sum(chol_counts.values()):,}"
-)
-print(f"  plus {chol_unclear:,} annotated 'unclear', kept aside for now")
+report_population(chol_rows, class_order=CLASS_ORDER, splits=chol_splits)
 
 # %% [markdown]
 # ### The four numbers
@@ -2345,21 +3776,23 @@ print(f"  plus {chol_unclear:,} annotated 'unclear', kept aside for now")
 # %% [markdown]
 # ### Boundary censoring: a fit is not always a measurement
 #
-# Not every annotated event is usable for estimating those four numbers. An
-# annotation whose interval touches the edge of its source recording describes a
-# *truncated* event: the crossing began before the file did, or was still going
-# when it ended. The fit still converges — it always does — but what it returns
-# is a property of the window, not of the particle.
+# **The open question.** Not every annotated event is usable for estimating
+# those four numbers. An annotation whose interval touches the edge of its
+# source recording describes a *truncated* event: the crossing began before the
+# file did, or was still going when it ended. The fit still converges — it
+# always does — but what it returns is a property of the window, not of the
+# particle. Are those fits actually different, and does removing them quietly
+# remove inconvenient particles too?
 #
-# The published population run applies exactly one rule, recorded verbatim in
-# its own summary: exclude an event when `start_sample <= 0` or
-# `end_sample >= source_signal_length`. The rule is a *statement about the
-# annotation geometry*, decided before any parameter is looked at, which is what
-# keeps it from being a quiet quality filter on the parameters themselves.
-#
-# The cell below does not re-derive the censoring; it loads the approved
-# population through the shipped loader, which re-checks the evidence receipt
-# and the event-level census, then measures what censoring actually removed.
+# **What is done.** The published population run applies exactly one rule,
+# recorded verbatim in its own summary: exclude an event when
+# `start_sample <= 0` or `end_sample >= source_signal_length`. It is a
+# *statement about the annotation geometry*, decided before any parameter is
+# looked at, which is what keeps it from being a quality filter on the
+# parameters themselves. The cell does not re-derive the censoring: it loads the
+# approved population through the shipped loader, which re-checks the evidence
+# receipt and the event-level census, asserts that the policy string is the one
+# just quoted, then measures what censoring removed.
 
 # %%
 chol_eligible, chol_population = load_approved_estimation_population(
@@ -2377,75 +3810,12 @@ assert (
     == "exclude_from_empirical_estimation_when_start_sample<=0"
     "_or_end_sample>=source_signal_length"
 )
-print(
-    f"{chol_population['boundary_censored_event_count']} of {len(chol_rows):,} events "
-    f"censored, {chol_population['eligible_event_count']:,} retained"
+
+chol_keep_rows, chol_drop_rows, chol_reasons = censoring_split(
+    chol_rows, chol_distributions["boundary_censored_events"]
 )
-
-chol_censored_ids = {
-    item["event_id"] for item in chol_distributions["boundary_censored_events"]
-}
-chol_reason_counts = {}
-for item in chol_distributions["boundary_censored_events"]:
-    for reason in item["reasons"]:
-        chol_reason_counts[reason] = chol_reason_counts.get(reason, 0) + 1
-for reason, count in sorted(chol_reason_counts.items()):
-    print(f"  {reason}: {count}")
-
-chol_keep_rows = [row for row in chol_rows if row["event_id"] not in chol_censored_ids]
-chol_drop_rows = [row for row in chol_rows if row["event_id"] in chol_censored_ids]
-
-
-def chol_series(rows, column):
-    return np.array([float(row[column]) for row in rows], dtype=np.float64)
-
-
-chol_keep = {
-    key: chol_series(chol_keep_rows, column)
-    for key, column in (
-        ("amplitude_p0", "particles2snr_amplitude"),
-        ("tau_ms", "tau_ms"),
-        ("snr_db", "snr_db"),
-    )
-}
-chol_drop = {
-    key: chol_series(chol_drop_rows, column)
-    for key, column in (
-        ("amplitude_p0", "particles2snr_amplitude"),
-        ("tau_ms", "tau_ms"),
-        ("snr_db", "snr_db"),
-    )
-}
-print(f"\n{'class':6s} {'median τ (ms)':>26s} {'median SNR (dB)':>26s}")
-chol_censoring_shift = {}
-for chol_name in CLASS_ORDER:
-    keep = [row for row in chol_keep_rows if row["class_name"] == chol_name]
-    drop = [row for row in chol_drop_rows if row["class_name"] == chol_name]
-    entry = {}
-    for key, column in (("tau_ms", "tau_ms"), ("snr_db", "snr_db")):
-        entry[key] = (
-            float(np.median(chol_series(keep, column))),
-            float(np.median(chol_series(drop, column))),
-        )
-    chol_censoring_shift[chol_name] = entry
-    print(
-        f"{chol_name:6s} {entry['tau_ms'][0]:11.3f} → {entry['tau_ms'][1]:<12.3f}"
-        f" {entry['snr_db'][0]:11.2f} → {entry['snr_db'][1]:<12.2f}"
-    )
-print(
-    f"pooled  {np.median(chol_keep['tau_ms']):11.3f} → "
-    f"{np.median(chol_drop['tau_ms']):<12.3f}"
-    f" {np.median(chol_keep['snr_db']):11.2f} → "
-    f"{np.median(chol_drop['snr_db']):<12.2f}"
-)
-chol_tau_over = sum(1 for row in chol_rows if float(row["tau_ms"]) > 0.30)
-chol_tau_over_censored = sum(
-    1 for row in chol_drop_rows if float(row["tau_ms"]) > 0.30
-)
-print(
-    f"  events fitted with τ > 0.30 ms: {chol_tau_over}, of which "
-    f"{chol_tau_over_censored} boundary-censored"
-)
+report_censoring(chol_keep_rows, chol_drop_rows, chol_reasons,
+                 rows=chol_rows, population=chol_population, class_order=CLASS_ORDER)
 
 # %% [markdown]
 # The censored events are not a random sample. Pooled, their median SNR is 7.1
@@ -2458,13 +3828,14 @@ print(
 # particles.
 
 # %%
-chol_fig, chol_axes = plt.subplots(1, 2, figsize=(11, 3.6))
-plot_censoring_shift(chol_keep, chol_drop, axes=chol_axes)
-chol_fig.suptitle(
-    "Boundary-censored events are systematically noisier and wider", fontsize=11
+plot_censoring_shift(
+    {key: chol_series(chol_keep_rows, column)
+     for key, column in (("tau_ms", "tau_ms"), ("snr_db", "snr_db"))},
+    {key: chol_series(chol_drop_rows, column)
+     for key, column in (("tau_ms", "tau_ms"), ("snr_db", "snr_db"))},
+    title="Boundary-censored events are systematically noisier and wider",
 )
-chol_fig.tight_layout()
-chol_fig
+plt.show()
 
 # %% [markdown]
 # ### Two populations, one of which the deck forgets
@@ -2482,11 +3853,12 @@ chol_fig
 # physical population, while SNR is estimated on the inclusive one. That is
 # deliberate — an unclear annotation is uninformative about *which* particle it
 # was, but perfectly informative about *how loud it was against the noise*, and
-# the SNR marginal is the one that must not be under-covered.
+# the SNR marginal is the one that must not be under-covered. The cell below
+# builds exactly that split, then checks the resulting ranges against the
+# published board.
 
 # %%
-chol_values = {}
-chol_class_n = {}
+chol_values, chol_class_n = {}, {}
 for chol_name in CLASS_ORDER:
     physical = rows_for_population(chol_eligible, chol_name, "physical")
     inclusive = rows_for_population(chol_eligible, chol_name, "inclusive")
@@ -2497,58 +3869,33 @@ for chol_name in CLASS_ORDER:
         "snr_db": chol_series(inclusive, "snr_db"),
     }
     chol_class_n[chol_name] = {"physical": len(physical), "inclusive": len(inclusive)}
-    print(
-        f"{chol_name}: physical {len(physical):,}  inclusive {len(inclusive):,}"
-        f"  (+{len(inclusive) - len(physical)} unclear)"
-    )
+report_class_populations(chol_class_n, class_order=CLASS_ORDER)
 
 chol_board = published("ssl-v3-v16-retrieval-and-ranges-r5", "board_values.json")
-chol_range_drift = 0.0
-for chol_name, entry in chol_board["observed_ranges"].items():
-    assert entry["physical_events"] == chol_class_n[chol_name]["physical"]
-    assert entry["snr_population"] == chol_class_n[chol_name]["inclusive"]
-    for parameter, bounds in entry["ranges"].items():
-        key = "snr_db" if parameter == "snr_effective_fbase_db" else parameter
-        series = chol_values[chol_name][key]
-        chol_range_drift = max(
-            chol_range_drift,
-            abs(series.min() - bounds["minimum"]),
-            abs(series.max() - bounds["maximum"]),
-        )
+chol_range_drift = observed_range_drift(chol_board, chol_values, chol_class_n)
 assert chol_range_drift == 0.0, f"observed ranges drifted by {chol_range_drift:.3e}"
 print("\nreproduces ssl-v3-v16-retrieval-and-ranges-r5 observed ranges exactly")
 
 # %%
-chol_fig, chol_axes = plt.subplots(1, 4, figsize=(15, 3.4))
-plot_parameter_marginals(chol_values, CLASS_COLOUR, axes=chol_axes)
-chol_fig.suptitle(
-    "The four fitted parameters, class-conditional, on the retained population",
-    fontsize=11,
+plot_parameter_marginals(
+    chol_values, CLASS_COLOUR,
+    title="The four fitted parameters, class-conditional, on the retained population",
 )
-chol_fig.tight_layout()
-chol_fig
+plt.show()
 
 # %% [markdown]
 # The frequency panel is combed rather than smooth, and that is not a binning
 # artefact. f_D is not measured continuously: it is read off a discrete
-# transform, so it can only take grid values.
+# transform, so it can only take grid values. The cell checks that against the
+# transform length the estimator uses.
 
 # %%
 chol_grid_hz = SAMPLING_HZ / 4096.0
-chol_real_f = np.unique(
-    np.array([float(row["frequency_hz"]) for row in chol_eligible])
-)
-chol_on_grid = float(
-    np.mean(
-        np.abs(chol_real_f / chol_grid_hz - np.round(chol_real_f / chol_grid_hz))
-        < 1e-9
-    )
-)
-print(
-    f"measured f_D: {chol_real_f.size} distinct values over "
-    f"{len(chol_eligible):,} events, {100 * chol_on_grid:.0f}% on a "
-    f"{chol_grid_hz:.2f} Hz grid = {SAMPLING_HZ / 1e6:.0f} MHz / 4096"
-)
+chol_real_f = np.unique(np.array([float(row["frequency_hz"]) for row in chol_eligible]))
+chol_on_grid = on_grid_fraction(chol_real_f, chol_grid_hz)
+print(f"measured f_D: {chol_real_f.size} distinct values over "
+      f"{len(chol_eligible):,} events, {100 * chol_on_grid:.0f}% on a "
+      f"{chol_grid_hz:.2f} Hz grid = {SAMPLING_HZ / 1e6:.0f} MHz / 4096")
 
 # %% [markdown]
 # Sixty-five distinct frequencies across 1,948 retained events, every one an
@@ -2567,22 +3914,14 @@ print(
 # of the distribution for two of the three classes.
 
 # %%
-chol_negative_mass = {}
-for chol_name in CLASS_ORDER:
-    row = {}
-    for parameter in ("amplitude_p0", "tau_ms"):
-        series = chol_values[chol_name][parameter]
-        mean, deviation = float(series.mean()), float(series.std(ddof=1))
-        row[parameter] = 0.5 * (1.0 + math.erf(-mean / (deviation * math.sqrt(2.0))))
-    chol_negative_mass[chol_name] = row
-    print(
-        f"{chol_name}: a Gaussian on raw P₀ puts {100 * row['amplitude_p0']:5.2f}% "
-        f"of its mass below zero; on raw τ, {100 * row['tau_ms']:.2f}%"
-    )
-print(
-    "\nIn log coordinates the constraint is structural: exp(x) > 0 for every x, "
-    "so no draw can be unphysical."
-)
+chol_negative_mass = {
+    chol_name: {
+        parameter: gaussian_mass_below_zero(chol_values[chol_name][parameter])
+        for parameter in ("amplitude_p0", "tau_ms")
+    }
+    for chol_name in CLASS_ORDER
+}
+report_negative_mass(chol_negative_mass, class_order=CLASS_ORDER)
 
 # %% [markdown]
 # So the generator works in **transformed coordinates**
@@ -2590,66 +3929,44 @@ print(
 # two sign-free ones as they are. Every correlation, every Cholesky factor and
 # every delta below is stated in those coordinates, and `PARAMETER_ORDER` in the
 # shipped module fixes the order once and for all.
+#
+# ### The dependence structure
+#
+# **The open question.** Fixing the coordinates fixes the marginals, and the
+# marginals are not the distribution. A loud event is a high-SNR event almost by
+# construction; a fast crossing is a short one. A generator that drew each
+# coordinate from its own marginal would produce parameter vectors that are
+# individually plausible and jointly impossible.
+#
+# **What is done.** The **Pearson correlation matrix** *R* of the transformed
+# coordinates records that structure as one 4×4 symmetric matrix per class. Only
+# the lower triangle carries information — the upper half is its mirror, the
+# diagonal is 1 by definition — so that is all that is plotted. The cell
+# recomputes those matrices from the retained events with the shipped estimator
+# and asserts they match the published run to the last bit.
 
 # %%
 print("transformed coordinate order:", PARAMETER_ORDER)
 
-# %% [markdown]
-# ### The dependence structure
-#
-# The four parameters are not independent. A loud event is a high-SNR event
-# almost by construction; a fast crossing is a short one. If the generator drew
-# each coordinate from its own marginal, it would produce parameter vectors that
-# are individually plausible and jointly impossible.
-#
-# The **Pearson correlation matrix** *R* of the transformed coordinates records
-# that structure as one 4×4 symmetric matrix per class. Only the lower triangle
-# carries information — the upper half is its mirror, and the diagonal is 1 by
-# definition — so that is all that is plotted.
-#
-# The cell recomputes those matrices from the retained events with the shipped
-# estimator and asserts they match the published run to the last bit.
-
-# %%
-chol_matrices = {}
-chol_factors_recomputed = {}
-chol_shrinkage = {}
+chol_matrices, chol_factors_recomputed, chol_shrinkage = {}, {}, {}
 for chol_name in CLASS_ORDER:
-    matrix = transformed_parameter_matrix(
-        rows_for_population(chol_eligible, chol_name, "physical")
+    correlation = pearson_correlation_matrix(
+        transformed_parameter_matrix(
+            rows_for_population(chol_eligible, chol_name, "physical")
+        )
     )
-    correlation = pearson_correlation_matrix(matrix)
     regularized, shrinkage = regularize_for_cholesky(correlation)
     chol_matrices[chol_name] = correlation
     chol_factors_recomputed[chol_name] = np.linalg.cholesky(regularized)
     chol_shrinkage[chol_name] = shrinkage
 
-with (run_dir(CHOL_CORRELATION_RUN) / "correlation_coefficients.csv").open(
-    newline="", encoding="utf-8"
-) as handle:
-    chol_published_r = {
-        (
-            row["class_name"],
-            row["population"],
-            row["x_parameter"],
-            row["y_parameter"],
-        ): (
-            float(row["pearson_r"]),
-            int(row["n_events"]),
-        )
-        for row in csv.DictReader(handle)
-    }
-chol_reproduction_drift = 0.0
-for chol_name in CLASS_ORDER:
-    for i in range(4):
-        for j in range(i + 1, 4):
-            want, count = chol_published_r[
-                (chol_name, "physical", PARAMETER_ORDER[i], PARAMETER_ORDER[j])
-            ]
-            assert count == chol_class_n[chol_name]["physical"]
-            chol_reproduction_drift = max(
-                chol_reproduction_drift, abs(chol_matrices[chol_name][i, j] - want)
-            )
+chol_published_r = published_correlations(
+    run_dir(CHOL_CORRELATION_RUN) / "correlation_coefficients.csv"
+)
+chol_reproduction_drift = correlation_drift(
+    chol_matrices, chol_published_r, chol_class_n,
+    class_order=CLASS_ORDER, parameter_order=PARAMETER_ORDER,
+)
 assert chol_reproduction_drift == 0.0, (
     f"reproduction drifted by {chol_reproduction_drift:.3e}"
 )
@@ -2657,17 +3974,13 @@ print(f"reproduces {CHOL_CORRELATION_RUN} exactly")
 print("diagonal shrinkage applied:", chol_shrinkage, "(none needed)")
 
 # %%
-chol_fig, chol_axes = plt.subplots(1, 3, figsize=(13, 3.9))
 plot_correlation_triangles(
     chol_matrices,
     {name: chol_class_n[name]["physical"] for name in CLASS_ORDER},
     {name: "physical" for name in CLASS_ORDER},
-    axes=chol_axes,
+    title="Pearson r of the transformed parameters, one triangle per class",
 )
-chol_fig.suptitle(
-    "Pearson r of the transformed parameters, one triangle per class", fontsize=11
-)
-chol_fig
+plt.show()
 
 # %% [markdown]
 # Two dependences hold in every class and are the ones the generator must not
@@ -2720,22 +4033,8 @@ chol_identity_drift = max(
 print(f"L reproduces the published factor exactly; max |L Lᵀ − R| = "
       f"{chol_identity_drift:.2e}")
 print("dependence population the generator was given:", chol_populations_used)
-
-with (chol_correlation_dir / "matrix_diagnostics.csv").open(
-    newline="", encoding="utf-8"
-) as handle:
-    chol_conditioning = {
-        (row["class_name"], row["population"]): float(row["condition_number"])
-        for row in csv.DictReader(handle)
-        if row["positive_definite"] == "True"
-    }
-print("\nfactorisation exists for every class without regularisation; condition κ(R):")
-for chol_name in CLASS_ORDER:
-    population = chol_populations_used[chol_name]
-    print(
-        f"  {chol_name:5s} {population:9s} κ = "
-        f"{chol_conditioning[(chol_name, population)]:6.1f}"
-    )
+report_conditioning(chol_correlation_dir / "matrix_diagnostics.csv",
+                    chol_populations_used, class_order=CLASS_ORDER)
 
 # %% [markdown]
 # ### A transcription the notebook was built to catch
@@ -2752,40 +4051,11 @@ from internship_workspace.presentation.recipes.pearson_targets import (
     MATRICES as CHOL_DECK_MATRICES,
 )
 
-chol_audit = {}
-for chol_name, (chol_label, chol_deck_n, chol_triangle) in zip(
-    CLASS_ORDER, CHOL_DECK_MATRICES
-):
-    used = chol_factors[chol_name] @ chol_factors[chol_name].T
-    rounding, mismatch, worst = 0.0, 0.0, None
-    for i, deck_row in enumerate(chol_triangle):
-        for j, deck_value in enumerate(deck_row):
-            if j >= i:
-                continue
-            physical = chol_published_r[
-                (chol_name, "physical", PARAMETER_ORDER[j], PARAMETER_ORDER[i])
-            ][0]
-            rounding = max(rounding, abs(deck_value - physical))
-            gap = abs(deck_value - used[i, j])
-            if gap > mismatch:
-                mismatch, worst = gap, (PARAMETER_ORDER[j], PARAMETER_ORDER[i])
-    population = chol_populations_used[chol_name]
-    chol_audit[chol_name] = {
-        "deck_n": chol_deck_n,
-        "generator_population": population,
-        "generator_n": chol_class_n[chol_name][population],
-        "max_deck_minus_physical": rounding,
-        "max_deck_minus_generator_target": mismatch,
-        "worst_pair": worst,
-    }
-    print(
-        f"{chol_label:5s} deck n = {chol_deck_n:,} · generator used '{population}' "
-        f"n = {chol_class_n[chol_name][population]:,}"
-    )
-    print(
-        f"      |deck − physical r| ≤ {rounding:.4f} (2-decimal rounding) · "
-        f"|deck − generator target| ≤ {mismatch:.4f}"
-    )
+chol_audit = audit_deck_targets(
+    CHOL_DECK_MATRICES, chol_published_r, chol_factors, chol_populations_used,
+    chol_class_n, class_order=CLASS_ORDER, parameter_order=PARAMETER_ORDER,
+)
+report_deck_audit(chol_audit)
 
 # %% [markdown]
 # The digits are clean: every deck cell is within 0.005 of the run's *physical*
@@ -2809,28 +4079,16 @@ for chol_name, (chol_label, chol_deck_n, chol_triangle) in zip(
 # population for one class. The fix belongs in the recipe, not in the run.
 
 # %%
-chol_ranked = sorted(
-    chol_audit.items(),
-    key=lambda item: item[1]["max_deck_minus_generator_target"],
-    reverse=True,
-)
-for name, entry in chol_ranked:
-    flag = "MISMATCH" if entry["max_deck_minus_generator_target"] > 0.01 else "ok"
-    print(
-        f"{name:5s} {flag:9s} deck n={entry['deck_n']:,} vs generator "
-        f"{entry['generator_population']} n={entry['generator_n']:,} · "
-        f"max gap {entry['max_deck_minus_generator_target']:.3f}"
-        + (f" at {entry['worst_pair']}" if flag == "MISMATCH" else "")
-    )
+report_deck_ranking(chol_audit)
 
 # %% [markdown]
 # ### Does the dependence structure matter? A control
 #
 # Before accepting the Cholesky machinery, it is worth measuring what dropping
 # it would cost, on the same code path. Replacing every *L* by the identity
-# matrix leaves the marginals untouched and removes only the dependence. The
-# shipped `generate_parameters` takes the factors as an argument, so the control
-# is one substitution rather than a second implementation.
+# matrix leaves the marginals untouched and removes only the dependence, so the
+# control is one substitution rather than a second implementation — the shipped
+# `generate_parameters` takes the factors as an argument.
 
 # %%
 chol_envelope_dir = run_dir(CHOL_ENVELOPE_RUN)
@@ -2846,15 +4104,8 @@ chol_independent, _ = generate_parameters(
     budgets=chol_budgets,
     dataset_id="independent-marginals-control",
 )
-chol_control = correlation_validation(chol_independent, chol_factors)
-chol_control_off = [
-    row for row in chol_control if row["row_parameter"] != row["column_parameter"]
-]
-chol_control_worst = max(abs(row["delta"]) for row in chol_control_off)
-chol_control_seen = max(abs(row["realized_correlation"]) for row in chol_control_off)
-print(
-    f"independent draws: max realised |r| = {chol_control_seen:.3f}, "
-    f"max |realised − target| = {chol_control_worst:.3f}"
+chol_control_worst, chol_control_seen = report_independent_control(
+    correlation_validation(chol_independent, chol_factors)
 )
 
 # %% [markdown]
@@ -2862,7 +4113,7 @@ print(
 # strongest real dependence, log P₀ × SNR at r = +0.94 on 10 µm, comes back as
 # noise around zero. A classifier trained on that would learn that a loud
 # particle can be a quiet one, which is precisely the confusion the real
-# instrument does not have.
+# instrument does not have. The same draw with the measured factors restores it.
 
 # %%
 chol_correlated, chol_rejections = generate_parameters(
@@ -2873,145 +4124,76 @@ chol_correlated, chol_rejections = generate_parameters(
     dataset_id=CHOL_SYNTHETIC_ID + "@v2",
 )
 chol_demo = "10um"
-
-
-def chol_columns(records, name):
-    selected = [row for row in records if row["class_name"] == name]
-    return (
-        np.array([row["log_amplitude_p0"] for row in selected]),
-        np.array([row["snr_db"] for row in selected]),
-    )
-
-
-chol_real_matrix = transformed_parameter_matrix(
-    rows_for_population(chol_eligible, chol_demo, "physical")
-)
-chol_fig, chol_axes = plt.subplots(1, 3, figsize=(13, 3.9), sharex=True, sharey=True)
 plot_dependence_scatter(
-    [
-        (
-            f"measured · {CHOL_CLASS_LABEL[chol_demo]} "
-            f"(n = {chol_real_matrix.shape[0]:,})",
-            chol_real_matrix[:, 0],
-            chol_real_matrix[:, 3],
-            CLASS_COLOUR[chol_demo],
+    dependence_panels(
+        (chol_independent, chol_correlated), chol_demo,
+        measured=transformed_parameter_matrix(
+            rows_for_population(chol_eligible, chol_demo, "physical")
         ),
-        ("independent draws", *chol_columns(chol_independent, chol_demo), "#9ca3af"),
-        ("Cholesky draws", *chol_columns(chol_correlated, chol_demo), "#0f766e"),
-    ],
-    axes=chol_axes,
+        colour=CLASS_COLOUR[chol_demo],
+        label=CHOL_CLASS_LABEL[chol_demo],
+    ),
+    title="Amplitude against SNR: the dependence the Cholesky factor restores",
 )
-chol_fig.suptitle(
-    "Amplitude against SNR: the dependence the Cholesky factor restores",
-    fontsize=11,
-)
-chol_fig.tight_layout()
-chol_fig
+plt.show()
 
 # %% [markdown]
 # ### The delta triangles: what was realised minus what was asked
 #
-# The construction is exact in expectation, not in a finite sample, and the
-# generator adds one step that breaks it outright: proposals whose frequency
-# falls outside the instrument's 7–80 kHz acceptance band are rejected and
-# redrawn. Rejection sampling is a non-linear filter on a Gaussian copula, so
-# the realised correlations *must* drift. The honest check is therefore not
-# whether they drift, but by how much.
+# **The open question.** The construction is exact in expectation, not in a
+# finite sample, and the generator adds one step that breaks it outright:
+# proposals whose frequency falls outside the instrument's 7–80 kHz acceptance
+# band are rejected and redrawn. Rejection sampling is a non-linear filter on a
+# Gaussian copula, so the realised correlations *must* drift. The honest check
+# is therefore not whether they drift, but by how much.
 #
-# The cell re-runs the promoted generator's parameter draw at seed 20260723 and
-# compares its realised correlations against its targets — the same table the
-# published run wrote to `correlation_validation.csv`.
+# **What is done.** The cell re-runs the promoted generator's parameter draw at
+# seed 20260723 and compares its realised correlations against its targets — the
+# same table the published run wrote to `correlation_validation.csv`, asserted
+# cell by cell.
 
 # %%
 chol_validation = correlation_validation(chol_correlated, chol_factors)
-with (run_dir(CHOL_GENERATION_RUN) / "correlation_validation.csv").open(
-    newline="", encoding="utf-8"
-) as handle:
-    chol_published_delta = {
-        (row["class_name"], row["row_parameter"], row["column_parameter"]): float(
-            row["delta"]
-        )
-        for row in csv.DictReader(handle)
-    }
+chol_published_delta = published_deltas(
+    run_dir(CHOL_GENERATION_RUN) / "correlation_validation.csv"
+)
 chol_delta_drift = max(
-    abs(
-        row["delta"]
-        - chol_published_delta[
-            (row["class_name"], row["row_parameter"], row["column_parameter"])
-        ]
-    )
+    abs(row["delta"] - chol_published_delta[
+        (row["class_name"], row["row_parameter"], row["column_parameter"])
+    ])
     for row in chol_validation
 )
 assert chol_delta_drift == 0.0, f"reproduction drifted by {chol_delta_drift:.3e}"
 print(f"reproduces {CHOL_GENERATION_RUN} exactly ({len(chol_correlated):,} events)")
 
-chol_deltas = {name: np.zeros((4, 4)) for name in CLASS_ORDER}
-for row in chol_validation:
-    chol_deltas[row["class_name"]][
-        PARAMETER_ORDER.index(row["row_parameter"]),
-        PARAMETER_ORDER.index(row["column_parameter"]),
-    ] = row["delta"]
-chol_worst_delta = max(
-    abs(row["delta"])
-    for row in chol_validation
-    if row["row_parameter"] != row["column_parameter"]
-)
-chol_figure_metrics = published(
-    "ssl-v18-dependence-delta-visuals-r1", "figure_metrics.json"
-)
-assert (
-    abs(
-        chol_worst_delta
-        - chol_figure_metrics["maximum_absolute_off_diagonal_delta_4d"]
-    )
-    < 1e-15
-)
+chol_deltas = delta_matrices(chol_validation, class_order=CLASS_ORDER,
+                             parameter_order=PARAMETER_ORDER)
+chol_worst_delta = max(abs(row["delta"]) for row in off_diagonal(chol_validation))
+chol_figure_metrics = published("ssl-v18-dependence-delta-visuals-r1",
+                                "figure_metrics.json")
+assert abs(chol_worst_delta
+           - chol_figure_metrics["maximum_absolute_off_diagonal_delta_4d"]) < 1e-15
 print(f"max off-diagonal |Δ| = {chol_worst_delta:.4f}, matching the deck figure run")
 
 # %%
-chol_fig, chol_axes = plt.subplots(1, 3, figsize=(13, 3.9))
-plot_delta_triangles(chol_deltas, chol_budgets, axes=chol_axes)
-chol_fig.suptitle(
-    "Realised − target Pearson r of the 4-D generator (colour saturates at ±0.15)",
-    fontsize=11,
+plot_delta_triangles(
+    chol_deltas, chol_budgets,
+    title="Realised − target Pearson r of the 4-D generator "
+          "(colour saturates at ±0.15)",
 )
-chol_fig
+plt.show()
 
 # %% [markdown]
 # The acceptance threshold the pipeline set for itself is 0.10; the run finished
 # with `status: warning_correlation_delta_above_threshold` and was promoted
 # anyway. The cell below tests the obvious explanation — that the two classes
-# which exceeded the threshold are the two that the frequency band rejects most
+# which exceeded the threshold are the two the frequency band rejects most
 # heavily — and separates it from the sampling error a finite draw carries in
-# any case, using the standard error of a Pearson coefficient,
-# (1 − r²)/√(n − 1).
+# any case, using the standard error of a Pearson coefficient, (1 − r²)/√(n − 1).
 
 # %%
-print(f"{'class':6s} {'n':>6s} {'rejected':>9s} {'rate':>7s} {'max|Δ|':>8s} {'z':>6s}")
-chol_mechanism = {}
-for chol_name in CLASS_ORDER:
-    count = chol_budgets[chol_name]
-    rejected = chol_rejections[chol_name]
-    rate = rejected / (rejected + count)
-    worst, worst_z = 0.0, 0.0
-    for row in chol_validation:
-        if row["class_name"] != chol_name:
-            continue
-        if row["row_parameter"] == row["column_parameter"]:
-            continue
-        target = row["target_correlation"]
-        error = (1.0 - target**2) / math.sqrt(count - 1)
-        if abs(row["delta"]) > worst:
-            worst, worst_z = abs(row["delta"]), abs(row["delta"]) / error
-    chol_mechanism[chol_name] = {
-        "rejection_rate": rate,
-        "max_abs_delta": worst,
-        "sampling_error_multiples": worst_z,
-    }
-    print(
-        f"{chol_name:6s} {count:6,d} {rejected:9,d} {100 * rate:6.1f}% "
-        f"{worst:8.3f} {worst_z:6.1f}"
-    )
+chol_mechanism = dependence_mechanism(chol_validation, chol_budgets, chol_rejections,
+                                      class_order=CLASS_ORDER)
 
 # %% [markdown]
 # The reading is mechanistic, not statistical. 4 µm rejects 1.2 % of its
@@ -3023,9 +4205,9 @@ for chol_name in CLASS_ORDER:
 # only 366 events, under three standard errors, so for that class small-sample
 # noise is a sufficient explanation on its own.
 #
-# The practical consequence is that the deltas are *reducible by generating more
-# events for 10 µm* and *not reducible that way for 2 µm*. The next cell checks
-# that prediction against the dataset that was actually shipped downstream.
+# The practical consequence is a prediction: the deltas are *reducible by
+# generating more events for 10 µm* and *not reducible that way for 2 µm*. The
+# next cell checks it against the dataset that was actually shipped downstream.
 
 # %% [markdown]
 # ### What the shipped dataset carries
@@ -3034,7 +4216,8 @@ for chol_name in CLASS_ORDER:
 # `...-synthetic-events@v3`, which extends it to 47,980 events with the same
 # targets, the same factors and the same policy, under a second seed. Its
 # realised correlations are a property of the dataset the downstream sections
-# consume, and no published run states them.
+# consume, and no published run states them — so the cell asserts the policy it
+# was built under, then measures them.
 
 # %%
 chol_v3_root = dataset_root(CHOL_SYNTHETIC_ID + "@v3")
@@ -3043,68 +4226,41 @@ assert chol_v3_summary["sealed_test_accessed"] is False
 assert chol_v3_summary["parameter_policy"]["correlations"] == chol_populations_used
 assert list(chol_v3_summary["parameter_policy"]["coordinates"]) == list(PARAMETER_ORDER)
 
-with (chol_v3_root / "events.csv").open(newline="", encoding="utf-8") as handle:
-    chol_v3_records = [
-        {
-            "class_name": row["class_name"],
-            "log_amplitude_p0": float(row["log_amplitude_p0"]),
-            "frequency_khz": float(row["frequency_khz"]),
-            "log_tau_ms": float(row["log_tau_ms"]),
-            "snr_db": float(row["snr_db"]),
-            "amplitude_p0": float(row["amplitude_p0"]),
-            "tau_ms": float(row["tau_ms"]),
-            "phi_rad": float(row["phi_rad"]),
-        }
-        for row in csv.DictReader(handle)
-    ]
-chol_v3_counts = {
-    name: sum(1 for row in chol_v3_records if row["class_name"] == name)
-    for name in CLASS_ORDER
-}
-chol_v3_validation = correlation_validation(chol_v3_records, chol_factors)
-chol_v3_by_class = {}
-for chol_name in CLASS_ORDER:
-    chol_v3_by_class[chol_name] = max(
-        abs(row["delta"])
-        for row in chol_v3_validation
-        if row["class_name"] == chol_name
-        and row["row_parameter"] != row["column_parameter"]
-    )
-print(f"@v3: {len(chol_v3_records):,} events {chol_v3_counts}")
-for chol_name in CLASS_ORDER:
-    print(
-        f"  {chol_name:5s} max |Δ|: pilot "
-        f"{chol_mechanism[chol_name]['max_abs_delta']:.4f}"
-        f"  →  shipped {chol_v3_by_class[chol_name]:.4f}"
-    )
+chol_v3_records = read_generated_records(chol_v3_root / "events.csv")
+chol_v3_counts, chol_v3_by_class = report_shipped_deltas(
+    chol_v3_records,
+    correlation_validation(chol_v3_records, chol_factors),
+    chol_mechanism,
+    class_order=CLASS_ORDER,
+)
 chol_v3_worst = max(chol_v3_by_class.values())
 print(f"  overall max |Δ| = {chol_v3_worst:.4f} (pilot: {chol_worst_delta:.4f})")
 
 chol_synth_f = np.array([row["frequency_khz"] * 1000.0 for row in chol_v3_records])
-chol_synth_on_grid = float(
-    np.mean(
-        np.abs(chol_synth_f / chol_grid_hz - np.round(chol_synth_f / chol_grid_hz))
-        < 1e-9
-    )
-)
-print(
-    f"\nf_D grid: measured {chol_real_f.size} distinct values, "
-    f"{100 * chol_on_grid:.0f}% on the {chol_grid_hz:.2f} Hz grid; "
-    f"synthetic {np.unique(chol_synth_f).size:,} distinct values, "
-    f"{100 * chol_synth_on_grid:.0f}% on it"
-)
+chol_synth_on_grid = on_grid_fraction(chol_synth_f, chol_grid_hz)
+print(f"\nf_D grid: measured {chol_real_f.size} distinct values, "
+      f"{100 * chol_on_grid:.0f}% on the {chol_grid_hz:.2f} Hz grid; "
+      f"synthetic {np.unique(chol_synth_f).size:,} distinct values, "
+      f"{100 * chol_synth_on_grid:.0f}% on it")
 
 # %% [markdown]
-# So the frequency quantisation held: the real table has 65 frequencies, all on
+# The prediction holds. Ten times the events cut 10 µm from 0.147 to 0.051 and
+# 4 µm from 0.030 to 0.011, while 2 µm barely moved — 0.123 to 0.116 — because
+# its miss is a band-rejection bias, which more sampling cannot remove. The
+# shipped dataset's worst dependence error is therefore 0.116 on 2 µm, still
+# above the 0.10 threshold, and the deck's 0.147 headline belongs to the pilot
+# rather than to anything downstream consumes.
+#
+# The frequency quantisation held too: the real table has 65 frequencies, all on
 # the grid; the synthetic table has 47,980, none of them. A classifier handed
 # both parameter tables would separate them on that column alone and learn
 # nothing about particles.
 #
-# The honest reading is narrower than it sounds. 488.28 Hz *is* the frequency
-# resolution of the 4096-sample window the estimator reads, so an off-grid
-# generated frequency is not observable *through that estimator* — re-measured,
-# a synthetic waveform should snap back onto the same grid, and downstream
-# models consume waveforms rather than this table.
+# The honest reading of that is narrower than it sounds. 488.28 Hz *is* the
+# frequency resolution of the 4096-sample window the estimator reads, so an
+# off-grid generated frequency is not observable *through that estimator* —
+# re-measured, a synthetic waveform should snap back onto the same grid, and
+# downstream models consume waveforms rather than this table.
 #
 # **Limit.** That last step is an argument from the transform length, not a
 # measurement. Settling it means running the P2SNR frequency estimator over the
@@ -3114,95 +4270,57 @@ print(
 # untested."
 
 # %% [markdown]
-# The prediction holds. Ten times the events cut 10 µm from 0.147 to 0.051 and
-# 4 µm from 0.030 to 0.011, while 2 µm barely moved — 0.123 to 0.116 — because
-# its miss is a band-rejection bias, which more sampling cannot remove. The
-# shipped dataset's worst dependence error is therefore 0.116 on 2 µm, still
-# above the 0.10 threshold, and the deck's 0.147 headline belongs to the pilot
-# rather than to anything downstream consumes.
-
-# %% [markdown]
 # ### What the parameters sound like at the edges
 #
-# Everything above is matrices. The generator's actual product is a waveform,
-# and the honest place to look at one is not the middle of the distribution —
-# any construction looks plausible there — but the **edges of the domain it
-# samples**, where a wrong dependence or an over-wide envelope would show up as
-# something that could not be a particle crossing.
+# **The open question.** Everything above is matrices. The generator's actual
+# product is a waveform, and a table of correlations says nothing about whether
+# those waveforms are physical.
 #
-# The role selection is the generator run's own, imported rather than invented:
-# `select_gallery_indices` picks, per class, the most central joint draw and
-# then the 5th/95th percentile events on frequency, SNR, amplitude and τ, each
-# forced to be a distinct event. It is deterministic, and it is fixed before any
-# waveform is looked at — which is what stops a gallery from becoming a curated
-# argument.
+# **What is done.** The honest place to look is not the middle of the
+# distribution — any construction looks plausible there — but the **edges of the
+# domain it samples**, where a wrong dependence or an over-wide envelope would
+# show up as something that could not be a particle crossing. The role selection
+# is the generator run's own, imported rather than invented:
+# `select_gallery_indices` picks, per class, the most central joint draw and then
+# the 5th/95th percentile events on frequency, SNR, amplitude and τ, each forced
+# to be a distinct event. It is deterministic, and fixed before any waveform is
+# looked at — which is what stops a gallery from becoming a curated argument.
+#
+# One thing has to be checked before the pictures mean anything: nothing in the
+# dataset format guarantees that `events.csv` row *i* is `signals_raw_4096.npy`
+# row *i*. It is a convention of the writer, and the test is that each waveform's
+# observed peak should reach the P₀ its own row claims — with the join shifted by
+# one row as the control.
 
 # %%
-from particles2snr.z8_cholesky_generation import select_gallery_indices
-
 chol_gallery = select_gallery_indices(chol_v3_records)
 chol_signals = np.load(chol_v3_root / "signals_raw_4096.npy", mmap_mode="r")
 assert chol_signals.shape[0] == len(chol_v3_records)
-chol_gallery_index = [
-    index for entries in chol_gallery.values() for _, index in entries
-]
-chol_gallery_signals = np.asarray(chol_signals[chol_gallery_index], dtype=np.float64)
 
-
-def chol_join_shortfall(offset=0):
-    """How far each selected waveform's peak falls short of its stated P₀."""
-    worst = 0.0
-    for position, index in enumerate(chol_gallery_index):
-        record = chol_v3_records[(index + offset) % len(chol_v3_records)]
-        peak = float(np.abs(chol_gallery_signals[position]).max())
-        worst = max(worst, (record["amplitude_p0"] - peak) / peak)
-    return worst
-
-
-chol_join_error = chol_join_shortfall()
-chol_join_control = chol_join_shortfall(offset=1)
-print(
-    f"{chol_signals.shape[0]:,} × {chol_signals.shape[1]} raw samples at "
-    f"{SAMPLING_HZ / 1e6:.0f} MHz"
+chol_gallery_index, chol_gallery_signals = gallery_waveforms(chol_gallery, chol_signals)
+report_gallery(
+    chol_gallery, chol_signals, sampling_hz=SAMPLING_HZ,
+    aligned=join_shortfall(chol_gallery_index, chol_gallery_signals, chol_v3_records),
+    shifted=join_shortfall(chol_gallery_index, chol_gallery_signals, chol_v3_records,
+                           offset=1),
 )
-print(f"  aligned join   : worst P₀ shortfall {100 * chol_join_error:5.1f}%")
-print(f"  join shifted +1: worst P₀ shortfall {100 * chol_join_control:5.1f}%")
-for chol_name, entries in chol_gallery.items():
-    roles = ", ".join(f"{role}→{index}" for role, index in entries)
-    print(f"  {chol_name:5s} {roles}")
 
 # %% [markdown]
-# The join deserves its own check, because nothing in the dataset format
-# guarantees that `events.csv` row *i* is `signals_raw_4096.npy` row *i* — it is
-# a convention of the writer. The test is that each waveform's observed peak
-# should reach the P₀ its own row claims. It can fall a little short when the
-# carrier phase φ places no sample exactly at the envelope maximum, and the
-# worst aligned case does, by 7 %. Shifting the join by a single row sends that
+# The join holds. A waveform can fall a little short of its stated P₀ when the
+# carrier phase φ places no sample exactly at the envelope maximum, and the worst
+# aligned case does, by 7 %. Shifting the join by a single row sends that
 # shortfall past 1,200 % — a row whose stated P₀ is thirteen times the peak of
 # the waveform it was paired with. That two-order-of-magnitude separation is
-# what makes the aligned figure believable rather than merely unrefuted.
+# what makes the figure below believable rather than merely unrefuted.
 
 # %%
-chol_local = {index: position for position, index in enumerate(chol_gallery_index)}
-chol_fig, chol_axes = plt.subplots(
-    3, 6, figsize=(19, 8.4), sharex=True, constrained_layout=True
-)
-plot_signal_gallery_cholesky(
-    {
-        name: [(role, chol_local[index]) for role, index in entries]
-        for name, entries in chol_gallery.items()
-    },
-    [chol_v3_records[index] for index in chol_gallery_index],
-    chol_gallery_signals,
+plot_generated_gallery(
+    chol_gallery, chol_v3_records, chol_gallery_signals, chol_gallery_index,
     SAMPLING_HZ,
-    axes=chol_axes,
+    title="Generated waveforms at the edges of the sampled domain "
+          "(blue: synthetic event · orange: ±Gaussian envelope)",
 )
-chol_fig.suptitle(
-    "Generated waveforms at the edges of the sampled domain "
-    "(blue: synthetic event · orange: ±Gaussian envelope)",
-    fontsize=12,
-)
-chol_fig
+plt.show()
 
 # %% [markdown]
 # Every panel is still a damped oscillation under a Gaussian envelope, which is
@@ -3215,64 +4333,16 @@ chol_fig
 # That is not a defect. It is the widening working as designed, and it is worth
 # measuring rather than asserting: the Gaussian envelopes are deliberately
 # broader than the measured marginals so the synthetic cloud *contains* the real
-# one instead of merely resembling it.
+# one instead of merely resembling it. The cell prices the widening in both
+# directions — the envelope σ against the measured σ, and the share of generated
+# events that land outside the measured range.
 
 # %%
-chol_widening = {}
-for chol_name in CLASS_ORDER:
-    physical = transformed_parameter_matrix(
-        rows_for_population(chol_eligible, chol_name, "physical")
-    )
-    inclusive = transformed_parameter_matrix(
-        rows_for_population(chol_eligible, chol_name, "inclusive")
-    )
-    measured = np.array(
-        [
-            physical[:, 0].std(ddof=1),
-            physical[:, 1].std(ddof=1),
-            physical[:, 2].std(ddof=1),
-            inclusive[:, 3].std(ddof=1),
-        ]
-    )
-    ratio = np.asarray(chol_targets[chol_name]["sigma"]) / measured
-    chol_widening[chol_name] = {
-        parameter: float(value) for parameter, value in zip(PARAMETER_ORDER, ratio)
-    }
-    print(
-        f"{chol_name:5s} envelope σ / measured σ: "
-        + "  ".join(f"{parameter.split('_')[0]} {value:.2f}×"
-                    for parameter, value in zip(("logP0", "f", "logtau", "SNR"), ratio))
-    )
-chol_widening_range = (
-    min(v for row in chol_widening.values() for v in row.values()),
-    max(v for row in chol_widening.values() for v in row.values()),
-)
-print(
-    f"\nwidening spans {chol_widening_range[0]:.2f}× to "
-    f"{chol_widening_range[1]:.2f}× across all classes and coordinates"
-)
-
-chol_outside = {}
-for chol_name in CLASS_ORDER:
-    bounds = chol_board["observed_ranges"][chol_name]["ranges"]
-    generated = [row for row in chol_v3_records if row["class_name"] == chol_name]
-    row = {}
-    for parameter, column in (
-        ("amplitude_p0", "amplitude_p0"),
-        ("frequency_khz", "frequency_khz"),
-        ("tau_ms", "tau_ms"),
-        ("snr_effective_fbase_db", "snr_db"),
-    ):
-        series = np.array([entry[column] for entry in generated])
-        low, high = bounds[parameter]["minimum"], bounds[parameter]["maximum"]
-        row[parameter] = float(np.mean((series < low) | (series > high)))
-    chol_outside[chol_name] = row
-    print(
-        f"{chol_name:5s} generated outside the measured range: "
-        + "  ".join(
-            f"{key.split('_')[0]} {100 * value:4.1f}%" for key, value in row.items()
-        )
-    )
+chol_widening = envelope_widening(chol_targets, chol_eligible,
+                                  class_order=CLASS_ORDER,
+                                  parameter_order=PARAMETER_ORDER)
+chol_outside = generated_outside_range(chol_v3_records, chol_board,
+                                       class_order=CLASS_ORDER)
 
 # %% [markdown]
 # ### What this section does not claim
@@ -3303,82 +4373,47 @@ for chol_name in CLASS_ORDER:
 #   the next section.
 
 # %%
+chol_metrics, chol_provenance = cholesky_evidence(
+    chol_audit,
+    pilot=chol_mechanism,
+    shipped={
+        "event_count": len(chol_v3_records),
+        "class_counts": chol_v3_counts,
+        "max_absolute_off_diagonal_delta_by_class": chol_v3_by_class,
+        "max_absolute_off_diagonal_delta": chol_v3_worst,
+    },
+    control={
+        "max_absolute_off_diagonal_delta": chol_control_worst,
+        "max_absolute_realized_correlation": chol_control_seen,
+    },
+    widening=chol_widening,
+    outside=chol_outside,
+    frequency={
+        "grid_hz": chol_grid_hz,
+        "measured_distinct_values": int(chol_real_f.size),
+        "measured_fraction_on_grid": chol_on_grid,
+        "synthetic_distinct_values": int(np.unique(chol_synth_f).size),
+        "synthetic_fraction_on_grid": chol_synth_on_grid,
+    },
+    runs={
+        "correlation_run": CHOL_CORRELATION_RUN,
+        "distribution_run": CHOL_DISTRIBUTION_RUN,
+        "envelope_run": CHOL_ENVELOPE_RUN,
+        "generation_run": CHOL_GENERATION_RUN,
+    },
+    seed=SEED,
+    budgets=chol_budgets,
+    parameter_order=PARAMETER_ORDER,
+    populations=chol_populations_used,
+    datasets=dataset_provenance(),
+    approved_population=chol_population,
+)
 try:
     chol_emitted = notebook_evidence.emit_run(
         workspace,
         section="cholesky-generator-audit",
-        metrics={
-            "schema_version": 1,
-            "analysis": "deck dependence-target transcription audit and shipped 4-D "
-            "generator dependence error",
-            "deck_transcription_audit": {
-                name: {
-                    "deck_event_count": entry["deck_n"],
-                    "generator_population": entry["generator_population"],
-                    "generator_event_count": entry["generator_n"],
-                    "max_deck_minus_physical_r": entry["max_deck_minus_physical"],
-                    "max_deck_minus_generator_target_r": entry[
-                        "max_deck_minus_generator_target"
-                    ],
-                    "worst_pair": list(entry["worst_pair"]),
-                }
-                for name, entry in chol_audit.items()
-            },
-            "pilot_dependence_error": chol_mechanism,
-            "shipped_v3_dependence_error": {
-                "event_count": len(chol_v3_records),
-                "class_counts": chol_v3_counts,
-                "max_absolute_off_diagonal_delta_by_class": chol_v3_by_class,
-                "max_absolute_off_diagonal_delta": chol_v3_worst,
-            },
-            "independent_marginal_control": {
-                "max_absolute_off_diagonal_delta": chol_control_worst,
-                "max_absolute_realized_correlation": chol_control_seen,
-            },
-            "envelope_widening_ratio": chol_widening,
-            "generated_outside_measured_range_fraction": chol_outside,
-            "frequency_quantisation": {
-                "grid_hz": chol_grid_hz,
-                "measured_distinct_values": int(chol_real_f.size),
-                "measured_fraction_on_grid": chol_on_grid,
-                "synthetic_distinct_values": int(np.unique(chol_synth_f).size),
-                "synthetic_fraction_on_grid": chol_synth_on_grid,
-            },
-        },
-        provenance={
-            "datasets": dataset_provenance(),
-            "inputs": {
-                "correlation_run": CHOL_CORRELATION_RUN,
-                "distribution_run": CHOL_DISTRIBUTION_RUN,
-                "envelope_run": CHOL_ENVELOPE_RUN,
-                "generation_run": CHOL_GENERATION_RUN,
-                "approved_population": chol_population,
-                "deck_recipe": "src/internship_workspace/presentation/recipes/"
-                "pearson_targets.py",
-            },
-            "parameters": {
-                "seed": SEED,
-                "class_budgets": chol_budgets,
-                "transformed_coordinates": list(PARAMETER_ORDER),
-                "dependency_population_by_class": chol_populations_used,
-            },
-            "metric_definitions": {
-                "max_deck_minus_physical_r": "largest absolute gap between a deck "
-                "constant and the correlation run's physical-population Pearson r",
-                "max_deck_minus_generator_target_r": "largest absolute gap between a "
-                "deck constant and the Pearson r the generator was actually given",
-                "max_absolute_off_diagonal_delta": "largest absolute realised-minus-"
-                "target Pearson r over off-diagonal cells and classes",
-                "sampling_error_multiples": "max |delta| divided by (1 - r^2)/"
-                "sqrt(n - 1) at the target r",
-                "envelope_widening_ratio": "fitted Gaussian envelope sigma divided "
-                "by the measured standard deviation, per transformed coordinate",
-                "generated_outside_measured_range_fraction": "share of generated "
-                "events falling outside the measured per-class observed range",
-                "frequency_quantisation": "share of Doppler frequencies that are "
-                "exact multiples of the 4096-point transform bin at 2 MHz",
-            },
-        },
+        metrics=chol_metrics,
+        provenance=chol_provenance,
         claim_boundary=(
             "Audits the deck's hard-coded dependence targets against the manifested "
             "correlation run, and measures the realised-minus-target Pearson error of "
@@ -3395,19 +4430,20 @@ except WorkspaceError as chol_error:
 # %% [markdown]
 # ## The fifth knob: waveform asymmetry
 #
-# Everything up to here has generated events from four numbers — amplitude
-# $P_0$, carrier frequency $f$, envelope width $\tau$ and signal-to-noise ratio
-# — and drawn the pulse itself from one fixed shape: a Gaussian envelope,
-# symmetric about its own centre, multiplying a cosine. Those four numbers say
-# how big, how fast, how long and how buried an event is. None of them says
-# what it *looks like*.
+# **The open question.** The generator of the previous section draws events from
+# four numbers — amplitude $P_0$, carrier frequency $f$, envelope width $\tau$
+# and signal-to-noise ratio — and then draws the pulse itself from one fixed
+# shape: a Gaussian envelope, symmetric about its own centre, multiplying a
+# cosine. Those four numbers say how big, how fast, how long and how buried an
+# event is. None of them says what it *looks like*, and nothing so far has
+# tested whether the fixed shape is the right one.
 #
-# This section asks whether the fixed shape is the right one, and follows the
-# answer to its end: a measurable skew of the envelope, an estimator that reads
-# it off one noisy event, a calibration that says how far to trust that reading,
-# and a fifth generated coordinate that makes synthetic events carry it. It also
-# stops, at the point where the chain crossed a gate it had set for itself, and
-# measures what that cost.
+# **What is done.** This section follows that question to its end: a measurable
+# skew of the envelope, an estimator that reads it off one noisy event, a
+# calibration that says how far to trust that reading, and a fifth generated
+# coordinate that makes synthetic events carry it. It also stops, at the point
+# where the chain crossed a gate it had set for itself, and measures what that
+# cost.
 #
 # **Vocabulary.** *Envelope*: the slowly varying amplitude that the fast
 # oscillation rides on. *Skew* or *asymmetry*: the envelope rising and falling
@@ -3417,105 +4453,63 @@ except WorkspaceError as chol_error:
 
 # %%
 import collections
-import hashlib
-from datetime import datetime
 
-from scipy.signal import butter, hilbert, sosfiltfilt
+from scipy.signal import butter
 from scipy.stats import chi2, mannwhitneyu
 
+from internship_workspace.chain_data import read_rows  # the shipped CSV reader
+from internship_workspace.notebook_evidence import sha256_file
 from internship_workspace.z8_parametric_asymmetry import (
     ParametricAsymmetryConfig,
     asymmetric_gaussian_cosine,
-    fit_parametric_asymmetry,
-    inject_asymmetry_into_noise_carrier,
 )
 
 ASYMMETRY_BOUND = 0.8
-RAW_LENGTH = 4096
+SYNTHETIC_EVENTS = (
+    "particles2snr-fbase-z8-cholesky-physicalcorr-effective-snr-synthetic-events"
+)
 
 signal_root = dataset_root("particles2snr-f-dual-clean-c1-yolo-4class@v2")
 z8_root = dataset_root(
     "particles2snr-fbase-dual-clean-z8-events-3class-plus-unclear-development@v2"
 )
-v4_root = dataset_root(
-    "particles2snr-fbase-z8-cholesky-physicalcorr-effective-snr-synthetic-events@v4"
-)
-v5_root = dataset_root(
-    "particles2snr-fbase-z8-cholesky-physicalcorr-effective-snr-synthetic-events@v5"
-)
+v4_root = dataset_root(f"{SYNTHETIC_EVENTS}@v4")
+v5_root = dataset_root(f"{SYNTHETIC_EVENTS}@v5")
 
-
-def read_rows(path):
-    with open(path, newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
-
-
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-z8_events = [row for row in read_rows(z8_root / "events.csv") if row["class_name"] in CLASS_ORDER]
+z8_events = [row for row in read_rows(z8_root / "events.csv")
+             if row["class_name"] in CLASS_ORDER]
 if any(row["split"] == "test" for row in z8_events):
     raise RuntimeError("sealed test rows reached the asymmetry section")
-print(f"real Z8 events, three physical classes: {len(z8_events)}")
-print("split census:", dict(collections.Counter(row["split"] for row in z8_events)))
-print("class census:", {name: sum(r["class_name"] == name for r in z8_events) for name in CLASS_ORDER})
+report_census(z8_events, class_order=CLASS_ORDER)
 
 # %% [markdown]
 # ### 1. A symmetric envelope is the wrong shape
 #
-# The claim to test is narrow and checkable: *real acoustic events have
-# envelopes that rise and fall at the same rate*. That is what the four-parameter
-# generator assumes, and it can be falsified without any estimator, any fit and
-# any new parameter — which matters, because an estimator that looks for skew
-# will report some skew on pure noise, and we would learn nothing.
+# **The open question.** The claim to test is narrow and checkable: *real
+# acoustic events have envelopes that rise and fall at the same rate*. That is
+# what the four-parameter generator assumes.
 #
-# The model-free statistic is the third moment of the event's own energy in
-# time. Take the analytic envelope $e(t)$ of the band-passed trace — the
-# instantaneous amplitude, from the Hilbert transform — weight time by $e(t)^2$
-# inside a window of $\pm 3\tau$ around the peak, and compute the standardised
-# third moment $\gamma$. A symmetric envelope gives $\gamma = 0$; a longer
-# right-hand tail gives $\gamma > 0$. Nothing is fitted.
+# **What is done.** It can be falsified without any estimator, any fit and any
+# new parameter — which matters, because an estimator that looks for skew will
+# report some skew on pure noise, and we would learn nothing. The model-free
+# statistic is the third moment of the event's own energy in time: take the
+# analytic envelope $e(t)$ of the band-passed trace — the instantaneous
+# amplitude, from the Hilbert transform — weight time by $e(t)^2$ inside a
+# window of $\pm 3\tau$ around the peak, and compute the standardised third
+# moment $\gamma$. A symmetric envelope gives $\gamma = 0$; a longer right-hand
+# tail gives $\gamma > 0$. Nothing is fitted.
+#
+# Before trusting it on data, the cell runs it on the model itself, at known
+# skew.
 
 # %%
-SAMPLING_INTERVAL_S = 1.0 / SAMPLING_HZ
-bandpass = butter(4, [7_000.0, 80_000.0], btype="bandpass", fs=SAMPLING_HZ, output="sos")
-
-
-def envelope_skew(values, tau_s, *, half_width=3.0, recentre=True):
-    """Energy-weighted third moment of the analytic envelope. No fit involved."""
-    envelope = np.abs(hilbert(np.asarray(values, dtype=np.float64)))
-    count = envelope.size
-    time_s = (np.arange(count) - (count - 1) / 2.0) * SAMPLING_INTERVAL_S
-    centre = 0.0
-    if recentre:
-        span = int(max(8, round(0.5 * tau_s * SAMPLING_HZ)))
-        smoothed = np.convolve(np.square(envelope), np.ones(2 * span + 1) / (2 * span + 1), mode="same")
-        centre = float(time_s[int(np.argmax(smoothed))])
-    inside = np.abs(time_s - centre) <= half_width * tau_s
-    if int(inside.sum()) < 32:
-        return np.nan
-    weight = np.square(envelope[inside])
-    axis = time_s[inside]
-    total = float(weight.sum())
-    mean = float((weight * axis).sum() / total)
-    deviation = axis - mean
-    variance = float((weight * deviation**2).sum() / total)
-    if variance <= 0.0:
-        return np.nan
-    return float((weight * deviation**3).sum() / total / variance**1.5)
-
-
 for probe in (-0.4, -0.2, 0.0, 0.2, 0.4):
     waveform = asymmetric_gaussian_cosine(
         RAW_LENGTH, frequency_hz=25_000.0, tau_s=4.0e-5, asymmetry=probe,
         sampling_frequency_hz=SAMPLING_HZ,
     )
-    print(f"noiseless model with a = {probe:+.1f} → γ = {envelope_skew(waveform, 4.0e-5):+.4f}")
+    print(f"noiseless model with a = {probe:+.1f} → "
+          f"γ = {envelope_skew(waveform, 4.0e-5, sampling_hz=SAMPLING_HZ):+.4f}")
 
 # %% [markdown]
 # The statistic tracks the sign and, near zero, roughly $1.4$ times the
@@ -3527,63 +4521,18 @@ for probe in (-0.4, -0.2, 0.0, 0.2, 0.4):
 # noise alone buys.
 
 # %%
-def reflect_crop(values, centre, length=RAW_LENGTH):
-    """The 4,096-sample window the analyses use, reflected at file edges."""
-    array = np.asarray(values, dtype=np.float64).reshape(-1)
-    start = int(round(float(centre))) - length // 2
-    if start >= 0 and start + length <= array.size:
-        return array[start : start + length].copy()
-    padded = np.pad(array, (length, length), mode="reflect")
-    return padded[start + length : start + length + length].copy()
-
-
-started = time.time()
-signal_cache = {}
-real_skew = collections.defaultdict(list)
-for row in z8_events:
-    relative = row["source_signal_relative_path"]
-    if relative not in signal_cache:
-        signal_cache[relative] = np.load(signal_root / relative, allow_pickle=False)
-    crop = reflect_crop(signal_cache[relative], float(row["center_sample"]))
-    real_skew[row["class_name"]].append(envelope_skew(crop, float(row["tau_ms"]) / 1000.0))
-signal_cache.clear()
-
+bandpass = butter(4, [7_000.0, 80_000.0], btype="bandpass", fs=SAMPLING_HZ,
+                  output="sos")
 v4_events = read_rows(v4_root / "events.csv")
 v4_raw = np.load(v4_root / "signals_raw_4096.npy", mmap_mode="r", allow_pickle=False)
-v4_index = collections.defaultdict(list)
-for position, row in enumerate(v4_events):
-    v4_index[row["class_name"]].append(position)
 
-null_generator = np.random.default_rng(20260815)
-null_skew = collections.defaultdict(list)
-for name in CLASS_ORDER:
-    for position in null_generator.choice(v4_index[name], 800, replace=False):
-        filtered = sosfiltfilt(bandpass, np.asarray(v4_raw[int(position)], dtype=np.float64))
-        null_skew[name].append(envelope_skew(filtered, float(v4_events[int(position)]["tau_ms"]) / 1000.0))
-
-real_skew = {name: np.asarray(real_skew[name])[np.isfinite(real_skew[name])] for name in CLASS_ORDER}
-null_skew = {name: np.asarray(null_skew[name])[np.isfinite(null_skew[name])] for name in CLASS_ORDER}
-skew_summary = {}
-for name in CLASS_ORDER:
-    observed, reference = real_skew[name], null_skew[name]
-    band = float(np.quantile(np.abs(reference), 0.95))
-    skew_summary[name] = {
-        "real_count": int(observed.size),
-        "null_count": int(reference.size),
-        "real_standard_deviation": float(observed.std(ddof=1)),
-        "null_standard_deviation": float(reference.std(ddof=1)),
-        "null_absolute_q95": band,
-        "real_fraction_beyond_null_q95": float(np.mean(np.abs(observed) > band)),
-        "mann_whitney_p_value": float(mannwhitneyu(np.abs(observed), np.abs(reference)).pvalue),
-    }
-    values = skew_summary[name]
-    print(
-        f"{name:>5}: real sd {values['real_standard_deviation']:.3f} vs symmetric-generator sd "
-        f"{values['null_standard_deviation']:.3f} · "
-        f"{100 * values['real_fraction_beyond_null_q95']:.1f} % of real events beyond ±{band:.2f} "
-        f"(5 % expected) · p = {values['mann_whitney_p_value']:.1e}"
-    )
-print(f"[{time.time() - started:.1f} s]")
+real_skew = real_envelope_skew(z8_events, signal_root, sampling_hz=SAMPLING_HZ,
+                               class_order=CLASS_ORDER)
+null_skew = null_envelope_skew(v4_events, v4_raw, bandpass, per_class=800,
+                               seed=20260815, sampling_hz=SAMPLING_HZ,
+                               class_order=CLASS_ORDER)
+skew_summary = report_envelope_skew(real_skew, null_skew, class_order=CLASS_ORDER,
+                                    mannwhitneyu=mannwhitneyu)
 
 # %%
 plot_envelope_skew(real_skew, null_skew)
@@ -3638,32 +4587,24 @@ plt.show()
 # searched is $a$, on a 65-point grid over $[-0.8, 0.8]$ followed by a bounded
 # refinement, minimising a pseudo-Huber loss — quadratic on small residuals,
 # linear on large ones, so a single noise spike cannot buy skew.
+#
+# One thing has to be established before any recovery number is quoted: whether
+# the configuration that was *calibrated* is the configuration that *ran*.
 
 # %%
 frozen_config = ParametricAsymmetryConfig.from_dict(
-    json.loads((run_dir("particle-z8-v2-parametric-asymmetry-confirmatory-r2") / "estimator_config.json").read_text())
+    json.loads((run_dir("particle-z8-v2-parametric-asymmetry-confirmatory-r2")
+                / "estimator_config.json").read_text())
 )
-shipped_defaults = ParametricAsymmetryConfig()
 deployed_config = ParametricAsymmetryConfig(
     whitening_enabled=True, multistart_enabled=True, input_pre_filtered=True
 )
-
-for field in ("band_low_hz", "band_high_hz", "filter_order", "decimation",
-              "asymmetry_grid_points", "asymmetry_bound", "pseudo_huber_scale"):
-    assert getattr(frozen_config, field) == getattr(shipped_defaults, field), field
-print("the calibrated configuration is the shipped default for every search parameter:")
-print(f"  band-pass {frozen_config.band_low_hz / 1e3:.0f}–{frozen_config.band_high_hz / 1e3:.0f} kHz, "
-      f"zero-phase order {frozen_config.filter_order} · decimate by {frozen_config.decimation} · "
-      f"{frozen_config.asymmetry_grid_points}-point grid on a · |a| ≤ {frozen_config.asymmetry_bound}")
-
-differences = {
-    field: (getattr(frozen_config, field), getattr(deployed_config, field))
-    for field in ("whitening_enabled", "multistart_enabled", "input_pre_filtered")
-}
-print("\nbut the configuration graded by that calibration is not the one run on real events:")
-for field, (calibrated, deployed) in differences.items():
-    print(f"  {field:<20} calibration {str(calibrated):<5} → real events {deployed}")
-print("this gap is measured in section 3; it does not change the model, only the search.")
+report_estimator_config(
+    frozen_config, ParametricAsymmetryConfig(), deployed_config,
+    search_fields=("band_low_hz", "band_high_hz", "filter_order", "decimation",
+                   "asymmetry_grid_points", "asymmetry_bound", "pseudo_huber_scale"),
+    search_gap=("whitening_enabled", "multistart_enabled", "input_pre_filtered"),
+)
 
 # %% [markdown]
 # The three differences are forced, not arbitrary. Real events arrive already
@@ -3676,7 +4617,10 @@ print("this gap is measured in section 3; it does not change the model, only the
 # real event — is a limit, and section 3 puts a number on it.
 #
 # Here is the estimator on one real event, with the same configuration the
-# 5-D targets used.
+# 5-D targets used. The demonstration event is not picked by eye: the cell takes
+# every high-confidence, clearly skewed 4 µm event the published run accepted,
+# refits each here, and keeps one that reproduces its published $\hat{a}$
+# exactly.
 
 # %%
 targets_run = run_dir("particle-z8-v2-asymmetry-5d-targets-r4")
@@ -3692,71 +4636,32 @@ candidates = sorted(
      and float(row["confidence_probability"]) >= 0.90),
     key=lambda row: row["event_id"],
 )
-symmetric_config = ParametricAsymmetryConfig(
-    whitening_enabled=True, multistart_enabled=True, input_pre_filtered=True,
-    asymmetry_bound=1.0e-3,
-)
-
-
-def fit_real_event(row, config):
-    event = z8_by_id[row["event_id"]]
-    crop = reflect_crop(
-        np.load(signal_root / event["source_signal_relative_path"], allow_pickle=False),
-        float(event["center_sample"]),
-    )
-    return crop, fit_parametric_asymmetry(
-        crop, initial_frequency_hz=float(event["frequency_hz"]),
-        initial_tau_s=float(event["tau_ms"]) / 1000.0, config=config,
-    )
-
-
-print("candidate demonstration events, refitted here against the published value:")
-exact = []
-for row in candidates:
-    _, attempt = fit_real_event(row, deployed_config)
-    gap = abs(attempt.asymmetry - float(row["estimated_asymmetry"]))
-    print(f"  {row['event_id']} published â {float(row['estimated_asymmetry']):+.5f} "
-          f"→ refitted {attempt.asymmetry:+.5f} (gap {gap:.1e})")
-    if gap < 1.0e-9:
-        exact.append(row)
+exact = refit_candidates(candidates, z8_by_id, signal_root, deployed_config)
 assert exact, "no candidate reproduced its published â"
 published_fit = max(exact, key=lambda row: float(row["confidence_probability"]))
 DEMO_EVENT = published_fit["event_id"]
-demo = z8_by_id[DEMO_EVENT]
 
-demo_crop, free_fit = fit_real_event(published_fit, deployed_config)
-_, symmetric_fit = fit_real_event(published_fit, symmetric_config)
+demo_crop, free_fit = fit_real_event(published_fit, z8_by_id, signal_root,
+                                     deployed_config)
+_, symmetric_fit = fit_real_event(
+    published_fit, z8_by_id, signal_root,
+    ParametricAsymmetryConfig(whitening_enabled=True, multistart_enabled=True,
+                              input_pre_filtered=True, asymmetry_bound=1.0e-3),
+)
 deviation = abs(free_fit.asymmetry - float(published_fit["estimated_asymmetry"]))
 assert deviation < 1.0e-9, f"reproduction drifted by {deviation:.3e}"
-
-ratio = float(np.exp(2 * free_fit.asymmetry))
-shape = (f"decay {ratio:.1f}× the rise" if ratio >= 1.0 else f"rise {1 / ratio:.1f}× the decay")
-print(f"\nchosen: {DEMO_EVENT} · {demo['class_name']} · split {demo['split']} · "
-      f"SNR {float(demo['snr_db']):.1f} dB · confidence {float(published_fit['confidence_probability']):.3f}")
-print(f"reproduces particle-z8-v2-asymmetry-5d-targets-r4 exactly: â = {free_fit.asymmetry:.12f} "
-      f"(gap {deviation:.1e})")
-print(f"half-width ratio implied: e^(2â) = {ratio:.2f} — {shape}")
-print(f"robust residual: symmetric model {symmetric_fit.objective:.4e} → free model "
-      f"{free_fit.objective:.4e}, a drop of "
-      f"{100 * (1 - free_fit.objective / symmetric_fit.objective):.1f} %")
-print("\nsome candidates do not reproduce to the last digit; section 3 measures why.")
+shape = report_demo_event(published_fit, z8_by_id[DEMO_EVENT], free_fit, symmetric_fit,
+                          deviation=deviation,
+                          run_id="particle-z8-v2-asymmetry-5d-targets-r4")
 
 # %%
-def reconstruct(fit):
-    """The fitted model in the observed domain, from the shipped closed form."""
-    core = asymmetric_gaussian_cosine(
-        RAW_LENGTH, frequency_hz=fit.frequency_hz, tau_s=fit.tau_s, asymmetry=fit.asymmetry,
-        amplitude=fit.amplitude, phase_rad=fit.phase_rad,
-        center_offset_samples=fit.center_offset_samples, sampling_frequency_hz=SAMPLING_HZ,
-    )
-    axis = (np.arange(RAW_LENGTH) - (RAW_LENGTH - 1) / 2.0) / RAW_LENGTH
-    return core + fit.offset + fit.drift * axis
-
-
-demo_time_us = (np.arange(RAW_LENGTH) - (RAW_LENGTH - 1) / 2.0) / SAMPLING_HZ * 1e6
 plot_event_fit(
-    demo_time_us, demo_crop, reconstruct(free_fit), reconstruct(symmetric_fit),
-    label=f"{DEMO_EVENT} · {demo['class_name']} · â = {free_fit.asymmetry:+.3f} ({shape})",
+    (np.arange(RAW_LENGTH) - (RAW_LENGTH - 1) / 2.0) / SAMPLING_HZ * 1e6,
+    demo_crop,
+    reconstruct(free_fit, sampling_hz=SAMPLING_HZ),
+    reconstruct(symmetric_fit, sampling_hz=SAMPLING_HZ),
+    label=(f"{DEMO_EVENT} · {z8_by_id[DEMO_EVENT]['class_name']} · "
+           f"â = {free_fit.asymmetry:+.3f} ({shape})"),
 )
 plt.show()
 
@@ -3770,58 +4675,36 @@ plt.show()
 # %% [markdown]
 # ### 3. Calibration: how far can $\hat{a}$ be trusted?
 #
-# No real event carries a known skew, so the estimator cannot be graded on real
-# data. It is graded where the truth is chosen. The protocol, from
-# `tools/benchmarks/calibrate_z8_parametric_asymmetry.py`, takes a synthetic
-# event, subtracts the symmetric waveform it was built from — leaving its real
-# recorded noise carrier — rebuilds the *same* event with a chosen skew at the
-# *same* signal-to-noise, and runs the estimator blind. 768 injections, 256 per
-# class, truths spread over $[-0.6, +0.6]$, on noise sources disjoint from the
-# ones used to develop the estimator. No real waveform enters the loop:
-# the run records `real_z8_data_read: false`.
+# **The open question.** One event proves the model fits better when given a
+# free parameter — it always does. What no real event can say is whether the
+# fitted $\hat{a}$ is *right*, because no real event carries a known skew.
+#
+# **What is done.** The estimator is graded where the truth is chosen. The
+# protocol, from `tools/benchmarks/calibrate_z8_parametric_asymmetry.py`, takes
+# a synthetic event, subtracts the symmetric waveform it was built from —
+# leaving its real recorded noise carrier — rebuilds the *same* event with a
+# chosen skew at the *same* signal-to-noise, and runs the estimator blind. 768
+# injections, 256 per class, truths spread over $[-0.6, +0.6]$, on noise sources
+# disjoint from the ones used to develop the estimator. No real waveform enters
+# the loop: the run records `real_z8_data_read: false`. The cell recomputes the
+# published summary from the run's own rows and asserts every field matches.
 
 # %%
 confirmatory = run_dir("particle-z8-v2-parametric-asymmetry-confirmatory-r2")
-calibration_rows = [row for row in read_rows(confirmatory / "calibration_rows.csv") if row["fit_valid"] == "True"]
+calibration_rows = [row for row in read_rows(confirmatory / "calibration_rows.csv")
+                    if row["fit_valid"] == "True"]
 published_metrics = published("particle-z8-v2-parametric-asymmetry-confirmatory-r2")
-published_r_squared = published("ssl-v18-asymmetry-recovery-visuals-r1", "figure_metrics.json")["r_squared"]
+published_r_squared = published("ssl-v18-asymmetry-recovery-visuals-r1",
+                                "figure_metrics.json")["r_squared"]
 
-recovery_panels = {}
-calibration_check = {}
-for name in CLASS_ORDER:
-    selected = [row for row in calibration_rows if row["class_name"] == name]
-    truth = np.asarray([float(row["true_asymmetry"]) for row in selected])
-    estimate = np.asarray([float(row["estimated_asymmetry"]) for row in selected])
-    snr = np.asarray([float(row["snr_db"]) for row in selected])
-    error = np.abs(estimate - truth)
-    determination = 1.0 - float(np.sum(np.square(truth - estimate)) / np.sum(np.square(truth - truth.mean())))
-    strong = np.abs(truth) >= 0.20
-    recomputed = {
-        "r_squared": determination,
-        "median_absolute_error": float(np.median(error)),
-        "q95_absolute_error": float(np.quantile(error, 0.95)),
-        "median_bias": float(np.median(estimate - truth)),
-        "sign_accuracy_abs_truth_ge_0p2": float(np.mean(np.sign(truth[strong]) == np.sign(estimate[strong]))),
-    }
-    reference = published_metrics["classes"][name]
-    for key in ("median_absolute_error", "q95_absolute_error", "median_bias", "sign_accuracy_abs_truth_ge_0p2"):
-        gap = abs(recomputed[key] - reference[key])
-        assert gap < 1.0e-12, f"{name} {key} drifted by {gap:.3e}"
-    gap = abs(determination - published_r_squared[name])
-    assert gap < 1.0e-12, f"{name} R² drifted by {gap:.3e}"
-    recomputed["mean_absolute_error"] = float(error.mean())
-    recomputed["fraction_error_above_0p15"] = float(np.mean(error > 0.15))
-    calibration_check[name] = recomputed
-    recovery_panels[name] = (truth, estimate, snr, determination)
-
+calibration_check, recovery_panels = calibration_summary(calibration_rows,
+                                                         class_order=CLASS_ORDER)
+calibration_gap = calibration_drift(calibration_check, published_metrics,
+                                    published_r_squared, class_order=CLASS_ORDER)
+assert calibration_gap < 1.0e-12, f"calibration drifted by {calibration_gap:.3e}"
 print("reproduces particle-z8-v2-parametric-asymmetry-confirmatory-r2 and "
       "ssl-v18-asymmetry-recovery-visuals-r1 exactly\n")
-print(f"{'class':>6} {'R²':>6} {'median|e|':>10} {'mean|e|':>9} {'q95|e|':>8} {'sign≥0.2':>9} {'|e|>0.15':>9}")
-for name in CLASS_ORDER:
-    values = calibration_check[name]
-    print(f"{name:>6} {values['r_squared']:6.2f} {values['median_absolute_error']:10.3f} "
-          f"{values['mean_absolute_error']:9.3f} {values['q95_absolute_error']:8.3f} "
-          f"{100 * values['sign_accuracy_abs_truth_ge_0p2']:8.1f}% {100 * values['fraction_error_above_0p15']:8.1f}%")
+report_calibration(calibration_check, class_order=CLASS_ORDER)
 
 # %% [markdown]
 # The deck's three numbers check out — R² $0.65 / 0.94 / 0.84$, error
@@ -3832,21 +4715,11 @@ for name in CLASS_ORDER:
 # conditional on $|a| \ge 0.2$: it says nothing about events whose true skew is
 # small, where sign is close to a coin toss by construction.
 #
-# The sharper point is what the run says about itself.
+# The sharper point is what the run says about itself, against the thresholds it
+# froze before measuring.
 
 # %%
-thresholds = published_metrics["thresholds"]
-print("frozen acceptance thresholds and what the run measured:\n")
-print(f"{'class':>6} {'median|e|≤0.05':>16} {'q95|e|≤0.15':>14} {'|bias|≤0.03':>13} "
-      f"{'sign≥0.90':>11} {'pass':>6}")
-for name in CLASS_ORDER:
-    reference = published_metrics["classes"][name]
-    print(f"{name:>6} {reference['median_absolute_error']:16.3f} {reference['q95_absolute_error']:14.3f} "
-          f"{abs(reference['median_bias']):13.3f} {reference['sign_accuracy_abs_truth_ge_0p2']:11.3f} "
-          f"{str(reference['calibration_pass']):>6}")
-print(f"\nrun-level calibration_pass: {published_metrics['calibration_pass']}")
-print(f"q95 threshold {thresholds['q95_absolute_error_maximum']} is exceeded by every class; "
-      f"2 µm also misses the median gate {thresholds['median_absolute_error_maximum']}")
+report_calibration_gate(published_metrics, class_order=CLASS_ORDER)
 
 # %% [markdown]
 # **The calibration gate did not pass.** Not on one class — on all three, and
@@ -3859,31 +4732,13 @@ print(f"q95 threshold {thresholds['q95_absolute_error_maximum']} is exceeded by 
 # the slide.
 #
 # Where does the error live? Not where the deck's scope line suggests
-# ("the weakly identifiable tails"), if that is read as large $|a|$.
+# ("the weakly identifiable tails"), if that is read as large $|a|$. Ranking the
+# same injections by signal-to-noise instead answers it.
 
 # %%
 plot_recovery(recovery_panels)
 plt.show()
-
-print(f"{'class':>6} {'SNR quartile':>14} {'n':>4} {'median|e|':>10} {'|e|>0.15':>9}")
-snr_structure = {}
-for name in CLASS_ORDER:
-    truth, estimate, snr, _ = recovery_panels[name]
-    error = np.abs(estimate - truth)
-    edges = np.quantile(snr, [0.0, 0.25, 0.5, 0.75, 1.0])
-    snr_structure[name] = []
-    for index in range(4):
-        upper = snr <= edges[index + 1] if index == 3 else snr < edges[index + 1]
-        inside = (snr >= edges[index]) & upper
-        snr_structure[name].append(
-            {"quartile": index + 1, "low_db": float(edges[index]), "high_db": float(edges[index + 1]),
-             "count": int(inside.sum()), "median_absolute_error": float(np.median(error[inside])),
-             "fraction_above_0p15": float(np.mean(error[inside] > 0.15))}
-        )
-        record = snr_structure[name][-1]
-        print(f"{name:>6} {f'Q{index + 1} [{edges[index]:+.0f},{edges[index + 1]:+.0f}) dB':>14} "
-              f"{record['count']:4d} {record['median_absolute_error']:10.3f} "
-              f"{100 * record['fraction_above_0p15']:8.1f}%")
+snr_structure = error_by_snr_quartile(recovery_panels, class_order=CLASS_ORDER)
 
 # %% [markdown]
 # The error is an SNR effect, essentially entirely. In the top signal-to-noise
@@ -3894,12 +4749,14 @@ for name in CLASS_ORDER:
 # it is an SNR-shaped filter wearing fit-quality clothes, and every downstream
 # use of the accepted population inherits that selection.
 #
-# Can the calibration be re-run from this notebook? Almost.
+# Can the calibration be re-run from this notebook? Almost — and the gap is
+# worth measuring, because it bounds what a per-event $\hat{a}$ means. The cell
+# rebuilds 48 published injections per class from the same donors and refits
+# them here.
 
 # %%
-started = time.time()
-v4_by_id = {row["sample_id"]: position for position, row in enumerate(v4_events)}
 reproduction_generator = np.random.default_rng(20260816)
+v4_by_id = {row["sample_id"]: position for position, row in enumerate(v4_events)}
 by_class = collections.defaultdict(list)
 for row in calibration_rows:
     by_class[row["class_name"]].append(row)
@@ -3910,45 +4767,11 @@ for name in CLASS_ORDER:
     for choice in reproduction_generator.choice(len(pool), 48, replace=False):
         row = pool[int(choice)]
         position = v4_by_id[row["sample_id"]]
-        donor = v4_events[position]
-        injected = inject_asymmetry_into_noise_carrier(
-            np.asarray(v4_raw[position]),
-            frequency_hz=float(donor["frequency_khz"]) * 1000.0,
-            tau_s=float(donor["tau_ms"]) / 1000.0,
-            asymmetry=float(row["true_asymmetry"]),
-            amplitude=float(donor["amplitude_p0"]),
-            phase_rad=float(donor["phi_rad"]),
-            target_snr_db=float(donor["snr_db"]),
-        )
-        refit = fit_parametric_asymmetry(
-            injected, initial_frequency_hz=float(donor["frequency_khz"]) * 1000.0,
-            initial_tau_s=float(donor["tau_ms"]) / 1000.0, config=frozen_config,
-        )
-        reproduction[name].append(
-            (float(row["true_asymmetry"]), float(row["estimated_asymmetry"]), refit.asymmetry)
-        )
-
-reproduction_summary = {}
-for name in CLASS_ORDER:
-    truth, published_estimate, refitted = (np.asarray(column) for column in zip(*reproduction[name]))
-    def determination(estimate):
-        return 1.0 - float(np.sum(np.square(truth - estimate)) / np.sum(np.square(truth - truth.mean())))
-    reproduction_summary[name] = {
-        "count": int(truth.size),
-        "maximum_per_event_drift": float(np.max(np.abs(published_estimate - refitted))),
-        "fraction_drift_above_1e_3": float(np.mean(np.abs(published_estimate - refitted) > 1.0e-3)),
-        "published_median_absolute_error": float(np.median(np.abs(published_estimate - truth))),
-        "refitted_median_absolute_error": float(np.median(np.abs(refitted - truth))),
-        "published_r_squared": determination(published_estimate),
-        "refitted_r_squared": determination(refitted),
-    }
-    values = reproduction_summary[name]
-    print(f"{name:>5}: per-event drift up to {values['maximum_per_event_drift']:.2e} "
-          f"({100 * values['fraction_drift_above_1e_3']:.0f} % of events above 1e-3) · "
-          f"median|e| {values['published_median_absolute_error']:.4f} → "
-          f"{values['refitted_median_absolute_error']:.4f} · "
-          f"R² {values['published_r_squared']:.4f} → {values['refitted_r_squared']:.4f}")
-print(f"[{time.time() - started:.1f} s]")
+        refitted = reinject_and_refit(row, v4_events[position], v4_raw[position],
+                                      frozen_config)
+        reproduction[name].append((float(row["true_asymmetry"]),
+                                   float(row["estimated_asymmetry"]), refitted))
+reproduction_summary = report_reproduction(reproduction, class_order=CLASS_ORDER)
 
 # %% [markdown]
 # **A named limit: the estimator reproduces as an instrument, not as a
@@ -3973,43 +4796,24 @@ print(f"[{time.time() - started:.1f} s]")
 
 # %%
 domain_run = run_dir("particle-z8-v2-parametric-asymmetry-filtered-domain-r1")
-variant_rows = [row for row in read_rows(domain_run / "variant_fit_rows.csv")
-                if row["variant"] == "C_prewhitened_multistart"]
-confidence_rows = {row["sample_id"]: row for row in read_rows(domain_run / "confidence_oof_rows.csv")}
-confidence_threshold = published("particle-z8-v2-asymmetry-5d-targets-r4")["confidence_threshold"]
-
-estimator_noise = {}
-for name in CLASS_ORDER:
-    selected = [row for row in variant_rows if row["class_name"] == name]
-    accepted = [row for row in selected
-                if float(confidence_rows[row["sample_id"]]["confidence_probability"]) >= confidence_threshold]
-    error = np.asarray([float(row["signed_error"]) for row in accepted])
-    magnitude = np.abs([float(row["true_asymmetry"]) for row in accepted])
-    estimator_noise[name] = error
-    small = error[magnitude < 0.15]
-    print(f"{name:>5}: {len(accepted):4d}/{len(selected)} injections pass the same confidence gate · "
-          f"error sd {error.std(ddof=1):.4f} (sd on |a|<0.15 only: {small.std(ddof=1):.4f}, n={small.size})")
-print("\nthe error spread barely moves with the injected skew, so the pooled error "
-      "distribution is a fair null for real events whose skew is concentrated near zero")
+confidence_threshold = published("particle-z8-v2-asymmetry-5d-targets-r4")[
+    "confidence_threshold"
+]
+estimator_noise = report_estimator_noise(
+    [row for row in read_rows(domain_run / "variant_fit_rows.csv")
+     if row["variant"] == "C_prewhitened_multistart"],
+    {row["sample_id"]: row for row in read_rows(domain_run / "confidence_oof_rows.csv")},
+    threshold=confidence_threshold, class_order=CLASS_ORDER,
+)
 
 domain_metrics = published("particle-z8-v2-parametric-asymmetry-filtered-domain-r1")
-deployment = json.loads((domain_run / "confidence_model.json").read_text())
-deployment = deployment["deployment_threshold_from_all_oof_predictions"]["classes"]
-operational = {}
-print(f"\nand its own operational gate, at the threshold the real-event pipeline deploys:")
-print(f"{'class':>6} {'coverage':>9} {'required':>9} {'q90|e|':>8} {'allowed':>8} {'meets gate':>11}")
-for name in CLASS_ORDER:
-    gate = domain_metrics["operational_gates"][name]
-    measured = deployment[name]
-    passes = bool(measured["coverage"] >= gate["minimum_coverage"]
-                  and measured["q90_error"] <= gate["maximum_conditional_q90_error"])
-    operational[name] = {"coverage": measured["coverage"], "minimum_coverage": gate["minimum_coverage"],
-                         "q90_absolute_error": measured["q90_error"],
-                         "maximum_q90_absolute_error": gate["maximum_conditional_q90_error"],
-                         "meets_gate": passes}
-    print(f"{name:>6} {measured['coverage']:9.3f} {gate['minimum_coverage']:9.2f} "
-          f"{measured['q90_error']:8.3f} {gate['maximum_conditional_q90_error']:8.2f} {str(passes):>11}")
-print(f"run-level development_success: {domain_metrics['development_success']}")
+operational = report_operational_gate(
+    domain_metrics["operational_gates"],
+    json.loads((domain_run / "confidence_model.json").read_text())[
+        "deployment_threshold_from_all_oof_predictions"]["classes"],
+    class_order=CLASS_ORDER,
+    development_success=domain_metrics["development_success"],
+)
 
 # %% [markdown]
 # Two readings. The estimator that actually runs on real events has a signed
@@ -4028,11 +4832,16 @@ print(f"run-level development_success: {domain_metrics['development_success']}")
 #
 # #### 4.1 What the real events say
 #
-# The estimator ran on all 2,073 real events of the three physical classes.
-# Events whose fit the confidence model distrusts, and fits that walked into the
-# $|a| = 0.8$ bound, are abstentions rather than measurements — so the
-# population that defines the target is the *conditional accepted* one, and the
-# claim it supports is conditional too.
+# **The open question.** With a yardstick for the estimator's own noise, the
+# spread of real $\hat{a}$ can finally be split into skew and error — which is
+# the number the generator needs.
+#
+# **What is done.** The estimator ran on all 2,073 real events of the three
+# physical classes. Events whose fit the confidence model distrusts, and fits
+# that walked into the $|a| = 0.8$ bound, are abstentions rather than
+# measurements — so the population that defines the target is the *conditional
+# accepted* one, and the claim it supports is conditional too. The cell asserts
+# that population against the published statistics before subtracting anything.
 
 # %%
 strict_accepted = collections.defaultdict(list)
@@ -4044,39 +4853,17 @@ real_asymmetry = {name: np.asarray(strict_accepted[name]) for name in CLASS_ORDE
 targets_metrics = published("particle-z8-v2-asymmetry-5d-targets-r4")
 statistics = {entry["class_name"]: entry for entry in targets_metrics["statistics"]
               if entry["population"] == "strict"}
-gaussian_targets = {entry["class_name"]: entry for entry in targets_metrics["gaussian_asymmetry_targets"]}
+gaussian_targets = {entry["class_name"]: entry
+                    for entry in targets_metrics["gaussian_asymmetry_targets"]}
 
-support = {}
-deconvolution = {}
-for name in CLASS_ORDER:
-    observed = real_asymmetry[name]
-    reference = statistics[name]
-    assert observed.size == reference["accepted_count"], name
-    for key, value in (("standard_deviation", observed.std(ddof=1)), ("median", np.median(observed)),
-                       ("minimum", observed.min()), ("maximum", observed.max())):
-        gap = abs(value - reference[key])
-        assert gap < 1.0e-12, f"{name} {key} drifted by {gap:.3e}"
-    support[name] = (float(observed.min()), float(observed.max()))
-    noise_variance = float(estimator_noise[name].var(ddof=1))
-    true_variance = max(observed.var(ddof=1) - noise_variance, 0.0)
-    deconvolution[name] = {
-        "accepted_count": int(observed.size),
-        "requested_count": int(reference["requested_count"]),
-        "coverage": float(reference["coverage"]),
-        "observed_standard_deviation": float(observed.std(ddof=1)),
-        "estimator_noise_standard_deviation": float(np.sqrt(noise_variance)),
-        "skew_standard_deviation": float(np.sqrt(true_variance)),
-        "variance_share_real_skew": float(true_variance / observed.var(ddof=1)),
-        "gaussian_sigma_transformed": gaussian_targets[name]["gaussian_sigma_transformed"],
-        "observed_support": support[name],
-    }
+statistics_gap = published_statistics_drift(real_asymmetry, statistics,
+                                            class_order=CLASS_ORDER)
+assert statistics_gap < 1.0e-12, f"real statistics drifted by {statistics_gap:.3e}"
 print("reproduces particle-z8-v2-asymmetry-5d-targets-r4 exactly\n")
-print(f"{'class':>6} {'accepted':>9} {'coverage':>9} {'sd(â)':>7} {'sd(noise)':>10} {'sd(skew)':>9} {'real share':>11}")
-for name in CLASS_ORDER:
-    values = deconvolution[name]
-    print(f"{name:>6} {values['accepted_count']:9d} {100 * values['coverage']:8.1f}% "
-          f"{values['observed_standard_deviation']:7.3f} {values['estimator_noise_standard_deviation']:10.3f} "
-          f"{values['skew_standard_deviation']:9.3f} {100 * values['variance_share_real_skew']:10.1f}%")
+deconvolution, support = deconvolve_estimator_noise(
+    real_asymmetry, estimator_noise, statistics, gaussian_targets,
+    class_order=CLASS_ORDER,
+)
 
 # %%
 plot_real_targets(real_asymmetry, estimator_noise, support=support)
@@ -4097,41 +4884,32 @@ plt.show()
 # events. The abstained events are not measured, and section 3 showed the
 # abstention is SNR-shaped, so the anchor population is biased toward the
 # louder events of each class.
+#
+# One of those three coverages is small enough to have been ruled out in
+# advance, which is the subject of the next subsection.
 
 # %% [markdown]
 # #### 4.2 The limit: a run that forbade what the next run did
 #
 # The targets run declared a minimum of 50 confidence-accepted events per class
 # before its matrices could authorise anything. It got 40 at 10 µm. Both run
-# manifests are on disk; here they are, unedited.
+# manifests are on disk; here they are, unedited, with the hash that proves the
+# second run consumed the first.
 
 # %%
-targets_manifest = json.loads((targets_run / "run.json").read_text())
 generation_run = run_dir("particle-z8-v2-asymmetry-paired-generation-r1")
+targets_manifest = json.loads((targets_run / "run.json").read_text())
 generation_manifest = json.loads((generation_run / "run.json").read_text())
+report_governance(targets_manifest, generation_manifest, targets_metrics,
+                  targets_run_id="particle-z8-v2-asymmetry-5d-targets-r4",
+                  generation_run_id="particle-z8-v2-asymmetry-paired-generation-r1")
 
-print("particle-z8-v2-asymmetry-5d-targets-r4 · claim_boundary")
-print(f"  {targets_manifest['claim_boundary']}\n")
-print(f"  strict accepted counts: {targets_metrics['strict_accepted_counts']}")
-print(f"  minimum_50_strict_per_class: {targets_metrics['minimum_50_strict_per_class']}")
-print(f"  status: {targets_manifest['status']}\n")
-
-print("particle-z8-v2-asymmetry-paired-generation-r1 · claim_boundary")
-print(f"  {generation_manifest.get('claim_boundary', '(no claim_boundary field in the manifest)')}")
-print(f"  status: {generation_manifest['status']}")
-print(f"  targets consumed: {'particle-z8-v2-asymmetry-5d-targets-r4' in generation_manifest['command']}")
-
-written = [datetime.fromisoformat(manifest["created_at"])
-           for manifest in (targets_manifest, generation_manifest)]
-elapsed_minutes = (written[1] - written[0]).total_seconds() / 60.0
-print(f"  written {elapsed_minutes:.0f} minutes after the run that forbade it")
-
-recorded = json.loads((generation_run / "metrics_manifest.json").read_text())
-recorded_hash = recorded["computation_provenance"]["inputs"]["targets_metrics_manifest_sha256"]
+recorded_hash = json.loads((generation_run / "metrics_manifest.json").read_text())[
+    "computation_provenance"]["inputs"]["targets_metrics_manifest_sha256"]
 actual_hash = sha256_file(targets_run / "metrics_manifest.json")
 assert recorded_hash == actual_hash, "the consumed targets manifest is not the one on disk"
-print(f"\n  the generation run recorded the targets manifest hash {recorded_hash[:16]}…, "
-      f"which matches the file on disk byte for byte")
+print(f"\n  the generation run recorded the targets manifest hash "
+      f"{recorded_hash[:16]}…, which matches the file on disk byte for byte")
 
 # %% [markdown]
 # So the record is unambiguous. The run that measured the 5-D targets wrote, in
@@ -4147,34 +4925,24 @@ print(f"\n  the generation run recorded the targets manifest hash {recorded_hash
 # %%
 v5_events = read_rows(v5_root / "events.csv")
 v5_summary = json.loads((v5_root / "dataset_summary.json").read_text())
-generated = {name: np.asarray([float(row["waveform_asymmetry"]) for row in v5_events
-                               if row["class_name"] == name]) for name in CLASS_ORDER}
-
-print(f"{'class':>6} {'v5 events':>10} {'share':>7} {'generated a range':>22} {'sd':>7} {'|a|≥0.2':>9} {'anchors':>8}")
-exposure = {}
-for name in CLASS_ORDER:
-    values = generated[name]
-    exposure[name] = {
-        "generated_count": int(values.size),
-        "generated_share": float(values.size / len(v5_events)),
-        "generated_minimum": float(values.min()),
-        "generated_maximum": float(values.max()),
-        "generated_standard_deviation": float(values.std(ddof=1)),
-        "generated_fraction_abs_ge_0p2": float(np.mean(np.abs(values) >= 0.2)),
-        "anchor_count": int(deconvolution[name]["accepted_count"]),
-    }
-    record = exposure[name]
-    print(f"{name:>6} {record['generated_count']:10d} {100 * record['generated_share']:6.1f}% "
-          f"{f'[{values.min():+.3f}, {values.max():+.3f}]':>22} "
-          f"{record['generated_standard_deviation']:7.3f} "
-          f"{100 * record['generated_fraction_abs_ge_0p2']:8.1f}% {record['anchor_count']:8d}")
-
-transform_check = {
-    name: (abs(np.arctanh(support[name][0] / ASYMMETRY_BOUND) - gaussian_targets[name]["observed_minimum_transformed"]),
-           abs(np.arctanh(support[name][1] / ASYMMETRY_BOUND) - gaussian_targets[name]["observed_maximum_transformed"]))
+generated = {
+    name: np.asarray([float(row["waveform_asymmetry"]) for row in v5_events
+                      if row["class_name"] == name])
     for name in CLASS_ORDER
 }
-assert max(max(pair) for pair in transform_check.values()) < 1.0e-9
+exposure = report_exposure(
+    generated, {name: deconvolution[name]["accepted_count"] for name in CLASS_ORDER},
+    class_order=CLASS_ORDER,
+)
+
+transform_gap = max(
+    max(abs(np.arctanh(support[name][edge] / ASYMMETRY_BOUND)
+            - gaussian_targets[name][field])
+        for edge, field in ((0, "observed_minimum_transformed"),
+                            (1, "observed_maximum_transformed")))
+    for name in CLASS_ORDER
+)
+assert transform_gap < 1.0e-9, f"support transform drifted by {transform_gap:.3e}"
 print(f"\nthe generation support policy is '{v5_summary['asymmetry_policy']['support']}': "
       f"the anchors' own extremes are hard rejection bounds")
 print("10 µm generated events are confined to the range 40 real events happened to span; "
@@ -4183,7 +4951,7 @@ print("10 µm generated events are confined to the range 40 real events happened
 
 consumers = sorted(
     path.parent.name
-    for path in (workspace.artifacts_root).rglob("run.json")
+    for path in workspace.artifacts_root.rglob("run.json")
     if "effective-snr-synthetic-events@v5" in path.read_text()
 )
 print(f"\nmanifested runs that consume the v5 dataset: {len(consumers)}")
@@ -4212,32 +4980,22 @@ print(f"  including {sum('bead-ssl' in name for name in consumers)} bead-SSL tra
 # resampling of an existing published population; it authorises nothing.
 
 # %%
+SUBSAMPLE, DRAWS = 40, 4000
+
 bootstrap_generator = np.random.default_rng(20260817)
-observed_half_range = float(max(-real_asymmetry["10um"].min(), real_asymmetry["10um"].max()))
-half_range_draws = {}
-support_artefact = {}
+observed_half_range = float(max(-real_asymmetry["10um"].min(),
+                                real_asymmetry["10um"].max()))
+half_range_draws, support_artefact = {}, {}
 for name in ("2um", "4um"):
-    pool = real_asymmetry[name]
-    halves = np.empty(4000)
-    spreads = np.empty(4000)
-    for index in range(4000):
-        draw = bootstrap_generator.choice(pool, 40, replace=False)
-        halves[index] = max(-draw.min(), draw.max())
-        spreads[index] = draw.std(ddof=1)
+    halves, spreads = subsample_support(real_asymmetry[name], size=SUBSAMPLE,
+                                        draws=DRAWS, generator=bootstrap_generator)
     half_range_draws[name] = halves
-    support_artefact[name] = {
-        "median_half_range": float(np.median(halves)),
-        "probability_half_range_at_most_observed": float(np.mean(halves <= observed_half_range)),
-        "median_standard_deviation": float(np.median(spreads)),
-        "probability_standard_deviation_at_most_observed": float(
-            np.mean(spreads <= real_asymmetry["10um"].std(ddof=1))
-        ),
-    }
-    values = support_artefact[name]
-    print(f"{name:>5} subsampled to n=40: half-range median {values['median_half_range']:.3f}, "
-          f"P(≤ 10 µm's {observed_half_range:.3f}) = {values['probability_half_range_at_most_observed']:.3f} · "
-          f"sd median {values['median_standard_deviation']:.3f}, "
-          f"P(≤ 10 µm's) = {values['probability_standard_deviation_at_most_observed']:.3f}")
+    support_artefact[name] = report_subsample(
+        name, halves, spreads,
+        observed_half_range=observed_half_range,
+        observed_spread=real_asymmetry["10um"].std(ddof=1),
+        size=SUBSAMPLE,
+    )
 
 count = real_asymmetry["10um"].size
 spread = float(real_asymmetry["10um"].std(ddof=1))
@@ -4267,17 +5025,17 @@ plt.show()
 
 # %%
 mad_root = dataset_root("particles2snr-beads-mad-teacher-detection-development@v1")
-mad_rows = [row for row in read_rows(mad_root / "events.csv") if row["output_split"] != "test"]
-if any(row["output_split"] == "test" for row in mad_rows):
-    raise RuntimeError("sealed test rows reached the MAD census")
+# train + val only: the sealed split is filtered out here and never counted below.
+mad_rows = [row for row in read_rows(mad_root / "events.csv")
+            if row["output_split"] != "test"]
 mad_census = collections.Counter(row["source_class"] for row in mad_rows)
-projected = mad_census["10um"] * deconvolution["10um"]["coverage"]
 print(f"MAD detection development set, train + val only: {dict(mad_census)}")
 print(f"10 µm candidates outside the sealed split: {mad_census['10um']} "
       f"(880 including the test split, which this notebook does not open)")
 print(f"at the 10 µm confidence acceptance rate measured above "
       f"({100 * deconvolution['10um']['coverage']:.0f} %), that projects to roughly "
-      f"{projected:.0f} anchors against a 50-event gate")
+      f"{mad_census['10um'] * deconvolution['10um']['coverage']:.0f} anchors against "
+      f"a 50-event gate")
 
 # %% [markdown]
 # #### 4.3 Paired generation: change one thing
@@ -4292,27 +5050,26 @@ print(f"at the 10 µm confidence acceptance rate measured above "
 #
 # The one unavoidable side effect: changing the envelope changes the clean
 # signal's energy, so the noise is rescaled to hold the requested SNR exactly.
+# The cell re-verifies the pairing field by field, on all 47,980 events, and
+# checks the realised SNR against the published validation.
 
 # %%
-v4_by_position = {position: row for position, row in enumerate(v4_events)}
-frozen_fields = v5_summary["paired_contract"]["frozen_fields"]
-mismatches = 0
-for row in v5_events:
-    baseline = v4_by_position[int(row["paired_baseline_index"])]
-    if any(str(baseline[field]) != str(row[field]) for field in frozen_fields):
-        mismatches += 1
+mismatches = paired_field_mismatches(v5_events, v4_events,
+                                     v5_summary["paired_contract"]["frozen_fields"])
 assert mismatches == 0, f"{mismatches} paired events changed a frozen field"
 print(f"all {len(v5_events):,} events re-verified against their v4 twin: "
-      f"{len(frozen_fields)} frozen fields identical, 0 mismatches")
-print(f"frozen: {', '.join(frozen_fields)}")
+      f"{len(v5_summary['paired_contract']['frozen_fields'])} frozen fields identical, "
+      f"0 mismatches")
+print(f"frozen: {', '.join(v5_summary['paired_contract']['frozen_fields'])}")
 print(f"changed: {v5_summary['paired_contract']['changed_only']}")
 
-generation_validation = published("particle-z8-v2-asymmetry-paired-generation-r1", "generation_validation.json")
-achieved = np.asarray([float(row["achieved_snr_db"]) for row in v5_events])
-requested = np.asarray([float(row["snr_db"]) for row in v5_events])
-snr_error = float(np.max(np.abs(achieved - requested)))
-gap = abs(snr_error - generation_validation["maximum_snr_error_db"])
-assert gap < 1.0e-18, f"SNR error drifted by {gap:.3e}"
+snr_error = float(np.max(np.abs(
+    np.asarray([float(row["achieved_snr_db"]) for row in v5_events])
+    - np.asarray([float(row["snr_db"]) for row in v5_events])
+)))
+snr_gap = abs(snr_error - published("particle-z8-v2-asymmetry-paired-generation-r1",
+                                    "generation_validation.json")["maximum_snr_error_db"])
+assert snr_gap < 1.0e-18, f"SNR error drifted by {snr_gap:.3e}"
 print(f"\nreproduces particle-z8-v2-asymmetry-paired-generation-r1 exactly: "
       f"maximum SNR realisation error {snr_error:.2e} dB")
 print(f"seed {v5_summary['asymmetry_policy']['seed']} · "
@@ -4323,71 +5080,48 @@ print(f"dataset status on disk: {v5_summary['status']}")
 # %% [markdown]
 # #### 4.4 Did the fifth coordinate land where the real events are?
 #
-# The test is the dependence structure. For each class, compare the correlation
-# matrix realised in the 47,980 generated events against the target measured on
-# the real anchors — the difference matrix, not the two matrices, is what
-# carries the claim. The upper block is the four original coordinates, frozen to
-# the full-population 4-D targets; the bottom row is the new one.
+# **The open question.** The pairing proves the generator changed only what it
+# said it would. It does not say the skew it wrote is the skew real events have.
 #
-# A difference is only meaningful against the sampling error of the anchor
-# correlation it is compared to, which is where the anchor count re-enters:
-# Fisher's transform gives a standard error of $1/\sqrt{n-3}$, so the same
-# discrepancy is worth $0.16$ standard errors at $n = 1129$ and $6$ at $n = 40$
-# — or the other way round, which is the direction that matters here.
+# **What is done.** The test is the dependence structure. For each class, compare
+# the correlation matrix realised in the 47,980 generated events against the
+# target measured on the real anchors — the difference matrix, not the two
+# matrices, is what carries the claim. The upper block is the four original
+# coordinates, frozen to the full-population 4-D targets; the bottom row is the
+# new one. A difference is only meaningful against the sampling error of the
+# anchor correlation it is compared to, which is where the anchor count
+# re-enters: Fisher's transform gives a standard error of $1/\sqrt{n-3}$, so the
+# same discrepancy is worth $0.16$ standard errors at $n = 1129$ and $6$ at
+# $n = 40$ — or the other way round, which is the direction that matters here.
 
 # %%
-PARAMETERS = ("log_amplitude_p0", "frequency_khz", "log_tau_ms", "snr_db", "transformed_asymmetry")
+PARAMETERS = ("log_amplitude_p0", "frequency_khz", "log_tau_ms", "snr_db",
+              "transformed_asymmetry")
 LABELS = ("log P₀", "f", "log τ", "SNR", "atanh(a/0.8)")
-correlation_rows = read_rows(generation_run / "correlation_validation.csv")
-anchor_counts = {name: deconvolution[name]["accepted_count"] for name in CLASS_ORDER}
 
-deltas, zscores, dependence = {}, {}, {}
-for name in CLASS_ORDER:
-    delta = np.zeros((5, 5))
-    target = np.zeros((5, 5))
-    realised = np.zeros((5, 5))
-    for row in correlation_rows:
-        if row["class_name"] != name:
-            continue
-        i, j = PARAMETERS.index(row["row_parameter"]), PARAMETERS.index(row["column_parameter"])
-        delta[i, j] = float(row["delta"])
-        target[i, j] = float(row["target_correlation"])
-        realised[i, j] = float(row["realized_correlation"])
-    standard_error = 1.0 / np.sqrt(anchor_counts[name] - 3)
-    transform = lambda values: np.arctanh(np.clip(values, -0.999999, 0.999999))
-    zscore = (transform(realised) - transform(target)) / standard_error
-    np.fill_diagonal(zscore, 0.0)
-    deltas[name], zscores[name] = delta, zscore
-    off_diagonal = np.abs(delta - np.diag(np.diag(delta)))
-    dependence[name] = {
-        "anchor_count": anchor_counts[name],
-        "anchor_standard_error": float(standard_error),
-        "maximum_absolute_delta": float(off_diagonal.max()),
-        "asymmetry_row_maximum_absolute_delta": float(np.abs(delta[4, :4]).max()),
-        "asymmetry_row_maximum_absolute_z": float(np.abs(zscore[4, :4]).max()),
-        "frozen_block_maximum_absolute_z": float(np.abs(zscore[:4, :4]).max()),
-        "delta_undetectable_at_two_sigma": float(np.tanh(2.0 * standard_error)),
-    }
-    values = dependence[name]
-    print(f"{name:>5}: n={values['anchor_count']:4d} · asymmetry row max |Δr| "
-          f"{values['asymmetry_row_maximum_absolute_delta']:.3f} → |z| "
-          f"{values['asymmetry_row_maximum_absolute_z']:.2f} · frozen 4-D block max |z| "
-          f"{values['frozen_block_maximum_absolute_z']:.1f} · a difference up to "
-          f"{values['delta_undetectable_at_two_sigma']:.2f} would pass unnoticed at 2σ")
+anchor_counts = {name: deconvolution[name]["accepted_count"] for name in CLASS_ORDER}
+deltas, zscores, dependence = dependence_significance(
+    read_rows(generation_run / "correlation_validation.csv"),
+    class_order=CLASS_ORDER, parameters=PARAMETERS, anchor_counts=anchor_counts,
+)
 
 worst = dependence["10um"]
-rescaled = (worst["asymmetry_row_maximum_absolute_z"] * worst["anchor_standard_error"]
-            / dependence["4um"]["anchor_standard_error"])
-worst["z_at_4um_anchor_count"] = float(rescaled)
+worst["z_at_4um_anchor_count"] = float(
+    worst["asymmetry_row_maximum_absolute_z"] * worst["anchor_standard_error"]
+    / dependence["4um"]["anchor_standard_error"]
+)
 print(f"\nthe 10 µm asymmetry-row discrepancy of "
       f"{worst['asymmetry_row_maximum_absolute_delta']:.3f} is "
       f"{worst['asymmetry_row_maximum_absolute_delta'] / dependence['4um']['asymmetry_row_maximum_absolute_delta']:.0f}× "
-      f"the largest at 4 µm, and would be worth |z| = {rescaled:.1f} at the 4 µm anchor count")
+      f"the largest at 4 µm, and would be worth |z| = {worst['z_at_4um_anchor_count']:.1f} "
+      f"at the 4 µm anchor count")
 
-published_delta = published("ssl-v18-dependence-delta-visuals-r1", "figure_metrics.json")
-recomputed_maximum = max(values["maximum_absolute_delta"] for values in dependence.values())
-gap = abs(recomputed_maximum - published_delta["maximum_absolute_off_diagonal_delta_5d"])
-assert gap < 1.0e-12, f"5-D delta maximum drifted by {gap:.3e}"
+recomputed_maximum = max(values["maximum_absolute_delta"]
+                         for values in dependence.values())
+delta_gap = abs(recomputed_maximum - published("ssl-v18-dependence-delta-visuals-r1",
+                                               "figure_metrics.json")[
+    "maximum_absolute_off_diagonal_delta_5d"])
+assert delta_gap < 1.0e-12, f"5-D delta maximum drifted by {delta_gap:.3e}"
 print(f"\nreproduces ssl-v18-dependence-delta-visuals-r1 exactly: "
       f"maximum off-diagonal |Δr| = {recomputed_maximum:.3f}")
 
@@ -4443,51 +5177,37 @@ plt.show()
 #   and 38 % of 10 µm strict events.
 # - The per-event $\hat{a}$ is reproducible to about two decimals across
 #   environments, not exactly.
+#
+# That closes the generator. Whether the cloud it produces actually covers the
+# real one — in a space where a signal is a point rather than a parameter
+# vector — is the question the next notebook opens with.
 
 # %%
-asymmetry_metrics = {
-    "schema_version": 1,
-    "analysis": "waveform-asymmetry explainer measurements",
-    "model_free_envelope_skew": skew_summary,
-    "estimator_noise_deconvolution": deconvolution,
-    "calibration_error_by_snr_quartile": snr_structure,
-    "cross_environment_reproduction": reproduction_summary,
-    "generated_asymmetry_exposure": exposure,
-    "small_sample_support_artefact": {
-        "observed_10um_half_range": observed_half_range,
-        "donors": support_artefact,
-        "subsample_size": 40,
-        "draws": 4000,
-    },
-    "dependence_delta_significance": dependence,
-    "deployed_configuration_operational_gate": operational,
-    "sealed_test_accessed": False,
-    "real_z8_data_read": True,
-}
-asymmetry_provenance = {
-    "datasets": dataset_provenance(),
-    "inputs": {
+asymmetry_metrics, asymmetry_provenance = asymmetry_evidence(
+    skew_summary=skew_summary,
+    deconvolution=deconvolution,
+    snr_structure=snr_structure,
+    reproduction=reproduction_summary,
+    exposure=exposure,
+    support_artefact=support_artefact,
+    dependence=dependence,
+    operational=operational,
+    observed_half_range=observed_half_range,
+    confidence_threshold=confidence_threshold,
+    datasets=dataset_provenance(),
+    inputs={
         "targets_metrics_manifest_sha256": actual_hash,
         "calibration_rows_sha256": sha256_file(confirmatory / "calibration_rows.csv"),
         "variant_fit_rows_sha256": sha256_file(domain_run / "variant_fit_rows.csv"),
-        "correlation_validation_sha256": sha256_file(generation_run / "correlation_validation.csv"),
+        "correlation_validation_sha256": sha256_file(
+            generation_run / "correlation_validation.csv"
+        ),
     },
-    "parameters": {
-        "envelope_skew_window_tau": 3.0,
-        "envelope_skew_null_per_class": 800,
-        "reproduction_rows_per_class": 48,
-        "subsample_size": 40,
-        "subsample_draws": 4000,
-        "confidence_threshold": confidence_threshold,
-        "seeds": {"envelope_skew_null": 20260815, "reproduction": 20260816, "subsampling": 20260817},
-    },
-    "metric_definitions": {
-        "envelope_skew": "energy-weighted standardised third moment of the analytic envelope within ±3τ, no fit",
-        "skew_standard_deviation": "sqrt(var(accepted real â) − var(domain-aligned confidence-accepted estimator error))",
-        "delta_undetectable_at_two_sigma": "tanh(2/sqrt(n−3)): correlation difference still passing a two-sigma anchor test",
-        "cross_environment_reproduction": "re-running the shipped estimator on published injections in this environment",
-    },
-}
+    subsample_size=SUBSAMPLE,
+    subsample_draws=DRAWS,
+    null_per_class=800,
+    reproduction_rows=48,
+)
 # Serialise here rather than inside the emission: a payload this notebook cannot
 # write is a bug in the section, not a refusal by the evidence gate.
 payload = json.dumps({"metrics": asymmetry_metrics, "provenance": asymmetry_provenance},

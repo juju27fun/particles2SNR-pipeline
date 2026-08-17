@@ -194,12 +194,20 @@ def show_image(path, *, ax=None, title=None, figsize=(11, 5)):
 
 # %%
 # --- masked_learning ---
-"""Figure helpers for the masked-reconstruction section.
+"""Figures, tables and mask plumbing for the masked-reconstruction section.
 
-Every helper takes plain arrays and pre-computed spans so a cell can redraw
-without rebuilding anything, and so no masking logic leaks out of
-`p3_ssl.masking` into the plotting layer.
+No masking logic is defined here. Every mask comes from `p3_ssl.masking`, every
+cycle from the shipped `build_balanced_event_mask_cycle` at the bounds
+`p3_ssl.bead_ssl` expands for the trainer, and every published number from a
+manifested run. What lives here is the bookkeeping around them: converting a
+mask into its runs, walking a corpus sample, reading five histories, and
+formatting the tables the argument reads.
 """
+
+import statistics
+
+from p3_ssl.bead_ssl import _expanded_event_bounds
+from p3_ssl.masking import build_balanced_event_mask_cycle, mask_spans
 
 P25_COLOUR = "#e2483f"
 CYCLIC_COLOUR = "#00a3c7"
@@ -218,7 +226,317 @@ def _bare(axis):
     return axis
 
 
-def draw_model_view(signal, mask, spans, *, patch_size=16, axes=None):
+def mask_geometry(mask):
+    """How a policy spends its budget: how many runs of hidden samples, how long."""
+    spans = mask_spans(np.asarray(mask, dtype=bool))
+    lengths = [end - start for start, end in spans]
+    return {"hidden": int(np.sum(mask)), "spans": len(spans),
+            "longest": int(max(lengths)), "median": int(np.median(lengths))}
+
+
+def print_mask_geometry(measured, input_length):
+    """The geometry table, and the budget check that makes the policies comparable."""
+    for policy, values in measured.items():
+        print(f"{policy:9s} {values['hidden']} hidden  {values['spans']:3d} runs  "
+              f"longest {values['longest']:3d}  median run {values['median']}")
+    print(f"budget check: both hide {next(iter(measured.values()))['hidden']} of "
+          f"{input_length} samples — matched by construction, not by tuning")
+
+
+def cyclic25_cycle(support, *, index, spec, settings, length, seed):
+    """One CYCLIC25 cycle for a support, exactly as a training run built it.
+
+    The bounds come from the shipped `_expanded_event_bounds`, which widens a
+    support narrower than one pass's event budget, and the seed from the runs'
+    own derivation `seed + sample_index * 7919`. The scheduling itself is
+    `build_balanced_event_mask_cycle`; nothing about it is redefined here.
+    """
+    event = np.zeros(length, dtype=bool)
+    event[support[0] : support[1]] = True
+    start, end = _expanded_event_bounds(
+        event, minimum_points=int(settings["event_windows_per_pass"])
+        * int(settings["candidate_size"]),
+    )
+    expanded = np.zeros(length, dtype=bool)
+    expanded[start:end] = True
+    return build_balanced_event_mask_cycle(
+        expanded,
+        spec,
+        np.random.default_rng(seed + index * 7919),
+        event_windows_per_pass=int(settings["event_windows_per_pass"]),
+        background_windows_per_pass=int(settings["background_windows_per_pass"]),
+        require_context_each_side=bool(settings["require_context_each_side"]),
+    )
+
+
+def cycle_group(cycle, group="", *, pass_index=None):
+    """A cycle's masks as booleans: every pass, or one, of `event`/`background`."""
+    key = f"{group}_target_time_masks" if group else "target_time_masks"
+    masks = np.asarray(cycle[key], dtype=bool)
+    return masks if pass_index is None else masks[pass_index]
+
+
+def scan_cycle_defect(indices, declared, true, *, spec, settings, length, seed):
+    """Where each event's aimed budget actually landed, over a corpus sample.
+
+    For every sampled event the cycle is rebuilt as trained — from the declared
+    support — and once more from the support the data implies, to see what a
+    correction would cost. Three quantities come back per event: the share of
+    the background budget that lies inside the true event, the share of the true
+    support the event group ever hides over a whole cycle, and the cycle length.
+    """
+    background_inside, event_coverage = [], []
+    declared_passes, corrected_passes, corrected_failures = [], [], 0
+    for index in indices:
+        index = int(index)
+        support = np.zeros(length, dtype=bool)
+        support[true[0][index] : true[1][index]] = True
+        cycle = cyclic25_cycle((declared[0][index], declared[1][index]), index=index,
+                               spec=spec, settings=settings, length=length, seed=seed)
+        background = cycle_group(cycle, "background")
+        events = cycle_group(cycle, "event")
+        background_inside.append(
+            float((background & support).sum()) / float(background.sum())
+        )
+        event_coverage.append(
+            float((events.any(axis=0) & support).sum()) / float(support.sum())
+        )
+        declared_passes.append(int(cycle["pass_count"]))
+        try:
+            corrected_passes.append(int(cyclic25_cycle(
+                (true[0][index], true[1][index]), index=index, spec=spec,
+                settings=settings, length=length, seed=seed)["pass_count"]))
+        except (ValueError, RuntimeError):
+            corrected_failures += 1
+    return {
+        "background_inside": np.asarray(background_inside),
+        "event_group_coverage": np.asarray(event_coverage),
+        "declared_passes": declared_passes,
+        "corrected_passes": corrected_passes,
+        "corrected_failures": corrected_failures,
+    }
+
+
+def print_cycle_defect(scan, sampled, seconds):
+    """What the corpus scan found, in the four numbers the section argues from."""
+    print(f"{sampled} events, cycles rebuilt from p3_ssl.masking ({seconds:.0f} s)")
+    print(f"  background budget landing inside the true event: "
+          f"median {100 * np.median(scan['background_inside']):.1f} %, "
+          f"mean {100 * scan['background_inside'].mean():.1f} %")
+    print(f"  true support ever hidden by the event group over a whole cycle: "
+          f"median {100 * np.median(scan['event_group_coverage']):.1f} %, "
+          f"mean {100 * scan['event_group_coverage'].mean():.1f} %")
+    print(f"  passes per cycle: median {int(np.median(scan['declared_passes']))} as "
+          f"trained, {int(np.median(scan['corrected_passes']))} corrected")
+    print(f"  events for which the corrected support admits no cycle at all: "
+          f"{scan['corrected_failures']} of {sampled} "
+          f"({100 * scan['corrected_failures'] / sampled:.1f} %)")
+
+
+def print_cycle_case(label, cycle, true_support):
+    """The corpus scan's two quantities, for the single trace on screen."""
+    background = cycle_group(cycle, "background")
+    events = cycle_group(cycle, "event")
+    inside = 100 * float((background & true_support).sum()) / float(background.sum())
+    hidden = 100 * float((events.any(axis=0) & true_support).sum()) / float(true_support.sum())
+    print(f"{label:11s} {int(cycle['pass_count'])} passes · "
+          f"{inside:5.1f} % of the background budget lies inside the true event · "
+          f"event group ever hides {hidden:5.1f} % of the true support")
+
+
+def envelope_fwhm_samples(signals, *, smoothing):
+    """Full width at half maximum of each trace's smoothed analytic envelope."""
+    from scipy.ndimage import uniform_filter1d
+    from scipy.signal import hilbert
+
+    envelope = uniform_filter1d(
+        np.abs(hilbert(np.asarray(signals, dtype=np.float64), axis=1)),
+        size=smoothing, axis=1,
+    )
+    return np.asarray(
+        [np.flatnonzero(row >= 0.5 * row.max())[[0, -1]] @ [-1, 1] + 1 for row in envelope],
+        dtype=float,
+    )
+
+
+def print_support_comparison(declared, true, captured, events):
+    """The support the trainer aimed at, beside the one the data implies."""
+    print(f"over all {events:,} v5 events")
+    for label, statistic in (("median support", np.median),
+                             ("p95 support", lambda values: np.percentile(values, 95)),
+                             ("under half crop", lambda values: np.mean(values < 0.5))):
+        print(f"  {label:16s} declared {100 * statistic(declared):5.1f} %   "
+              f"true {100 * statistic(true):5.1f} %")
+    print(f"  fraction of the true support inside the declared one: "
+          f"median {np.median(captured):.3f}")
+
+
+def matched_monitor_curves(run_of, policies, seeds):
+    """The fixed-monitor masked MSE of every matched run, epoch by epoch.
+
+    Reads `matched_monitor.<split>.model.masked_mse` from each run's
+    `history.json` — the protocol that evaluates train and validation the same
+    way, so the two differ only by the split.
+    """
+    monitor = {}
+    for policy in policies:
+        histories = [
+            json.loads((run_of(policy.lower(), seed) / "history.json").read_text())
+            for seed in seeds
+        ]
+        curves = {
+            split: [[entry["matched_monitor"][split]["model"]["masked_mse"]
+                     for entry in history] for history in histories]
+            for split in ("train_eval", "validation")
+        }
+        final = {
+            split: statistics.fmean(curve[-1] for curve in rows)
+            for split, rows in curves.items()
+        }
+        monitor[policy] = {
+            "epochs": [entry["epoch"] for entry in histories[0]],
+            "train_eval": curves["train_eval"],
+            "validation": curves["validation"],
+            "final_train_eval": final["train_eval"],
+            "final_validation": final["validation"],
+            "gap_percent": 100.0 * (final["validation"] - final["train_eval"])
+            / final["train_eval"],
+        }
+        print(f"{policy:9s} final fixed-monitor masked MSE  "
+              f"train {final['train_eval']:.6f}  validation {final['validation']:.6f}  "
+              f"gap {monitor[policy]['gap_percent']:+.4f} %")
+    return monitor
+
+
+def cross_mask_cells(rows, policies):
+    """Every trained model on every evaluation regime, averaged over its seeds."""
+    cells, zero = {}, {}
+    for row in rows:
+        key = (row["training_mask_policy"], row["evaluation_mask_policy"])
+        cells.setdefault(key, []).append(row["real_validation"]["model"]["masked_mse"])
+        zero.setdefault(row["evaluation_mask_policy"], []).append(
+            row["real_validation"]["zero"]["masked_mse"]
+        )
+    cells = {
+        key: {"mean": statistics.fmean(values), "std": statistics.pstdev(values),
+              "seeds": len(values)}
+        for key, values in cells.items()
+    }
+    zero = {key: statistics.fmean(values) for key, values in zero.items()}
+    print(f"{'trained':>10} {'on P25 masks':>16} {'on CYCLIC25 masks':>19}   seeds")
+    for trained in policies:
+        print(f"{trained:>10} {cells[(trained, 'P25')]['mean']:16.4f} "
+              f"{cells[(trained, 'CYCLIC25')]['mean']:19.4f}   "
+              f"{cells[(trained, 'P25')]['seeds']}")
+    print(f"{'zero':>10} {zero['P25']:16.4f} {zero['CYCLIC25']:19.4f}   —")
+    return cells, zero
+
+
+def _support_summary(fraction, width):
+    return {
+        "median_fraction": float(np.median(fraction)),
+        "p95_fraction": float(np.percentile(fraction, 95)),
+        "fraction_under_half_crop": float(np.mean(fraction < 0.5)),
+        "median_width_samples": float(np.median(width)),
+    }
+
+
+def mask_rate_evidence(*, declared_hz, true_hz, probe, rate_ratio, declared, true,
+                       captured, subset, class_names, class_order, scan, sampled,
+                       cyclic, cycle_seed, datasets, inputs):
+    """Package the sampling-rate defect as a manifested run: metrics, provenance."""
+    metrics = {
+        "schema_version": 1,
+        "analysis": "cyclic25-event-support-sampling-rate-defect",
+        "declared_sampling_frequency_hz": declared_hz,
+        "generator_sampling_frequency_hz": true_hz,
+        "rate_determined_from_waveforms": {
+            "probe_events": int(probe["events"]),
+            "minimum_achieved_snr_db": float(probe["minimum_snr_db"]),
+            "measured_over_predicted_fwhm_median": {
+                f"{int(declared_hz)}": rate_ratio[declared_hz],
+                f"{int(true_hz)}": rate_ratio[true_hz],
+            },
+        },
+        "event_support": {
+            "events": int(len(class_names)),
+            "declared": _support_summary(*declared),
+            "true": _support_summary(*true),
+            "declared_is_subset_of_true": bool(subset),
+            "median_true_support_captured": float(np.median(captured)),
+            "per_class_median_fraction": {
+                name: {
+                    "declared": float(np.median(declared[0][class_names == name])),
+                    "true": float(np.median(true[0][class_names == name])),
+                }
+                for name in class_order
+            },
+        },
+        "cycle_consequence": {
+            "sampled_events": int(sampled),
+            "background_inside_true_event_median": float(
+                np.median(scan["background_inside"])),
+            "background_inside_true_event_mean": float(scan["background_inside"].mean()),
+            "true_support_covered_by_event_group_median": float(
+                np.median(scan["event_group_coverage"])),
+            "true_support_covered_by_event_group_mean": float(
+                scan["event_group_coverage"].mean()),
+            "median_passes_declared": int(np.median(scan["declared_passes"])),
+            "median_passes_corrected": int(np.median(scan["corrected_passes"])),
+            "corrected_cycle_failures": int(scan["corrected_failures"]),
+        },
+        "unaffected": {
+            "p25_policy": "event_mask=None, event_biased_probability=0.0",
+            "hidden_points_per_pass": 1024,
+            "real_validation_masks": (
+                "Z8RealValidationDataset derives the support from annotated "
+                "start_sample/end_sample and never reads sampling_frequency_hz"
+            ),
+        },
+    }
+    provenance = {
+        "datasets": datasets,
+        "inputs": inputs,
+        "parameters": {
+            "event_support_formula": (
+                "centre = t0_fraction * (N - 1); "
+                "[centre - 3*tau*exp(-a), centre + 3*tau*exp(+a)], tau in samples"
+            ),
+            "cyclic25": {key: cyclic[key] for key in sorted(cyclic)},
+            "seed_derivation": (
+                "42 + sample_index * 7919, as in build_cyclic25_masks_for_sample"
+            ),
+            "cycle_sample_seed": cycle_seed,
+            "cycle_sample_size": int(sampled),
+            "fwhm_probe": (
+                "300 highest achieved-SNR v5 events, Hilbert envelope, "
+                "41-sample box smoothing"
+            ),
+        },
+        "metric_definitions": {
+            "declared/true event support": (
+                "the support Z8AsymmetricSyntheticDataset builds at the config's "
+                "sampling_frequency_hz, and at the generator's 2 MHz"
+            ),
+            "background_inside_true_event": (
+                "fraction of the points CYCLIC25 hides as background, over a "
+                "complete cycle, that lie inside the true event support"
+            ),
+            "true_support_covered_by_event_group": (
+                "fraction of the true support ever hidden by the cycle's event "
+                "windows -- the completeness guarantee, measured against the "
+                "event the generator actually drew"
+            ),
+            "measured_over_predicted_fwhm": (
+                "envelope full width at half maximum in samples, divided by "
+                "1.1774 * tau * (e^-a + e^+a) * sampling_frequency_hz"
+            ),
+        },
+    }
+    return metrics, provenance
+
+
+def draw_model_view(signal, mask, *, patch_size=16, axes=None):
     """What `sample_visibility_v1` hands the encoder, on one real trace.
 
     Three rows because the encoding is three things at once: a corrupted
@@ -232,7 +550,7 @@ def draw_model_view(signal, mask, spans, *, patch_size=16, axes=None):
     hidden = np.asarray(mask, dtype=bool)
     lo, hi = 1700, 2400
     time = np.arange(lo, hi)
-    for start, end in spans:
+    for start, end in mask_spans(hidden):
         if end > lo and start < hi:
             axes[0].axvspan(max(start, lo), min(end, hi), color=HIDDEN_COLOUR, zorder=0)
     axes[0].plot(time, signal[lo:hi], color=MUTED, lw=1.0, zorder=1,
@@ -271,14 +589,16 @@ def draw_model_view(signal, mask, spans, *, patch_size=16, axes=None):
     return axes
 
 
-def draw_policies(signal, p25_spans, cyclic_spans, event_span, *, axes=None):
+def draw_policies(signal, p25_mask, cyclic_mask, event_span, *, axes=None):
     """Both training policies, same trace, same 25 % budget."""
     if axes is None:
         _, axes = plt.subplots(2, 1, figsize=(12.5, 4.6), sharex=True)
     time = np.arange(signal.size)
     panels = (
-        (axes[0], p25_spans, "P25 · targets drawn blind to the signal", P25_COLOUR),
-        (axes[1], cyclic_spans, "CYCLIC25 · targets aimed at the annotated support", CYCLIC_COLOUR),
+        (axes[0], mask_spans(np.asarray(p25_mask, dtype=bool)),
+         "P25 · targets drawn blind to the signal", P25_COLOUR),
+        (axes[1], mask_spans(np.asarray(cyclic_mask, dtype=bool)),
+         "CYCLIC25 · targets aimed at the annotated support", CYCLIC_COLOUR),
     )
     for axis, spans, title, accent in panels:
         axis.axvspan(*event_span, color=EVENT_COLOUR, zorder=0)
@@ -297,11 +617,14 @@ def draw_policies(signal, p25_spans, cyclic_spans, event_span, *, axes=None):
     return axes
 
 
-def draw_cycle(signal, pass_spans, coverage, event_span, *, axes=None):
+def draw_cycle(signal, cycle, event_span, *, axes=None):
     """The CYCLIC25 cycle for one training event: passes, then coverage."""
     if axes is None:
         _, axes = plt.subplots(1, 2, figsize=(12.5, 3.4),
                                gridspec_kw={"width_ratios": (2.4, 1.0)})
+    pass_spans = [mask_spans(mask)
+                  for mask in np.asarray(cycle["target_time_masks"], dtype=bool)]
+    coverage = np.asarray(cycle["cumulative_event_window_coverage"])
     axis = axes[0]
     axis.axvspan(*event_span, color=EVENT_COLOUR, zorder=0)
     axis.plot(np.arange(signal.size),
@@ -324,7 +647,7 @@ def draw_cycle(signal, pass_spans, coverage, event_span, *, axes=None):
     axis.tick_params(labelsize=8, colors=MUTED)
 
     passes = np.arange(1, len(coverage) + 1)
-    axes[1].plot(passes, 100 * np.asarray(coverage), marker="o", color=CYCLIC_COLOUR)
+    axes[1].plot(passes, 100 * coverage, marker="o", color=CYCLIC_COLOUR)
     axes[1].axhline(100, color=MUTED, ls="--", lw=1.0)
     axes[1].set(xlabel="pass", ylabel="% of event windows hidden",
                 title="Cumulative coverage")
@@ -368,12 +691,13 @@ def draw_packing(window_spans, lane_of, selection_counts, support_span, *, axes=
     return axes
 
 
-def draw_reconstruction(signal, outputs, spans, window, *, axes=None):
+def draw_reconstruction(signal, outputs, mask, window, *, axes=None):
     """Identical hidden samples, both trained models, one real event."""
     if axes is None:
         _, axes = plt.subplots(1, len(outputs), figsize=(12.5, 3.4), sharey=True)
     lo, hi = window
     time = np.arange(lo, hi)
+    spans = mask_spans(np.asarray(mask, dtype=bool))
     for axis, (label, values, accent, error) in zip(axes, outputs):
         for start, end in spans:
             if end > lo and start < hi:
@@ -482,13 +806,13 @@ def draw_defect_case(signal, declared_span, true_span, actual, corrected, *, axe
         (axes[0], actual, "As trained · event support from the declared 1 MHz rate"),
         (axes[1], corrected, "As it should be · event support from the true 2 MHz rate"),
     )
-    for axis, (event_spans, background_spans), title in panels:
+    for axis, cycle, title in panels:
         axis.axvspan(*true_span, color=EVENT_COLOUR, zorder=0)
         axis.axvline(declared_span[0], color=P25_COLOUR, lw=1.2, ls="--", zorder=3)
         axis.axvline(declared_span[1], color=P25_COLOUR, lw=1.2, ls="--", zorder=3)
-        for start, end in event_spans:
+        for start, end in mask_spans(cycle_group(cycle, "event", pass_index=0)):
             axis.axvspan(start, end, ymin=0.5, color=CYCLIC_COLOUR, alpha=0.85, zorder=1)
-        for start, end in background_spans:
+        for start, end in mask_spans(cycle_group(cycle, "background", pass_index=0)):
             axis.axvspan(start, end, ymin=0.5, color=BACKGROUND_COLOUR, zorder=1)
         axis.plot(time, 0.45 * signal - 2.3, color=INK, lw=0.5, zorder=2)
         axis.set_xlim(0, signal.size)
@@ -503,25 +827,27 @@ def draw_defect_case(signal, declared_span, true_span, actual, corrected, *, axe
     return axes
 
 
-def draw_defect_summary(background_in_event, event_coverage, passes, *, axes=None):
+def draw_defect_summary(scan, *, axes=None):
     """Where the aimed budget actually landed, over a sample of the corpus."""
     if axes is None:
         _, axes = plt.subplots(1, 3, figsize=(12.5, 3.2))
-    axes[0].hist(100 * np.asarray(background_in_event), bins=40, color=BACKGROUND_COLOUR,
+    axes[0].hist(100 * scan["background_inside"], bins=40, color=BACKGROUND_COLOUR,
                  edgecolor=MUTED, lw=0.4)
-    axes[0].axvline(100 * np.median(background_in_event), color=P25_COLOUR, ls="--", lw=1.4)
+    axes[0].axvline(100 * np.median(scan["background_inside"]), color=P25_COLOUR,
+                    ls="--", lw=1.4)
     axes[0].set(xlabel="% of the background budget inside the true event",
                 ylabel="events", title="'Background' that is event")
 
-    axes[1].hist(100 * np.asarray(event_coverage), bins=40, color=CYCLIC_COLOUR,
+    axes[1].hist(100 * scan["event_group_coverage"], bins=40, color=CYCLIC_COLOUR,
                  edgecolor=MUTED, lw=0.4)
-    axes[1].axvline(100 * np.median(event_coverage), color=P25_COLOUR, ls="--", lw=1.4)
+    axes[1].axvline(100 * np.median(scan["event_group_coverage"]), color=P25_COLOUR,
+                    ls="--", lw=1.4)
     axes[1].axvline(100, color="#111827", ls=":", lw=1.2)
     axes[1].set(xlabel="% of the true support the event group ever hides",
                 title="The completeness guarantee")
 
-    declared, corrected = passes
-    axes[2].hist([declared, corrected], bins=np.arange(1.5, 17.5, 1.0),
+    axes[2].hist([scan["declared_passes"], scan["corrected_passes"]],
+                 bins=np.arange(1.5, 17.5, 1.0),
                  color=[P25_COLOUR, CYCLIC_COLOUR], label=["as trained", "corrected"])
     axes[2].set(xlabel="passes needed for a complete cycle", title="Cycle length")
     axes[2].legend(frameon=False, fontsize=8)
@@ -531,7 +857,140 @@ def draw_defect_summary(background_in_event, event_coverage, passes, *, axes=Non
 
 
 # --- window_alignment ---
-"""Figure helpers for the window-alignment exploration."""
+"""Figures, tables and bookkeeping for the window-alignment exploration.
+
+Nothing here measures anything. The sweep's numbers arrive already computed,
+from `internship_workspace.chain_data` and the shipped coverage and domain
+functions; what lives here is the work the argument does not need on screen --
+assembling one sweep row, formatting two tables, and the block-RMS arithmetic
+behind the realism control.
+"""
+
+
+def window_sweep_row(window, real, basis, chain, domain, class_order):
+    """One row of the sweep: everything a window decides, already measured."""
+    terminal = chain["asymmetry_5d"]
+    return {
+        "window": int(window),
+        "descriptor_dimensions": int(real.features.shape[1]),
+        "explained_variance_16": basis.explained_variance,
+        "coverage": {c: terminal[c]["real_within_radius_fraction"] for c in class_order},
+        "nn_median": {c: terminal[c]["real_to_synthetic_nn_median"] for c in class_order},
+        "radius": {c: terminal[c]["synthetic_self_nn_radius"] for c in class_order},
+        "domain_auc": {
+            c: float(domain[c]["domain_classifier_auc_mean"]) for c in class_order
+        },
+        "local_opposite_fraction": {
+            c: float(domain[c]["local_opposite_domain_fraction"]) for c in class_order
+        },
+        "chain": {
+            label: {c: chain[label][c]["real_within_radius_fraction"] for c in class_order}
+            for label in chain
+        },
+    }
+
+
+def print_sweep_line(row, class_order, seconds):
+    """The running line printed as each window finishes."""
+    print(f"window {row['window']:5d}  {row['descriptor_dimensions']:3d}-D  "
+          f"EV16 {row['explained_variance_16']:.4f}  coverage "
+          + " ".join(f"{c} {100 * row['coverage'][c]:5.1f}%" for c in class_order)
+          + f"   ({seconds:.0f} s)")
+
+
+def print_window_sweep(sweep, class_order):
+    """Coverage beside domain AUC, because neither is readable alone."""
+    print(f"{'window':>7} {'dims':>5} {'EV16':>7}   "
+          + "   ".join(f"{c:>18}" for c in class_order))
+    for row in sweep:
+        cells = "   ".join(
+            f"{100 * row['coverage'][c]:5.1f}% / {row['domain_auc'][c]:.3f}"
+            for c in class_order
+        )
+        print(f"{row['window']:>7} {row['descriptor_dimensions']:>5} "
+              f"{row['explained_variance_16']:>7.4f}   {cells}")
+    print("\ncells are coverage / domain AUC; AUC nearer 0.5 means real and synthetic "
+          "are harder to tell apart")
+
+
+def print_support_containment(support_widths, windows):
+    """How much of the annotated support each candidate window would hold."""
+    print("fraction of annotated supports wider than the window")
+    for window in windows:
+        print(f"  {window:5d} : {100 * np.mean(support_widths > window):5.1f} %")
+    print(f"\nsupport width: median {np.median(support_widths):.0f}, "
+          f"p90 {np.percentile(support_widths, 90):.0f}, max {support_widths.max():.0f}")
+
+
+def block_energy_profile(traces, *, block):
+    """Median RMS per block of samples, over a population of traces."""
+    values = np.asarray(traces, dtype=np.float64)
+    blocks = values.reshape(len(values), -1, block)
+    return np.median(np.sqrt(np.mean(np.square(blocks), axis=2)), axis=0)
+
+
+def core_context_ratio(traces, core):
+    """Median RMS inside the descriptor window over RMS outside it."""
+    values = np.asarray(traces, dtype=np.float64)
+    inside = np.sqrt(np.mean(np.square(values[:, core]), axis=1))
+    context = np.concatenate((values[:, : core.start], values[:, core.stop :]), axis=1)
+    outside = np.sqrt(np.mean(np.square(context), axis=1))
+    return float(np.median(inside / outside))
+
+
+def print_core_context(ratios, class_order):
+    """The one number the energy profiles are read for."""
+    print(f"{'class':>6} {'core/context real':>19} {'synthetic':>10}")
+    for class_name in class_order:
+        real_ratio, synthetic_ratio = ratios[class_name]
+        print(f"{class_name:>6} {real_ratio:19.2f} {synthetic_ratio:10.2f}")
+
+
+def window_evidence(sweep, *, windows, quantile, seed, bands, envelope_bins,
+                    band_hz, reproduction, datasets, inputs):
+    """Package the sweep as a manifested run: metrics and provenance."""
+    metrics = {
+        "schema_version": 1,
+        "analysis": "morphology-descriptor-window-sweep",
+        "windows": list(windows),
+        "quantile": quantile,
+        "seed": seed,
+        "descriptor": (
+            "shipped window-invariant morphology_features: fixed 37-band grid on "
+            "7-80 kHz, envelope smoothing in bin units, the identity at 1024"
+        ),
+        "reproduces": reproduction,
+        "sweep": sweep,
+    }
+    provenance = {
+        "datasets": datasets,
+        "inputs": inputs,
+        "parameters": {
+            "windows": list(windows),
+            "band_hz": list(band_hz),
+            "spectral_bands": int(bands),
+            "envelope_bins": int(envelope_bins),
+            "components": 16,
+            "quantile": quantile,
+            "seed": seed,
+            "basis": "one PCA fitted on every condition pooled, per window",
+            "sample": "one balanced synthetic draw per class, shared by conditions",
+        },
+        "metric_definitions": {
+            "coverage": (
+                "real fraction below that condition's synthetic self-nearest-"
+                "neighbour 80th percentile"
+            ),
+            "domain_auc": (
+                "five-fold cross-validated logistic separation of real from "
+                "synthetic in the 16-component basis; 0.5 is indistinguishable"
+            ),
+            "nn_median": (
+                "median euclidean distance from a real event to its nearest synthetic"
+            ),
+        },
+    }
+    return metrics, provenance
 
 
 def draw_window_sweep(sweep, class_order, class_colour, *, axes=None):
@@ -573,9 +1032,9 @@ def draw_descriptor_widths(descriptor_shapes, *, ax=None):
         _, ax = plt.subplots(figsize=(6.4, 3.0))
     windows = [row["window"] for row in descriptor_shapes]
     ax.plot(windows, [row["shipped"] for row in descriptor_shapes], marker="o",
-            color="#dc2626", label="shipped descriptor")
+            color="#dc2626", label="length-dependent descriptor")
     ax.plot(windows, [row["invariant"] for row in descriptor_shapes], marker="s",
-            color="#0f766e", label="fixed 37-band grid")
+            color="#0f766e", label="fixed 37-band grid · shipped")
     ax.set(xlabel="descriptor window (samples)", ylabel="dimensions",
            title="A descriptor whose size depends on its window is not one descriptor")
     ax.set_xscale("log", base=2)
@@ -585,8 +1044,230 @@ def draw_descriptor_widths(descriptor_shapes, *, ax=None):
     return ax
 
 
+def draw_energy_profiles(profiles, counts, class_order, class_colour, *, block, core,
+                         axes=None):
+    """Where each population puts its energy across the widest window."""
+    if axes is None:
+        figure, axes = plt.subplots(1, 3, figsize=(13, 3.2), sharex=True)
+    else:
+        figure = axes[0].figure
+    length = block * len(next(iter(profiles.values()))[0])
+    positions = np.arange(length // block) * block + block / 2
+    for axis, class_name in zip(axes, class_order):
+        real_profile, synthetic_profile = profiles[class_name]
+        axis.plot(positions, real_profile, marker="o", color="#334155", label="real")
+        axis.plot(positions, synthetic_profile, marker="s",
+                  color=class_colour[class_name], label="synthetic")
+        axis.axvspan(core.start, core.stop, color="#94a3b8", alpha=0.25)
+        axis.set(title=f"{class_name} · n = {counts[class_name]}",
+                 xlabel=f"sample within the {length} window")
+        axis.spines[["top", "right"]].set_visible(False)
+    axes[0].set_ylabel("median block RMS")
+    axes[0].legend(frameon=False, fontsize=8)
+    figure.suptitle(
+        f"Shaded band is the {core.stop - core.start}-sample window the descriptor reads",
+        y=1.04, fontsize=9,
+    )
+    figure.tight_layout()
+    return axes
+
+
 # --- quantile_basis ---
-"""Figure helpers for the quantile-and-basis alignment exploration."""
+"""Figures, tables and plumbing for the quantile-and-basis alignment exploration.
+
+The measurements all come from the shipped functions -- `support_coverage`,
+`domain_metrics`, `chain_data`'s pooled basis. Two helpers here are exceptions
+worth naming: `domain_reference_draw` rebuilds the reference sample
+`domain_metrics` draws internally, so that the shipped coverage function can
+score the same cloud at another quantile, and `distance_contrast` restates the
+published contrast definition so it can be extended past sixteen components.
+Both are gated in the section against the published run before anything is read
+from them.
+"""
+
+
+def coverage_row(measured, class_order):
+    """One condition's coverage and radius per class, ready to plot or emit."""
+    return {
+        class_name: {
+            "coverage": measured[class_name]["real_within_radius_fraction"],
+            "radius": measured[class_name]["synthetic_self_nn_radius"],
+        }
+        for class_name in class_order
+    }
+
+
+def domain_reference_draw(real_labels, synthetic_labels, *, seed, class_order):
+    """The synthetic reference `domain_metrics` samples internally, rebuilt.
+
+    Only the draw is reproduced, so that `support_coverage` can be handed the
+    same cloud at a different quantile. The real draw is consumed but discarded
+    because it only advances the generator.
+    """
+    real_values = np.asarray(real_labels).astype(str)
+    synthetic_values = np.asarray(synthetic_labels).astype(str)
+    draw = {}
+    for class_name in class_order:
+        real_index = np.flatnonzero(real_values == class_name)
+        synthetic_index = np.flatnonzero(synthetic_values == class_name)
+        count = min(real_index.size, synthetic_index.size)
+        generator = np.random.default_rng(seed + class_order.index(class_name))
+        generator.choice(real_index, size=count, replace=False)
+        draw[class_name] = generator.choice(synthetic_index, size=count, replace=False)
+    return draw
+
+
+def distance_contrast(scores, labels, *, dimensions, class_order, sample=2000, seed):
+    """std/mean of pairwise distances, the published contrast definition."""
+    from scipy.spatial.distance import pdist
+
+    output = {}
+    for class_name in class_order:
+        rows = np.asarray(scores)[np.asarray(labels) == class_name][:, :dimensions]
+        generator = np.random.default_rng(seed + class_order.index(class_name))
+        if rows.shape[0] > sample:
+            rows = rows[generator.choice(rows.shape[0], size=sample, replace=False)]
+        distances = pdist(rows)
+        output[class_name] = float(distances.std() / distances.mean())
+    return output
+
+
+def print_published_gains(published_runs, quantiles, class_order):
+    """What each generator step is worth, at each published quantile."""
+    print(f"{'step':>34} " + "  ".join(f"{c:>16}" for c in class_order))
+    for step in ("white_noise_4d -> real_noise_4d", "real_noise_4d -> asymmetry_5d"):
+        for quantile in quantiles:
+            gains = published_runs[quantile]["gains_percentage_points"][step]
+            print(f"{step + f'  q{quantile:.2f}':>34} "
+                  + "  ".join(f"{gains[c]:+15.2f}pp" for c in class_order))
+        print()
+
+
+def print_crossing(published_runs, quantiles, crossing, above_bar, above_self, class_order):
+    """Where the deck's "every class above 80 %" sentence is arithmetically true."""
+    print("terminal condition · margin of coverage over the quantile itself")
+    print(f"{'q':>6} " + "  ".join(f"{c:>16}" for c in class_order))
+    for quantile in quantiles[::-1]:
+        row = published_runs[quantile]["conditions"]["asymmetry_5d"]["classes"]
+        print(f"{quantile:>6.2f} " + "  ".join(
+            f"{100 * row[c]['real_within_radius_fraction']:6.2f}% "
+            f"({100 * (row[c]['real_within_radius_fraction'] - quantile):+5.1f})"
+            for c in class_order))
+    below = round(above_bar - 0.01, 2)
+    above = round(above_self + 0.01, 2)
+    print(f"\nevery class stays above 80 % for q >= {above_bar:.2f}; at q = {below:.2f} "
+          f"the 4 µm class falls to {100 * crossing[below]['4um']:.1f} %")
+    print(f"every class stays above its own quantile for q <= {above_self:.2f}; at q = "
+          f"{above:.2f} the 10 µm class falls "
+          f"{100 * (above - crossing[above]['10um']):.1f} points short of the bar")
+    print(f"the sentence therefore holds only for {above_bar:.2f} <= q <= {above_self:.2f}")
+
+
+def print_reference_density(density, class_order):
+    """The two populations the radius and the queries are drawn from."""
+    print(f"{'class':>6} {'synthetic cloud':>16} {'reference draw':>15} "
+          f"{'real events':>12} {'density ratio':>14}")
+    for class_name in class_order:
+        row = density[class_name]
+        print(f"{class_name:>6} {row['synthetic_population']:>16d} "
+              f"{row['reference_draw']:>15d} {row['real']:>12d} "
+              f"{row['density_ratio']:>13.1f}×")
+
+
+def print_dimension_quantiles(published_sweep, recomputed, class_order):
+    """The published q95 sweep beside the same sweep on the chain's q80."""
+    print(f"{'d':>3} " + "  ".join(f"{c + ' q95':>12}" for c in class_order)
+          + "  " + "  ".join(f"{c + ' q80':>12}" for c in class_order) + "     gap (pp)")
+    for entry in published_sweep:
+        dimensions = entry["dimensions"]
+        print(f"{dimensions:>3} "
+              + "  ".join(f"{100 * entry['coverage'][c]:11.1f}%" for c in class_order)
+              + "  " + "  ".join(
+                  f"{100 * recomputed[dimensions][c]:11.1f}%" for c in class_order)
+              + "   " + " ".join(
+                  f"{100 * (entry['coverage'][c] - recomputed[dimensions][c]):5.1f}"
+                  for c in class_order))
+
+
+def quantile_basis_evidence(*, reproduces, quantile_sweep, quantile_grid, conditions,
+                            class_order, violations, sentence_holds, density, control,
+                            angles, variance, neighbour, basis_coverage, sweep_at_q80,
+                            extended, contrast_curve, contrast_grid, contrast_measured,
+                            published_extrapolation, exponent, seeds, datasets, inputs):
+    """Package the alignment measurements as a manifested run."""
+    metrics = {
+        "schema_version": 1,
+        "analysis": "z8-coverage-quantile-and-basis-alignment",
+        "reproduces": reproduces,
+        "quantile_sweep": {
+            f"{quantile:.2f}": {
+                label: {c: quantile_sweep[quantile][label][c] for c in class_order}
+                for label in conditions
+            }
+            for quantile in quantile_grid
+        },
+        "condition_ordering_violations": len(violations),
+        "self_coverage_sentence_holds_between": list(sentence_holds),
+        "reference_density": density,
+        "self_coverage_control_q80_asymmetry_5d": control,
+        "basis_divergence": {
+            "principal_angles_degrees": np.sort(angles).tolist(),
+            "mean_squared_cosine": float(np.mean(np.cos(np.radians(angles)) ** 2)),
+            "explained_variance": {
+                name: {"sixteen": sixteen, "pc1_pc2": plane}
+                for name, (sixteen, plane) in variance.items()
+            },
+            "nearest_neighbour": {
+                c: {k: v for k, v in neighbour[c].items() if not isinstance(v, np.ndarray)}
+                for c in class_order
+            },
+            "coverage_q80_per_basis": basis_coverage,
+        },
+        "dimension_sweep_at_q80": {str(d): row for d, row in sweep_at_q80.items()},
+        "dimension_sweep_extended": {str(d): row for d, row in extended.items()},
+        "distance_contrast": {
+            "per_dimension": {str(d): contrast_curve[d] for d in contrast_grid},
+            "class_mean_at_101": contrast_measured[-1],
+            "published_sqrt_d_extrapolation": published_extrapolation,
+            "measured_decay_exponent_16_to_101": float(exponent),
+        },
+    }
+    provenance = {
+        "datasets": datasets,
+        "inputs": inputs,
+        "parameters": {
+            "quantile_grid": list(quantile_grid),
+            "chain_seed": seeds["chain"],
+            "intro_seed": seeds["intro"],
+            "dimension_sweep_seed": seeds["sweep"],
+            "window": 1024,
+            "synthetic_core_slice": [1536, 2560],
+            "components": {"chain": 16, "intro": 16, "extended": 101},
+            "real_population": "development train+val, sealed test never read",
+        },
+        "metric_definitions": {
+            "coverage": (
+                "fraction of real events whose nearest synthetic neighbour in the full "
+                "synthetic class population lies within that condition's synthetic "
+                "self-nearest-neighbour quantile radius, the radius being taken over a "
+                "reference draw of one synthetic event per real event"),
+            "self_coverage_control": (
+                "the same radius applied to synthetic events held out of the reference "
+                "draw, each scored against its nearest other synthetic event of the same "
+                "class in the full population, and to real events scored against the "
+                "thinned reference draw instead of the full cloud"),
+            "principal_angles": (
+                "angles between the 16-dimensional descriptor subspaces the two "
+                "projections read, standardisation included"),
+            "same_nearest_fraction": (
+                "fraction of real events whose nearest synthetic event is the same event "
+                "in both bases"),
+            "distance_contrast": (
+                "std/mean of pairwise synthetic distances at d components, the published "
+                "definition, extended to the full 101-component rotation"),
+        },
+    }
+    return metrics, provenance
 
 
 def draw_quantile_curve(sweep, quantiles, conditions, class_order, class_colour,
@@ -788,47 +1469,40 @@ def draw_contrast(grid, measured, predicted, published_extrapolation, *, ax=None
 # %% [markdown]
 # ## Masked reconstruction · training a model with no labels
 #
-# Everything up to here has been about the *simulator*: whether its cloud
-# covers the real one, whether a regenerated event can find its parent. This
-# section is about the *model* the simulator exists to train, and about the one
-# design choice that separates two candidate training procedures.
+# Everything up to here has been about the *simulator*: whether its cloud covers
+# the real one, whether a regenerated event can find its parent. This section is
+# about the *model* the simulator exists to train.
 #
-# There are roughly two thousand annotated real events. That is far too few to
-# train a representation, and the annotation is the very thing we would like
-# not to depend on. **Self-supervised learning** (SSL) removes the label from
-# the problem: part of the input is hidden, the model is asked to predict it,
-# and the error on the hidden part is the loss. Nobody has to say what the
-# signal *is*; the signal supervises itself. The deliverable at the end is the
-# encoder, not the reconstruction — the decoder is thrown away.
+# **The problem.** There are roughly two thousand annotated real events. That is
+# far too few to train a representation, and the annotation is the very thing we
+# would like not to depend on. **Self-supervised learning** (SSL) removes the
+# label from the problem: part of the input is hidden, the model is asked to
+# predict it, and the error on the hidden part is the loss. Nobody has to say
+# what the signal *is*; the signal supervises itself. The deliverable at the end
+# is the encoder, not the reconstruction — the decoder is thrown away.
 #
-# The question this section settles is not *whether* to mask, but **where**.
-# Two policies were trained under identical conditions and compared:
+# That leaves one design choice undecided, and it is the choice this section is
+# about: not *whether* to mask, but **where**. Two policies were trained under
+# identical conditions:
 #
 # - **P25** hides a quarter of the trace in short patches drawn blind to the
 #   signal;
-# - **CYCLIC25** hides the same quarter, but schedules wide windows aimed at
-#   the annotated event and balances them against background.
+# - **CYCLIC25** hides the same quarter, but schedules wide windows aimed at the
+#   annotated event and balances them against background.
 #
 # The section reproduces that comparison from the shipped code and the
 # manifested runs, and then measures a defect in how CYCLIC25's "event" was
 # defined — one that no run owns and that the deck does not mention.
 
 # %%
-import hashlib  # noqa: E402
-import statistics  # noqa: E402
-from pathlib import Path  # noqa: E402
-
+from internship_workspace.z8_coverage import read_rows  # noqa: E402
 from p3_ssl.bead_ssl import make_model  # noqa: E402
 from p3_ssl.bead_ssl_v2 import load_bead_ssl_v2_config  # noqa: E402
 from p3_ssl.masking import (  # noqa: E402
     PatchSpec,
-    build_balanced_event_mask_cycle,
     build_patch_aligned_isolated_masks,
     mask_spans,
 )
-from particles2snr.z8_asymmetry_generation import clean_waveforms  # noqa: E402
-from scipy.ndimage import uniform_filter1d  # noqa: E402
-from scipy.signal import hilbert  # noqa: E402
 
 SSL_ROOT = workspace.root / "unsupervised-learning-flow-cytometry"
 SSL_CONFIG = SSL_ROOT / "configs/bead_ssl_z8_v5_v2.yaml"
@@ -838,6 +1512,7 @@ INPUT_LENGTH = 4096
 
 
 def matched_run(policy, seed):
+    """The ten runs the comparison rests on: two policies × five seeds."""
     return SSL_RUNS / f"bead-ssl-v2-{policy}-full-s{seed}-e30-matched-r1"
 
 
@@ -861,25 +1536,14 @@ print(f"  mask encoding {config['model']['mask_encoding']}")
 # ### The objective, stated precisely
 #
 # A quarter of the 4,096 samples is hidden — **1,024 points** — and the loss is
-# read only there. The visible samples cost nothing whether they are
-# reproduced or not, so the model cannot win by copying its input.
+# read only there. The visible samples cost nothing whether they are reproduced
+# or not, so the model cannot win by copying its input.
 #
 # The loss *family* in the config is a composite: a signal term, a derivative
 # term and an energy term, the latter two robustified with a pseudo-Huber of
 # δ = 1 (a loss that is quadratic near zero and linear far from it, so a few
-# large residuals cannot dominate). The **selected cell is B0**, and B0 sets
-# both robust weights to zero. So the objective that actually trained these
-# models is plain masked mean squared error, and saying "Huber loss" would
-# overstate it. Worth stating explicitly, because the config file reads as
-# though a robust loss were in use.
-#
-# `sample_visibility_v1` is the second piece that has to be right. A hidden
-# sample is replaced by zero — but a genuine zero crossing is also zero, and
-# the model must not confuse the two. So the mask is handed to the network as
-# an explicit channel: a learned embedding of the per-sample visibility pattern
-# is added to every token. This also lets a masking window sit off the token
-# grid, which matters below, since CYCLIC25's windows stride 8 while tokens
-# stride 16.
+# large residuals cannot dominate). The **selected cell is B0**, and B0 sets both
+# robust weights to zero.
 
 # %%
 for cell, weights in config["loss"]["cells"].items():
@@ -889,6 +1553,18 @@ for cell, weights in config["loss"]["cells"].items():
 print(f"\nhuber_delta {config['loss']['huber_delta']} applies to the derivative and "
       "energy terms only; under B0 both carry weight 0, so the trained objective "
       "is masked MSE on the hidden samples")
+
+# %% [markdown]
+# So the objective that actually trained these models is plain masked mean
+# squared error, and saying "Huber loss" would overstate it. Worth stating
+# explicitly, because the config file reads as though a robust loss were in use.
+#
+# `sample_visibility_v1` is the second piece that has to be right. A hidden
+# sample is replaced by zero — but a genuine zero crossing is also zero, and the
+# model must not confuse the two. So the mask is handed to the network as an
+# explicit channel: a learned embedding of the per-sample visibility pattern is
+# added to every token. This also lets a masking window sit off the token grid,
+# which matters below, since CYCLIC25's windows stride 8 while tokens stride 16.
 
 # %%
 p25_examples = np.load(
@@ -900,28 +1576,27 @@ cyclic_examples = np.load(
 example_index = 0
 example_signal = p25_examples["signal"][example_index]
 example_mask = p25_examples["mask"][example_index].astype(bool)
-example_spans = mask_spans(example_mask)
 print(f"real validation event {p25_examples['sample_id'][example_index]} · "
       f"{int(example_mask.sum())} of {example_mask.size} samples hidden "
       f"({100 * example_mask.mean():.0f} %)")
-draw_model_view(example_signal, example_mask, example_spans)
+draw_model_view(example_signal, example_mask)
 
 # %% [markdown]
 # ### Why the placement of the hole is a scientific choice
 #
-# If a trace were uniformly informative, where you hide would not matter. It is
-# not. The simulator knows exactly where each event sits, because it put it
-# there: the event is centred at `t0_fraction × (N − 1)` and extends ±3τ,
-# stretched by the asymmetry `a` on each side. Measured with the training
-# dataset's own formula over all 47,980 v5 events, that support is a minority
-# of the crop.
+# **The problem.** If a trace were uniformly informative, where you hide would
+# not matter. It is not. The simulator knows exactly where each event sits,
+# because it put it there: the event is centred at `t0_fraction × (N − 1)` and
+# extends ±3τ, stretched by the asymmetry `a` on each side.
+#
+# **The process.** That support is rebuilt below with the training dataset's own
+# formula, over all 47,980 v5 events, and measured against the crop it lives in.
 
 # %%
 V5_KEY = ("particles2snr-fbase-z8-cholesky-physicalcorr-effective-snr-"
           "synthetic-events@v5")
 v5_root = dataset_root(V5_KEY)
-with (v5_root / "events.csv").open(newline="", encoding="utf-8") as handle:
-    v5_rows = list(csv.DictReader(handle))
+v5_rows = read_rows(v5_root / "events.csv")
 if any(row["noise_source_split"] == "test" for row in v5_rows):
     raise PermissionError("sealed test rows are forbidden")
 
@@ -929,7 +1604,6 @@ v5_tau_ms = np.asarray([float(row["tau_ms"]) for row in v5_rows])
 v5_t0 = np.asarray([float(row["t0_fraction"]) for row in v5_rows])
 v5_asymmetry = np.asarray([float(row["waveform_asymmetry"]) for row in v5_rows])
 v5_class = np.asarray([row["class_name"] for row in v5_rows])
-
 DECLARED_HZ = float(config["data"]["sampling_frequency_hz"])
 
 
@@ -957,43 +1631,45 @@ assert round(100 * float(np.mean(declared_fraction < 0.5)), 1) == 99.1
 print("\nreproduces the deck's SSL-bridge page exactly (22.1 % / 38.9 % / 99.1 %)")
 
 # %% [markdown]
-# So roughly four fifths of every training example is background. A mask drawn
-# uniformly spends four fifths of its budget there. That is the argument for
-# aiming — and the hypothesis the comparison below is meant to test.
+# **The conclusion.** Roughly four fifths of every training example is
+# background. A mask drawn uniformly spends four fifths of its budget there.
+# That is the argument for aiming — and the hypothesis the comparison below is
+# meant to test.
 #
-# **Hold on to the 22.1 %.** It is measured correctly here, in the sense that
-# it is exactly what the training code computed. The last part of this section
-# shows it is not what the data says.
-
-# %% [markdown]
+# **What it leaves open. Hold on to the 22.1 %.** It is measured correctly here,
+# in the sense that it is exactly what the training code computed. The last part
+# of this section shows it is not what the data says.
+#
 # ### The two policies, on one trace, at one budget
 #
-# Both masks are rebuilt here from the shipped builders in `p3_ssl.masking`,
-# with the production `cyclic25` parameters and the runs' seed. Nothing about
-# the geometry is drawn by hand.
+# **The problem.** Two aiming strategies cannot be compared on their loss values
+# until it is clear what each one actually hides. **The process:** both masks are
+# rebuilt from the shipped builders in `p3_ssl.masking`, with the production
+# `cyclic25` parameters and the runs' seed. Nothing about the geometry is drawn
+# by hand.
 #
 # - **P25** — `build_patch_aligned_isolated_masks` picks whole 16-sample tokens
-#   at random and forbids two selected tokens from touching. With 256 tokens
-#   and a 25 % ratio that is 64 selections, and the isolation rule makes the
-#   geometry deterministic: 64 runs of exactly 16 samples, whatever the seed.
+#   at random and forbids two selected tokens from touching. With 256 tokens and
+#   a 25 % ratio that is 64 selections, and the isolation rule makes the geometry
+#   deterministic: 64 runs of exactly 16 samples, whatever the seed.
 # - **CYCLIC25** — `build_balanced_event_mask_cycle` works on a finer grid
-#   (16-sample windows every 8 samples), takes 32 windows intersecting the
-#   event and 32 background windows per pass, and requires that windows
-#   selected within one pass be mutually disjoint. Adjacent event windows merge
-#   into long contiguous runs.
+#   (16-sample windows every 8 samples), takes 32 windows intersecting the event
+#   and 32 background windows per pass, and requires that windows selected within
+#   one pass be mutually disjoint. Adjacent event windows merge into long
+#   contiguous runs.
 #
 # The deck draws this on a real validation trace with an *idealised* 512-sample
 # support rather than that event's own annotation, so the two policies can be
-# compared on identical geometry. Reproduced exactly here, including that
-# choice, so the published numbers are checkable.
+# compared on identical geometry. Reproduced exactly here, including that choice,
+# so the published numbers are checkable.
 
 # %%
-DECK_EVENT_START, DECK_EVENT_WIDTH = 1792, 512
+DECK_EVENT = (1792, 2304)  # the deck's idealised 512-sample support
 DECK_SEED = 42
 CYCLIC = config["masking"]["cyclic25"]
-
-deck_event = np.zeros(INPUT_LENGTH, dtype=bool)
-deck_event[DECK_EVENT_START : DECK_EVENT_START + DECK_EVENT_WIDTH] = True
+cyclic_spec = PatchSpec(
+    INPUT_LENGTH, int(CYCLIC["candidate_size"]), int(CYCLIC["candidate_stride"])
+)
 
 p25_mask = build_patch_aligned_isolated_masks(
     example_signal.astype(np.float64),
@@ -1001,65 +1677,43 @@ p25_mask = build_patch_aligned_isolated_masks(
     np.random.default_rng(DECK_SEED),
     mask_ratio=float(config["masking"]["mask_ratio"]),
 )["target_time_mask"]
+deck_cycle = cyclic25_cycle(DECK_EVENT, index=0, spec=cyclic_spec, settings=CYCLIC,
+                            length=INPUT_LENGTH, seed=DECK_SEED)
+cyclic_mask = cycle_group(deck_cycle, pass_index=0)
 
-cyclic_spec = PatchSpec(
-    INPUT_LENGTH, int(CYCLIC["candidate_size"]), int(CYCLIC["candidate_stride"])
-)
-deck_cycle = build_balanced_event_mask_cycle(
-    deck_event,
-    cyclic_spec,
-    np.random.default_rng(DECK_SEED),
-    event_windows_per_pass=int(CYCLIC["event_windows_per_pass"]),
-    background_windows_per_pass=int(CYCLIC["background_windows_per_pass"]),
-    require_context_each_side=bool(CYCLIC["require_context_each_side"]),
-)
-cyclic_mask = np.asarray(deck_cycle["target_time_masks"], dtype=bool)[0]
-
-
-def geometry(mask):
-    spans = mask_spans(mask)
-    lengths = [end - start for start, end in spans]
-    return {"hidden": int(mask.sum()), "spans": len(spans),
-            "longest": int(max(lengths)), "median": int(np.median(lengths))}
-
-
-published_geometry = {"P25": {"hidden": 1024, "spans": 64, "longest": 16, "median": 16},
-                      "CYCLIC25": {"hidden": 1024, "spans": 27, "longest": 560, "median": 16}}
-measured_geometry = {"P25": geometry(p25_mask), "CYCLIC25": geometry(cyclic_mask)}
-for policy, values in measured_geometry.items():
-    print(f"{policy:9s} {values['hidden']} hidden  {values['spans']:3d} runs  "
-          f"longest {values['longest']:3d}  median run {values['median']}")
-assert measured_geometry == published_geometry, measured_geometry
-print("\nreproduces the deck's published mask geometry exactly")
-print(f"budget check: both hide {measured_geometry['P25']['hidden']} of {INPUT_LENGTH} "
-      f"samples — matched by construction, not by tuning")
+measured_geometry = {"P25": mask_geometry(p25_mask), "CYCLIC25": mask_geometry(cyclic_mask)}
+print_mask_geometry(measured_geometry, INPUT_LENGTH)
+assert measured_geometry == {
+    "P25": {"hidden": 1024, "spans": 64, "longest": 16, "median": 16},
+    "CYCLIC25": {"hidden": 1024, "spans": 27, "longest": 560, "median": 16},
+}, measured_geometry
+print("reproduces the deck's published mask geometry exactly")
 
 # %%
-draw_policies(example_signal, mask_spans(p25_mask), mask_spans(cyclic_mask),
-              (DECK_EVENT_START, DECK_EVENT_START + DECK_EVENT_WIDTH))
+draw_policies(example_signal, p25_mask, cyclic_mask, DECK_EVENT)
 
 # %% [markdown]
-# Same 1,024 points, two different problems. P25's longest hole is 16 samples
-# with visible signal on both sides — that is interpolation. CYCLIC25's longest
-# hole is 560 samples covering the whole event — that is reconstruction from
-# context. Their raw losses are therefore **not comparable**, which is the
-# reason the comparison below has to be done by crossing the masks.
+# **The conclusion.** Same 1,024 points, two different problems. P25's longest
+# hole is 16 samples with visible signal on both sides — that is interpolation.
+# CYCLIC25's longest hole is 560 samples covering the whole event — that is
+# reconstruction from context. **What follows from it:** their raw losses are not
+# comparable, so a comparison that reads one loss against the other decides
+# nothing. The comparison has to cross the masks, which is what the third part
+# below does.
 #
 # ### CYCLIC25 is a schedule, not a mask
 #
-# One CYCLIC25 pass hides only part of the event. The builder produces a
-# *cycle* of passes in which every candidate window intersecting the event is
-# hidden at least once, while each individual pass keeps the same 25 % budget
-# and stays internally disjoint. Training walks the cycle, so an event is seen
-# many times through different holes.
-#
-# Here is the actual cycle of the matched CYCLIC25 run for its deck sample,
-# rebuilt with the run's own seed derivation (`seed + index × 7919`).
+# **The problem.** One CYCLIC25 pass hides only part of the event, so a single
+# pass cannot be what the policy promises. **The process:** the builder produces
+# a *cycle* of passes in which every candidate window intersecting the event is
+# hidden at least once, while each individual pass keeps the same 25 % budget and
+# stays internally disjoint. Training walks the cycle, so an event is seen many
+# times through different holes. Below is the actual cycle of the matched
+# CYCLIC25 run for its deck sample, rebuilt with the run's own seed derivation
+# (`seed + index × 7919`).
 
 # %%
-SAMPLE_SEED_STRIDE = 7919
 TRAINING_SAMPLE = "syn-2um-3643708b867724bd"
-
 training_index = next(
     i for i, row in enumerate(v5_rows) if row["sample_id"] == TRAINING_SAMPLE
 )
@@ -1068,60 +1722,48 @@ training_signal = np.asarray(
     dtype=np.float64,
 )
 training_signal = (training_signal - training_signal.mean()) / training_signal.std()
-training_event = np.zeros(INPUT_LENGTH, dtype=bool)
-training_event[declared_start[training_index] : declared_end[training_index]] = True
+training_support = (declared_start[training_index], declared_end[training_index])
+training_cycle = cyclic25_cycle(training_support, index=training_index, spec=cyclic_spec,
+                                settings=CYCLIC, length=INPUT_LENGTH, seed=DECK_SEED)
 
-training_cycle = build_balanced_event_mask_cycle(
-    training_event,
-    cyclic_spec,
-    np.random.default_rng(DECK_SEED + training_index * SAMPLE_SEED_STRIDE),
-    event_windows_per_pass=int(CYCLIC["event_windows_per_pass"]),
-    background_windows_per_pass=int(CYCLIC["background_windows_per_pass"]),
-    require_context_each_side=bool(CYCLIC["require_context_each_side"]),
-)
-training_masks = np.asarray(training_cycle["target_time_masks"], dtype=bool)
-training_coverage = np.asarray(training_cycle["cumulative_event_window_coverage"])
 print(f"{TRAINING_SAMPLE} · declared support "
-      f"[{declared_start[training_index]}, {declared_end[training_index]}) = "
-      f"{declared_end[training_index] - declared_start[training_index]} samples")
+      f"[{training_support[0]}, {training_support[1]}) = "
+      f"{training_support[1] - training_support[0]} samples")
 print(f"  {int(training_cycle['pass_count'])} passes, "
       f"{training_cycle['event_window_indices'].size} candidate event windows, "
-      f"{[int(m.sum()) for m in training_masks]} points hidden per pass")
+      f"{[int(m.sum()) for m in cycle_group(training_cycle)]} points hidden per pass")
 print(f"  cumulative event-window coverage: "
-      f"{', '.join(f'{100 * value:.0f} %' for value in training_coverage)}")
+      + ", ".join(f"{100 * value:.0f} %"
+                  for value in training_cycle["cumulative_event_window_coverage"]))
 
 # %%
-draw_cycle(training_signal, [mask_spans(mask) for mask in training_masks],
-           training_coverage,
-           (declared_start[training_index], declared_end[training_index]))
+draw_cycle(training_signal, training_cycle, training_support)
 
 # %% [markdown]
+# **The conclusion.** The completeness guarantee is real and it is what
+# distinguishes CYCLIC25 from "a big hole in the middle": no event sample is
+# permanently invisible, and the 25 % budget is never exceeded. That guarantee is
+# the policy's whole justification — which is why the exploratory part at the end
+# of this section, where the guarantee is measured against the event the
+# generator actually drew, matters as much as the comparison itself.
+#
 # ### Appendix · how a fixed budget packs a variable support
 #
-# The completeness guarantee above is not free. Every event has a different
-# width, so the number of candidate windows changes from event to event, while
-# the budget is fixed at 32 event windows per pass. The builder resolves this
-# with two devices: it splits the half-overlapping catalogue into **lanes** (a
-# window's index modulo `patch_size / stride` = 2), so that windows within a
-# lane can never overlap each other, and it pads the last group of a lane by
-# repeating windows already scheduled.
-#
-# The deck states this for the median event — a 906-sample support. That is
-# reproduced from the shipped builder here.
+# **The problem.** The guarantee is not free. Every event has a different width,
+# so the number of candidate windows changes from event to event, while the
+# budget is fixed at 32 event windows per pass. **The process:** the builder
+# resolves this with two devices — it splits the half-overlapping catalogue into
+# **lanes** (a window's index modulo `patch_size / stride` = 2), so windows
+# within a lane can never overlap, and it pads the last group of a lane by
+# repeating windows already scheduled. The deck states this for the median event,
+# a 906-sample support; that is reproduced here from the shipped builder.
 
 # %%
 PACKING_WIDTH = int(np.median(declared_end - declared_start))
-packing_start = (INPUT_LENGTH - PACKING_WIDTH) // 2
-packing_event = np.zeros(INPUT_LENGTH, dtype=bool)
-packing_event[packing_start : packing_start + PACKING_WIDTH] = True
-packing = build_balanced_event_mask_cycle(
-    packing_event,
-    cyclic_spec,
-    np.random.default_rng(DECK_SEED),
-    event_windows_per_pass=int(CYCLIC["event_windows_per_pass"]),
-    background_windows_per_pass=int(CYCLIC["background_windows_per_pass"]),
-    require_context_each_side=bool(CYCLIC["require_context_each_side"]),
-)
+packing_support = ((INPUT_LENGTH - PACKING_WIDTH) // 2,
+                   (INPUT_LENGTH - PACKING_WIDTH) // 2 + PACKING_WIDTH)
+packing = cyclic25_cycle(packing_support, index=0, spec=cyclic_spec, settings=CYCLIC,
+                         length=INPUT_LENGTH, seed=DECK_SEED)
 packing_windows = packing["event_window_indices"]
 packing_selection = np.asarray(packing["pass_event_window_indices"]).reshape(-1)
 lane_sizes = sorted(int((packing_windows % 2 == lane).sum()) for lane in (0, 1))
@@ -1141,50 +1783,35 @@ print("\nreproduces the deck's packing appendix exactly "
 
 # %%
 draw_packing(cyclic_spec.spans[packing_windows], packing_windows % 2, selection_counts,
-             (packing_start, packing_start + PACKING_WIDTH))
+             packing_support)
 
 # %% [markdown]
+# **The conclusion.** The budget is honoured exactly and the completeness comes
+# from repetition, not from overspending: thirteen of the 128 selections are
+# windows already scheduled. **What it leaves open** is the interaction the last
+# part of this section measures — the packing is computed over the *declared*
+# support, so a wrong support does not break the packing, it silently aims it
+# somewhere else.
+#
 # ### The comparison
 #
 # Ten runs: two policies × five seeds, 30 epochs each, on 39,108 synthetic
 # training traces with 8,872 synthetic and 444 real validation traces. The
 # comparison is read in three steps, and the order matters: first check the
-# monitoring is honest, then look at what the models produce, then measure
-# which one survives the other's regime.
+# monitoring is honest, then look at what the models produce, then measure which
+# one survives the other's regime.
 #
 # #### 1 · Is the train/validation comparison meaningful at all?
 #
-# The training loss is computed under dropout with freshly drawn masks, so it
-# is not comparable to a validation number. The matched-monitoring protocol
-# fixes this: 2,048 class-proportional events per split, selected once by a
-# hash of the sample id, evaluated under `model.eval` with the run's own
-# policy. Train and validation then differ only by the split.
+# **The problem.** The training loss is computed under dropout with freshly drawn
+# masks, so it is not comparable to a validation number, and a gap between them
+# would mean nothing. **The process:** the matched-monitoring protocol fixes this
+# — 2,048 class-proportional events per split, selected once by a hash of the
+# sample id, evaluated under `model.eval` with the run's own policy. Train and
+# validation then differ only by the split.
 
 # %%
-monitor = {}
-for policy in ("P25", "CYCLIC25"):
-    histories = [
-        json.loads((matched_run(policy.lower(), seed) / "history.json").read_text())
-        for seed in MATCHED_SEEDS
-    ]
-    epochs = [entry["epoch"] for entry in histories[0]]
-    train_curves = [[e["matched_monitor"]["train_eval"]["model"]["masked_mse"] for e in h]
-                    for h in histories]
-    validation_curves = [[e["matched_monitor"]["validation"]["model"]["masked_mse"] for e in h]
-                         for h in histories]
-    final_train = statistics.fmean(curve[-1] for curve in train_curves)
-    final_validation = statistics.fmean(curve[-1] for curve in validation_curves)
-    monitor[policy] = {
-        "epochs": epochs,
-        "train_eval": train_curves,
-        "validation": validation_curves,
-        "final_train_eval": final_train,
-        "final_validation": final_validation,
-        "gap_percent": 100.0 * (final_validation - final_train) / final_train,
-    }
-    print(f"{policy:9s} final fixed-monitor masked MSE  train {final_train:.6f}  "
-          f"validation {final_validation:.6f}  gap {monitor[policy]['gap_percent']:+.4f} %")
-
+monitor = matched_monitor_curves(matched_run, ("P25", "CYCLIC25"), MATCHED_SEEDS)
 reference_monitor = published("bead-ssl-v2-matched-monitor-analysis-r1")["final_matched_monitor"]
 monitor_deviation = max(
     abs(monitor[policy]["gap_percent"]
@@ -1199,89 +1826,70 @@ print(f"\nreproduces bead-ssl-v2-matched-monitor-analysis-r1 exactly "
 draw_learning_curves(monitor)
 
 # %% [markdown]
-# Both policies generalise: the validation monitor sits **+1.49 %** (P25) and
-# **+1.22 %** (CYCLIC25) above the train monitor at epoch 30, on identical
-# protocols. Neither is memorising, and the loss curves can be believed.
+# **The conclusion.** Both policies generalise: the validation monitor sits
+# **+1.49 %** (P25) and **+1.22 %** (CYCLIC25) above the train monitor at epoch
+# 30, on identical protocols. Neither is memorising, and the loss curves can be
+# believed. What the plot also shows is that the two levels are two orders of
+# magnitude apart — P25 lands near 1.6 × 10⁻³, CYCLIC25 near 1.9 × 10⁻¹.
 #
-# What the plot also shows is that the two levels are two orders of magnitude
-# apart — P25 lands near 1.6 × 10⁻³, CYCLIC25 near 1.9 × 10⁻¹. That is not
-# evidence that P25 is the better model. It is evidence that P25 was asked an
-# easier question, exactly as the geometry predicted.
+# **What it leaves open.** That gap is *not* evidence that P25 is the better
+# model; it is evidence that P25 was asked an easier question, exactly as the
+# geometry predicted. Comparing the two levels decides nothing, which is why the
+# next two steps look at what the models produce and how they behave off their
+# own regime.
 #
 # #### 2 · What the two models produce, on real events
 #
 # **Limit, named.** Every matched run's `run.json` lists `checkpoints/best.pt`
-# and `checkpoints/latest.pt` among its outputs, but the checkpoint directory
-# was never synced back from the cluster. The weights are not in this
-# workspace, so nothing below is re-inferred: the reconstructions come from the
+# and `checkpoints/latest.pt` among its outputs, but the checkpoint directory was
+# never synced back from the cluster. The weights are not in this workspace, so
+# nothing below is re-inferred: the reconstructions come from the
 # `*_reconstruction_examples.npz` each run wrote at the end of training. Any
-# claim requiring a forward pass — a new event, a new mask, a probe on the
-# frozen encoder — is out of reach until those checkpoints are recovered.
+# claim requiring a forward pass — a new event, a new mask, a probe on the frozen
+# encoder — is out of reach until those checkpoints are recovered.
 #
 # A second limit follows from the same files. Both runs exported their examples
-# under the **P25** evaluation policy (`evaluate_reconstruction` defaults to
-# it), so the stored masks are 64 isolated 16-sample holes in every case. That
-# is precisely the deck's "identical hidden samples" comparison and it is
-# reproduced faithfully — but it means the notebook cannot *show* a 560-sample
-# CYCLIC25 gap being reconstructed. For that regime only the aggregate numbers
-# below exist.
+# under the **P25** evaluation policy (`evaluate_reconstruction` defaults to it),
+# so the stored masks are 64 isolated 16-sample holes in every case. That is
+# precisely the deck's "identical hidden samples" comparison and it is reproduced
+# faithfully — but it means the notebook cannot *show* a 560-sample CYCLIC25 gap
+# being reconstructed. For that regime only the aggregate numbers below exist.
 
 # %%
-recon_signal = p25_examples["signal"][example_index]
-recon_mask = p25_examples["mask"][example_index].astype(bool)
-if not np.array_equal(recon_mask, cyclic_examples["mask"][example_index].astype(bool)):
+if not np.array_equal(example_mask, cyclic_examples["mask"][example_index].astype(bool)):
     raise ValueError("stored masks differ; the comparison would not be matched")
-recon_spans = mask_spans(recon_mask)
-widest = max(recon_spans, key=lambda span: span[1] - span[0])
-centre = (widest[0] + widest[1]) // 2
-zoom = (max(0, centre - 320), min(recon_signal.size, centre + 320))
+widest_hole = max(mask_spans(example_mask), key=lambda span: span[1] - span[0])
+centre = (widest_hole[0] + widest_hole[1]) // 2
+zoom = (max(0, centre - 320), min(example_signal.size, centre + 320))
 
 outputs = []
 for label, source, accent in (("P25", p25_examples, "#e2483f"),
                               ("CYCLIC25", cyclic_examples, "#00a3c7")):
     prediction = source["model"][example_index]
-    error = float(np.mean((prediction[recon_mask] - recon_signal[recon_mask]) ** 2))
+    error = float(np.mean((prediction[example_mask] - example_signal[example_mask]) ** 2))
     outputs.append((label, prediction, accent, error))
     print(f"{label:9s} masked MSE on {p25_examples['sample_id'][example_index]}: {error:.6f}")
-draw_reconstruction(recon_signal, outputs, recon_spans, zoom)
+draw_reconstruction(example_signal, outputs, example_mask, zoom)
 
 # %% [markdown]
-# On P25's own regime, P25 tracks the hidden samples closely and CYCLIC25 is
-# visibly coarser — an order of magnitude worse locally. If the comparison
-# stopped here it would retain P25. It does not stop here.
+# **The conclusion.** On P25's own regime, P25 tracks the hidden samples closely
+# and CYCLIC25 is visibly coarser — an order of magnitude worse locally. If the
+# comparison stopped here it would retain P25. **It does not stop here**, because
+# one regime cannot rank two policies that were trained on different problems.
 #
 # #### 3 · The cross-mask evaluation
 #
-# Each trained model is evaluated on **both** regimes, on the 444 real
-# validation events, with `predicting zero` as the reference: a model that has
-# learned nothing useful about a regime cannot beat the constant zero. Five
-# seeds per cell, means recomputed here from the evaluation run's rows.
+# **The problem.** Each model has only ever been scored on the regime it trained
+# on. **The process:** evaluate both trained models on **both** regimes, on the
+# 444 real validation events, with `predicting zero` as the reference — a model
+# that has learned nothing useful about a regime cannot beat the constant zero.
+# Five seeds per cell, means recomputed here from the evaluation run's rows.
 
 # %%
 cross = published("bead-ssl-v2-matched-cross-mask-evaluation-r1")
-cells = {}
-zero_reference = {}
-for row in cross["rows"]:
-    key = (row["training_mask_policy"], row["evaluation_mask_policy"])
-    cells.setdefault(key, []).append(row["real_validation"]["model"]["masked_mse"])
-    zero_reference.setdefault(
-        row["evaluation_mask_policy"], []
-    ).append(row["real_validation"]["zero"]["masked_mse"])
-cells = {key: {"mean": statistics.fmean(values), "std": statistics.pstdev(values),
-               "seeds": len(values)}
-         for key, values in cells.items()}
-zero_reference = {key: statistics.fmean(values) for key, values in zero_reference.items()}
-
-print(f"{'trained':>10} {'on P25 masks':>16} {'on CYCLIC25 masks':>19}   seeds")
-for trained in ("P25", "CYCLIC25"):
-    print(f"{trained:>10} {cells[(trained, 'P25')]['mean']:16.4f} "
-          f"{cells[(trained, 'CYCLIC25')]['mean']:19.4f}   "
-          f"{cells[(trained, 'P25')]['seeds']}")
-print(f"{'zero':>10} {zero_reference['P25']:16.4f} {zero_reference['CYCLIC25']:19.4f}   —")
-
-published_cells = {("P25", "P25"): 0.0015, ("P25", "CYCLIC25"): 1.1024,
-                   ("CYCLIC25", "P25"): 0.0063, ("CYCLIC25", "CYCLIC25"): 0.0361}
-for key, want in published_cells.items():
+cells, zero_reference = cross_mask_cells(cross["rows"], ("P25", "CYCLIC25"))
+for key, want in {("P25", "P25"): 0.0015, ("P25", "CYCLIC25"): 1.1024,
+                  ("CYCLIC25", "P25"): 0.0063, ("CYCLIC25", "CYCLIC25"): 0.0361}.items():
     assert round(cells[key]["mean"], 4) == want, (key, cells[key]["mean"])
 assert round(zero_reference["P25"], 4) == 1.2765
 assert round(zero_reference["CYCLIC25"], 4) == 1.1209
@@ -1291,61 +1899,57 @@ print("\nreproduces bead-ssl-v2-matched-cross-mask-evaluation-r1 exactly")
 draw_cross_mask(cells, zero_reference)
 
 # %% [markdown]
-# The verdict is in the second column. **P25 on CYCLIC25 masks scores 1.102
-# against 1.121 for predicting zero** — a 1.7 % improvement over outputting
-# nothing at all. A model that hid only isolated 16-sample holes for 30 epochs
-# has learned nothing that transfers to a missing event. CYCLIC25 on P25 masks
-# scores 0.0063 against a 1.277 zero baseline: it pays about four times P25's
-# local error but stays a functioning model on a regime it never trained on.
+# **The conclusion.** The verdict is in the second column. **P25 on CYCLIC25
+# masks scores 1.102 against 1.121 for predicting zero** — a 1.7 % improvement
+# over outputting nothing at all. A model that hid only isolated 16-sample holes
+# for 30 epochs has learned nothing that transfers to a missing event. CYCLIC25
+# on P25 masks scores 0.0063 against a 1.277 zero baseline: it pays about four
+# times P25's local error but stays a functioning model on a regime it never
+# trained on.
 #
 # So the retained policy is CYCLIC25, and the honest statement of the result is
-# asymmetric: CYCLIC25 is retained for robustness across missing positions,
-# while P25 keeps a genuinely lower local error on its own easier task. Both
-# halves belong in the claim.
+# asymmetric: CYCLIC25 is retained for robustness across missing positions, while
+# P25 keeps a genuinely lower local error on its own easier task. Both halves
+# belong in the claim.
 #
 # **What is not claimed.** All of this is *reconstruction* behaviour on
-# development data. Nothing here says which encoder is the better
-# representation — that requires frozen probes or fine-tuning against a
-# from-scratch baseline, which needs the checkpoints, and no sealed test split
-# was touched anywhere in this chain.
+# development data. Nothing here says which encoder is the better representation
+# — that requires frozen probes or fine-tuning against a from-scratch baseline,
+# which needs the checkpoints, and no sealed test split was touched anywhere in
+# this chain.
 
 # %% [markdown]
 # ---
 # ## Exploratory · the event CYCLIC25 was aimed at is half the real one
 #
-# *This sub-section is exploratory and it produces a measurement no published
-# run owns. It is not a correction of the published comparison; it is a
-# measured statement about what that comparison actually trained.*
+# *This sub-section is exploratory and it produces a measurement no published run
+# owns. It is not a correction of the published comparison; it is a measured
+# statement about what that comparison actually trained.*
 #
-# The masking code never sees a waveform's timing. It converts the generator's
-# `tau_ms` into samples using a number from the config:
+# **The problem.** The masking code never sees a waveform's timing. It converts
+# the generator's `tau_ms` into samples using a number from the config:
 #
 # ```python
 # tau_samples = float(row["tau_ms"]) * 1.0e-3 * self.sampling_frequency_hz
 # ```
 #
 # `bead_ssl_p25_v1.yaml` declares `sampling_frequency_hz: 1000000`, and
-# `bead_ssl_z8_v5_v2.yaml` extends it without overriding that key, so the
-# merged config the runs used carries 1 MHz. The v5 generator writes
+# `bead_ssl_z8_v5_v2.yaml` extends it without overriding that key, so the merged
+# config the runs used carries 1 MHz. The v5 generator writes
 # `sampling_frequency_hz: 2_000_000.0` into its own provenance.
 #
-# Two configuration files disagreeing is an argument, not evidence. The
-# waveforms settle it: for a Gaussian envelope `exp(−½(t/τ)²)`, the full width
-# at half maximum is `1.1774 · τ · (e^{−a} + e^{+a})` **seconds**, so measuring
-# it in samples on the stored traces measures the sampling rate directly.
+# **The process.** Two configuration files disagreeing is an argument, not
+# evidence. The waveforms settle it: for a Gaussian envelope `exp(−½(t/τ)²)`, the
+# full width at half maximum is `1.1774 · τ · (e^{−a} + e^{+a})` **seconds**, so
+# measuring it in samples on the stored traces measures the sampling rate
+# directly.
 
 # %%
 TRUE_HZ = SAMPLING_HZ
 v5_signals = np.load(v5_root / "signals_raw_4096.npy", mmap_mode="r", allow_pickle=False)
 achieved_snr = np.asarray([float(row["achieved_snr_db"]) for row in v5_rows])
 probe = np.sort(np.argsort(-achieved_snr)[:300])
-probe_envelope = uniform_filter1d(
-    np.abs(hilbert(np.asarray(v5_signals[probe], dtype=np.float64), axis=1)),
-    size=41, axis=1,
-)
-measured_fwhm = np.asarray([
-    np.flatnonzero(row >= 0.5 * row.max())[[0, -1]] @ [-1, 1] + 1 for row in probe_envelope
-], dtype=float)
+measured_fwhm = envelope_fwhm_samples(np.asarray(v5_signals[probe]), smoothing=41)
 predicted_seconds = (
     1.1774 * v5_tau_ms[probe] * 1.0e-3
     * (np.exp(-v5_asymmetry[probe]) + np.exp(v5_asymmetry[probe]))
@@ -1366,167 +1970,100 @@ print("\nthe data is sampled at 2 MHz, to within 0.2 % — the config value is w
 # %% [markdown]
 # ### What that does to the mask
 #
-# The consequence is not cosmetic, because this number is not metadata: it is
-# the only thing converting the event's physical duration into array indices.
-# At half the true rate the support is half as wide, centred on the same point,
-# and therefore a **strict subset** of the real event.
+# **The conclusion so far, and why it is not cosmetic:** this number is not
+# metadata, it is the only thing converting the event's physical duration into
+# array indices. At half the true rate the support is half as wide, centred on
+# the same point, and therefore a **strict subset** of the real event.
 
 # %%
 true_start, true_end = event_bounds(TRUE_HZ)
 true_fraction = (true_end - true_start) / INPUT_LENGTH
-assert bool(np.all((declared_start >= true_start) & (declared_end <= true_end)))
+declared_is_subset = bool(np.all((declared_start >= true_start) & (declared_end <= true_end)))
 captured = (declared_end - declared_start) / (true_end - true_start)
-print(f"over all {len(v5_rows):,} v5 events")
-print(f"  median support   declared {100 * np.median(declared_fraction):5.1f} %   "
-      f"true {100 * np.median(true_fraction):5.1f} %")
-print(f"  p95 support      declared {100 * np.percentile(declared_fraction, 95):5.1f} %   "
-      f"true {100 * np.percentile(true_fraction, 95):5.1f} %")
-print(f"  under half crop  declared {100 * np.mean(declared_fraction < 0.5):5.1f} %   "
-      f"true {100 * np.mean(true_fraction < 0.5):5.1f} %")
-print(f"  fraction of the true support inside the declared one: "
-      f"median {np.median(captured):.3f}")
+assert declared_is_subset
+print_support_comparison(declared_fraction, true_fraction, captured, len(v5_rows))
 assert round(100 * float(np.median(true_fraction)), 1) == 44.2
 
 # %%
 draw_support_rates(declared_fraction, true_fraction, v5_class, CLASS_ORDER, CLASS_COLOUR)
 
 # %% [markdown]
-# The deck's SSL bridge opens the whole masking chapter on "the annotated
-# support is 22 % of the crop at the median, and 99.1 % of events sit under
-# half the crop". Measured against the rate the data was generated at, the
-# median event occupies **44.2 %** of the crop and **36.4 %** of events occupy
-# more than half of it. The premise that motivates aiming is roughly half as
-# strong as stated.
+# The deck's SSL bridge opens the whole masking chapter on "the annotated support
+# is 22 % of the crop at the median, and 99.1 % of events sit under half the
+# crop". Measured against the rate the data was generated at, the median event
+# occupies **44.2 %** of the crop and **36.4 %** of events occupy more than half
+# of it. The premise that motivates aiming is roughly half as strong as stated.
 #
 # ### What a trace actually got
 #
 # The clearest way to see it is on one event: the windows the cycle called
-# *event* and the windows it called *background*, drawn over the support the
-# data implies.
+# *event* and the windows it called *background*, drawn over the support the data
+# implies. The cycles are rebuilt with the runs' own seed derivation and the
+# trainer's own bound expansion, so this is the mask that event received.
 
 # %%
 case = int(np.argsort(np.abs((declared_end - declared_start) - PACKING_WIDTH))[0])
 case_signal = np.asarray(np.load(v5_root / "signals_raw_4096.npy",
                                  mmap_mode="r")[case], dtype=np.float64)
 case_signal = (case_signal - case_signal.mean()) / case_signal.std()
-
-
-def build_cycle(start, end, index):
-    """One CYCLIC25 cycle, with the run's seed derivation, for a given support."""
-    minimum = int(CYCLIC["event_windows_per_pass"]) * int(CYCLIC["candidate_size"])
-    missing = max(0, minimum - (end - start))
-    start = max(0, start - missing // 2)
-    end = min(INPUT_LENGTH, end + missing - missing // 2)
-    event = np.zeros(INPUT_LENGTH, dtype=bool)
-    event[start:end] = True
-    return build_balanced_event_mask_cycle(
-        event, cyclic_spec,
-        np.random.default_rng(DECK_SEED + index * SAMPLE_SEED_STRIDE),
-        event_windows_per_pass=int(CYCLIC["event_windows_per_pass"]),
-        background_windows_per_pass=int(CYCLIC["background_windows_per_pass"]),
-        require_context_each_side=bool(CYCLIC["require_context_each_side"]),
-    )
-
-
-case_actual = build_cycle(declared_start[case], declared_end[case], case)
-case_corrected = build_cycle(true_start[case], true_end[case], case)
 case_true = np.zeros(INPUT_LENGTH, dtype=bool)
 case_true[true_start[case] : true_end[case]] = True
 
-for label, cycle in (("as trained", case_actual), ("corrected", case_corrected)):
-    background = np.asarray(cycle["background_target_time_masks"], dtype=bool)
-    intruding = float((background & case_true).sum()) / float(background.sum())
-    events = np.asarray(cycle["event_target_time_masks"], dtype=bool)
-    print(f"{label:11s} {int(cycle['pass_count'])} passes · "
-          f"{100 * intruding:5.1f} % of the background budget lies inside the true event · "
-          f"event group ever hides {100 * (events.any(0) & case_true).sum() / case_true.sum():5.1f} %"
-          " of the true support")
+cycles = {
+    label: cyclic25_cycle(support, index=case, spec=cyclic_spec, settings=CYCLIC,
+                          length=INPUT_LENGTH, seed=DECK_SEED)
+    for label, support in (("as trained", (declared_start[case], declared_end[case])),
+                           ("corrected", (true_start[case], true_end[case])))
+}
+for label, cycle in cycles.items():
+    print_cycle_case(label, cycle, case_true)
 
 draw_defect_case(
     case_signal,
     (declared_start[case], declared_end[case]),
     (true_start[case], true_end[case]),
-    (mask_spans(np.asarray(case_actual["event_target_time_masks"], bool)[0]),
-     mask_spans(np.asarray(case_actual["background_target_time_masks"], bool)[0])),
-    (mask_spans(np.asarray(case_corrected["event_target_time_masks"], bool)[0]),
-     mask_spans(np.asarray(case_corrected["background_target_time_masks"], bool)[0])),
+    cycles["as trained"], cycles["corrected"],
 )
 
 # %% [markdown]
-# The amber windows are the ones the cycle balanced *against* the event. Some
-# of them sit on the event's own shoulders.
+# The amber windows are the ones the cycle balanced *against* the event. Some of
+# them sit on the event's own shoulders.
 #
 # That is the mechanism: `build_balanced_event_mask_cycle` takes its background
-# candidates from `~intersects_event`, and `intersects_event` is derived from
-# the halved support. Everything outside the inner half of an event was
-# eligible to be sampled as background, and the completeness guarantee — "every
-# event sample is hidden at least once" — was enforced on the inner half only.
+# candidates from `~intersects_event`, and `intersects_event` is derived from the
+# halved support. Everything outside the inner half of an event was eligible to
+# be sampled as background, and the completeness guarantee — "every event sample
+# is hidden at least once" — was enforced on the inner half only.
 #
-# Run over a seeded sample of the corpus with the runs' own seed derivation:
+# Run over a seeded sample of the corpus, with the runs' own seed derivation:
 
 # %%
 CYCLE_SAMPLE = 1500
-sample_generator = np.random.default_rng(20260815)
+CYCLE_SEED = 20260815
 cycle_indices = np.sort(
-    sample_generator.choice(len(v5_rows), size=CYCLE_SAMPLE, replace=False)
+    np.random.default_rng(CYCLE_SEED).choice(len(v5_rows), size=CYCLE_SAMPLE, replace=False)
 )
-
-background_inside = []
-event_group_coverage = []
-declared_passes = []
-corrected_passes = []
-corrected_failures = 0
 started = time.time()
-for index in cycle_indices:
-    index = int(index)
-    true_support = np.zeros(INPUT_LENGTH, dtype=bool)
-    true_support[true_start[index] : true_end[index]] = True
-    cycle = build_cycle(declared_start[index], declared_end[index], index)
-    background = np.asarray(cycle["background_target_time_masks"], dtype=bool)
-    events = np.asarray(cycle["event_target_time_masks"], dtype=bool)
-    background_inside.append(float((background & true_support).sum()) / float(background.sum()))
-    event_group_coverage.append(
-        float((events.any(axis=0) & true_support).sum()) / float(true_support.sum())
-    )
-    declared_passes.append(int(cycle["pass_count"]))
-    try:
-        corrected_passes.append(
-            int(build_cycle(true_start[index], true_end[index], index)["pass_count"])
-        )
-    except (ValueError, RuntimeError):
-        corrected_failures += 1
-
-background_inside = np.asarray(background_inside)
-event_group_coverage = np.asarray(event_group_coverage)
-print(f"{CYCLE_SAMPLE} events, cycles rebuilt from p3_ssl.masking "
-      f"({time.time() - started:.0f} s)")
-print(f"  background budget landing inside the true event: "
-      f"median {100 * np.median(background_inside):.1f} %, "
-      f"mean {100 * background_inside.mean():.1f} %")
-print(f"  true support ever hidden by the event group over a whole cycle: "
-      f"median {100 * np.median(event_group_coverage):.1f} %, "
-      f"mean {100 * event_group_coverage.mean():.1f} %")
-print(f"  passes per cycle: median {int(np.median(declared_passes))} as trained, "
-      f"{int(np.median(corrected_passes))} corrected")
-print(f"  events for which the corrected support admits no cycle at all: "
-      f"{corrected_failures} of {CYCLE_SAMPLE} "
-      f"({100 * corrected_failures / CYCLE_SAMPLE:.1f} %)")
+scan = scan_cycle_defect(
+    cycle_indices, (declared_start, declared_end), (true_start, true_end),
+    spec=cyclic_spec, settings=CYCLIC, length=INPUT_LENGTH, seed=DECK_SEED,
+)
+print_cycle_defect(scan, CYCLE_SAMPLE, time.time() - started)
 
 # %%
-draw_defect_summary(background_inside, event_group_coverage,
-                    (declared_passes, corrected_passes))
+draw_defect_summary(scan)
 
 # %% [markdown]
 # ### What this puts in doubt, and what it does not
 #
 # **What is established.** CYCLIC25 as trained aimed at the inner half of each
-# simulated event. A median **28.6 %** of what it called *background* was in
-# fact event (mean 30.7 %); its completeness guarantee — the thing that
-# justifies the cycle — covered a median **51.4 %** of each true support; and a
-# corrected cycle would be twice as long (median 4 passes to 8), with **0.4 %**
-# of events admitting no cycle at all under the current 32-window budget. P25
-# is untouched: it passes `event_mask=None` and `event_biased_probability=0.0`,
-# so it never reads the support.
+# simulated event. A median **28.6 %** of what it called *background* was in fact
+# event (mean 30.7 %); its completeness guarantee — the thing that justifies the
+# cycle — covered a median **51.4 %** of each true support; and a corrected cycle
+# would be twice as long (median 4 passes to 8), with **0.4 %** of events
+# admitting no cycle at all under the current 32-window budget. P25 is untouched:
+# it passes `event_mask=None` and `event_biased_probability=0.0`, so it never
+# reads the support.
 #
 # **What is not touched by this.** The two things the published comparison
 # actually rests on:
@@ -1541,142 +2078,67 @@ draw_defect_summary(background_inside, event_group_coverage,
 #
 # That last point cuts in a specific direction. CYCLIC25 was trained on
 # half-width events and then evaluated on full-width ones: a distribution shift
-# against it, not for it. It still beat P25 on that regime by a factor of
-# thirty. The qualitative verdict — P25 does not generalise to missing events,
-# CYCLIC25 does — therefore survives the defect, and if anything is understated.
+# against it, not for it. It still beat P25 on that regime by a factor of thirty.
+# The qualitative verdict — P25 does not generalise to missing events, CYCLIC25
+# does — therefore survives the defect, and if anything is understated.
 #
 # **What genuinely stays unknown.** How much better a correctly-aimed CYCLIC25
-# would be. Its matched masked MSE of 0.193 is measured on simulation
-# validation, whose masks carry the same halved support, so that number is not
-# a clean estimate of anything. Whether the encoder — the actual deliverable —
-# is affected cannot be assessed at all from here: the checkpoints are not in
-# this workspace, and even with them, a representation claim needs probes that
-# were never run.
+# would be. Its matched masked MSE of 0.193 is measured on simulation validation,
+# whose masks carry the same halved support, so that number is not a clean
+# estimate of anything. Whether the encoder — the actual deliverable — is
+# affected cannot be assessed at all from here: the checkpoints are not in this
+# workspace, and even with them, a representation claim needs probes that were
+# never run.
 #
 # **What would settle it.** Ten runs: two policies × five seeds, 30 epochs, on
-# pfcalcul, with `sampling_frequency_hz: 2000000` in
-# `bead_ssl_z8_v5_v2.yaml` — the fix is one line, since `_deep_merge` lets the
-# child override the key. The 32-window budget needs raising in step, or the
-# small fraction of wide events will fail to build a cycle. Re-running the same
-# matched-monitor and cross-mask evaluation then makes the corrected and
-# published comparisons directly commensurable. Until that exists, the deck's
-# masking conclusion should be reported as it is defended here: robust in
-# direction, unquantified in size.
+# pfcalcul, with `sampling_frequency_hz: 2000000` in `bead_ssl_z8_v5_v2.yaml` —
+# the fix is one line, since `_deep_merge` lets the child override the key. The
+# 32-window budget needs raising in step, or the small fraction of wide events
+# will fail to build a cycle. Re-running the same matched-monitor and cross-mask
+# evaluation then makes the corrected and published comparisons directly
+# commensurable. Until that exists, the deck's masking conclusion should be
+# reported as it is defended here: robust in direction, unquantified in size.
 #
 # **A provenance note that belongs with this.** The deck's masking figures are
-# resolved from `.cache/visual-evidence/ssl-v18-masking-figures-r4`, a cache
-# path outside `artifacts/` with no `run.json`. Its `figure_metrics.json` holds
-# the published geometry — and its `sources` block names
+# resolved from `.cache/visual-evidence/ssl-v18-masking-figures-r4`, a cache path
+# outside `artifacts/` with no `run.json`. Its `figure_metrics.json` holds the
+# published geometry — and its `sources` block names
 # `configs/bead_ssl_p25_v1.yaml`, the file carrying the wrong rate. The numbers
 # happen to be reproducible, as this section shows, but nothing manifested
 # guaranteed that. This notebook closes that gap for the geometry and the
 # packing, and the run emitted below closes it for the defect.
 
 # %%
+metrics, provenance = mask_rate_evidence(
+    declared_hz=DECLARED_HZ,
+    true_hz=TRUE_HZ,
+    probe={"events": len(probe), "minimum_snr_db": achieved_snr[probe].min()},
+    rate_ratio=rate_ratio,
+    declared=(declared_fraction, declared_end - declared_start),
+    true=(true_fraction, true_end - true_start),
+    captured=captured,
+    subset=declared_is_subset,
+    class_names=v5_class,
+    class_order=CLASS_ORDER,
+    scan=scan,
+    sampled=CYCLE_SAMPLE,
+    cyclic=CYCLIC,
+    cycle_seed=CYCLE_SEED,
+    datasets=dataset_provenance(),
+    inputs={
+        "events_csv_sha256": notebook_evidence.sha256_file(v5_root / "events.csv"),
+        "config_sha256": notebook_evidence.sha256_file(SSL_CONFIG),
+        "base_config_sha256": notebook_evidence.sha256_file(
+            SSL_ROOT / "configs/bead_ssl_p25_v1.yaml"
+        ),
+    },
+)
 try:
     emitted = notebook_evidence.emit_run(
         workspace,
         section="masked-learning-mask-rate",
-        metrics={
-            "schema_version": 1,
-            "analysis": "cyclic25-event-support-sampling-rate-defect",
-            "declared_sampling_frequency_hz": DECLARED_HZ,
-            "generator_sampling_frequency_hz": TRUE_HZ,
-            "rate_determined_from_waveforms": {
-                "probe_events": int(len(probe)),
-                "minimum_achieved_snr_db": float(achieved_snr[probe].min()),
-                "measured_over_predicted_fwhm_median": {
-                    "1000000": rate_ratio[DECLARED_HZ],
-                    "2000000": rate_ratio[TRUE_HZ],
-                },
-            },
-            "event_support": {
-                "events": len(v5_rows),
-                "declared": {
-                    "median_fraction": float(np.median(declared_fraction)),
-                    "p95_fraction": float(np.percentile(declared_fraction, 95)),
-                    "fraction_under_half_crop": float(np.mean(declared_fraction < 0.5)),
-                    "median_width_samples": float(np.median(declared_end - declared_start)),
-                },
-                "true": {
-                    "median_fraction": float(np.median(true_fraction)),
-                    "p95_fraction": float(np.percentile(true_fraction, 95)),
-                    "fraction_under_half_crop": float(np.mean(true_fraction < 0.5)),
-                    "median_width_samples": float(np.median(true_end - true_start)),
-                },
-                "declared_is_subset_of_true": True,
-                "median_true_support_captured": float(np.median(captured)),
-                "per_class_median_fraction": {
-                    name: {
-                        "declared": float(np.median(declared_fraction[v5_class == name])),
-                        "true": float(np.median(true_fraction[v5_class == name])),
-                    }
-                    for name in CLASS_ORDER
-                },
-            },
-            "cycle_consequence": {
-                "sampled_events": CYCLE_SAMPLE,
-                "background_inside_true_event_median": float(np.median(background_inside)),
-                "background_inside_true_event_mean": float(background_inside.mean()),
-                "true_support_covered_by_event_group_median": float(
-                    np.median(event_group_coverage)
-                ),
-                "true_support_covered_by_event_group_mean": float(
-                    event_group_coverage.mean()
-                ),
-                "median_passes_declared": int(np.median(declared_passes)),
-                "median_passes_corrected": int(np.median(corrected_passes)),
-                "corrected_cycle_failures": corrected_failures,
-            },
-            "unaffected": {
-                "p25_policy": "event_mask=None, event_biased_probability=0.0",
-                "hidden_points_per_pass": 1024,
-                "real_validation_masks": (
-                    "Z8RealValidationDataset derives the support from annotated "
-                    "start_sample/end_sample and never reads sampling_frequency_hz"
-                ),
-            },
-        },
-        provenance={
-            "datasets": dataset_provenance(),
-            "inputs": {
-                "events_csv_sha256": notebook_evidence.sha256_file(v5_root / "events.csv"),
-                "config_sha256": notebook_evidence.sha256_file(SSL_CONFIG),
-                "base_config_sha256": notebook_evidence.sha256_file(
-                    SSL_ROOT / "configs/bead_ssl_p25_v1.yaml"
-                ),
-            },
-            "parameters": {
-                "event_support_formula": (
-                    "centre = t0_fraction * (N - 1); "
-                    "[centre - 3*tau*exp(-a), centre + 3*tau*exp(+a)], tau in samples"
-                ),
-                "cyclic25": {key: CYCLIC[key] for key in sorted(CYCLIC)},
-                "seed_derivation": "42 + sample_index * 7919, as in build_cyclic25_masks_for_sample",
-                "cycle_sample_seed": 20260815,
-                "cycle_sample_size": CYCLE_SAMPLE,
-                "fwhm_probe": "300 highest achieved-SNR v5 events, Hilbert envelope, 41-sample box smoothing",
-            },
-            "metric_definitions": {
-                "declared/true event support": (
-                    "the support Z8AsymmetricSyntheticDataset builds at the config's "
-                    "sampling_frequency_hz, and at the generator's 2 MHz"
-                ),
-                "background_inside_true_event": (
-                    "fraction of the points CYCLIC25 hides as background, over a "
-                    "complete cycle, that lie inside the true event support"
-                ),
-                "true_support_covered_by_event_group": (
-                    "fraction of the true support ever hidden by the cycle's event "
-                    "windows -- the completeness guarantee, measured against the "
-                    "event the generator actually drew"
-                ),
-                "measured_over_predicted_fwhm": (
-                    "envelope full width at half maximum in samples, divided by "
-                    "1.1774 * tau * (e^-a + e^+a) * sampling_frequency_hz"
-                ),
-            },
-        },
+        metrics=metrics,
+        provenance=provenance,
         claim_boundary=(
             "Measures the geometric consequence of the 1 MHz sampling frequency "
             "declared in bead_ssl_p25_v1.yaml against the 2 MHz the v5 waveforms "
@@ -1700,56 +2162,59 @@ except WorkspaceError as error:
 # *Exploratory section. It tests a change before it is adopted, and its
 # conclusion is a recommendation, not a shipped decision.*
 #
-# The morphology descriptor reads a fixed **1 024-sample window** centred on the
-# event. Every distance in this notebook — coverage, twins, retrieval — is a
-# distance between two such windows. So the window is not a detail of the
-# method; it is the method's field of view.
+# **The problem.** The morphology descriptor reads a fixed **1 024-sample
+# window** centred on the event. Every distance in this notebook — coverage,
+# twins, retrieval — is a distance between two such windows, so the window is
+# not a detail of the method; it is the method's field of view. The audit
+# earlier in the series showed that field of view is too narrow: **96.2 % of the
+# real events are wider than the window that describes them.** The natural
+# repair is 4 096 samples, already the raw input of the SSL model and of the
+# classifier, and wide enough for 100 % of the new MAD corpus, whose widest
+# event is exactly 4 000 samples.
 #
-# The audit earlier in this notebook showed that field of view is too narrow:
-# **96.2 % of the real events are wider than the window that describes them.**
-# The natural repair is 4 096 samples, which is already the raw window of the
-# SSL model and of the classifier, and which covers 100 % of the new MAD corpus
-# (its widest event is exactly 4 000 samples).
-#
-# Two things make that repair less trivial than it sounds, and one objection
-# makes it less obviously desirable. This section deals with all three.
-
-# %% [markdown]
-# ### The descriptor is not window-invariant
-#
-# `morphology_features` keeps the FFT bins that fall inside the 7–80 kHz band.
-# The number of such bins is set by the frequency resolution, which is set by the
-# window length. So changing the window silently changes the descriptor's
-# dimension — and with it what PCA(16) is a projection *of*.
-#
-# The envelope half has the same disease in a quieter form: the smoothing
-# `gaussian_filter1d(sigma=8.0)` is applied in **samples**, before the envelope
-# is averaged into 64 bins. At 1 024 samples a bin is 16 samples wide, so σ is
-# half a bin; at 4 096 a bin is 64 samples wide and the same σ is an eighth of a
-# bin. The same line of code means something different at each window.
+# Nothing in the audit says the repair *works*. It says the window truncates;
+# whether a wider one describes reality better is a separate measurement, and
+# this section makes it. Two obstacles stand in the way — the descriptor used to
+# change shape with its window, and a wider window buys shared silence — and
+# both are settled below before the sweep is read.
 
 # %%
-from internship_workspace.z8_coverage import (  # noqa: E402
-    load_real_core,
-    read_rows,
-    reflect_crop,
-    shared_class_sample,
-    support_coverage,
-    validate_pair,
+from internship_workspace.chain_data import (  # noqa: E402
+    Registry,
+    coverage_chain,
+    load_conditions,
+    load_real_events,
+    pooled_basis,
 )
 from internship_workspace.z8_domain_pca import (  # noqa: E402
     domain_metrics,
     morphology_features,
     spectrum_band_grid,
 )
-from sklearn.decomposition import PCA  # noqa: E402
-from sklearn.preprocessing import StandardScaler  # noqa: E402
 
 WINDOWS = (1024, 2048, 4096)
-BAND_HZ = (7_000.0, 80_000.0)
 REFERENCE_WINDOW = 1024
+QUANTILE = 0.80
+SEED = 20260809
+BAND_HZ = (7_000.0, 80_000.0)
 ENVELOPE_BINS = 64
 
+registry = Registry(workspace)
+
+# %% [markdown]
+# ### Step 1 · Making a window change a window change
+#
+# **The problem.** `morphology_features` keeps the FFT bins falling inside the
+# 7–80 kHz band, and the number of such bins is set by the frequency resolution,
+# which is set by the window length. Changing the window therefore used to
+# change the descriptor's dimension — and with it what PCA(16) is a projection
+# *of*. The envelope half had the same disease in a quieter form: the smoothing
+# was applied in **samples**, before the envelope was averaged into 64 bins, so
+# σ was half a bin at 1 024 and an eighth of a bin at 4 096. The same line of
+# code meant something different at each window, and a sweep over it would have
+# confounded a change of field of view with a change of method.
+
+# %%
 shipped_widths = []
 for window in WINDOWS:
     frequencies = np.fft.rfftfreq(window, d=1.0 / SAMPLING_HZ)
@@ -1762,72 +2227,54 @@ for window in WINDOWS:
           f"σ = {8 / (window // ENVELOPE_BINS):.2f} envelope bin")
 
 # %% [markdown]
-# ### The descriptor was made window-invariant
-#
-# The repair is to make the descriptor a function of the **physics** — a band and
-# a number of bands — rather than of the array length. The fine spectrum is
-# averaged onto a **fixed grid of 37 bands** whose edges are exactly the bins the
-# 1 024-sample window produces, and σ is expressed in envelope bins.
-#
-# This section originally prototyped that change here. It has since been adopted
-# into the shipped `morphology_features`, under a gate that is worth restating
-# because it is what made the change safe to take: the new descriptor is
-# **byte-identical** to the old one at a 1 024-sample window on real events, so
-# every published number is untouched, and the sweep below measures a change of
-# window rather than a change of method. The prototype is gone from this
-# notebook — a second copy of a shipped method is exactly the drift this
-# notebook exists to prevent.
+# **The process.** The repair is to make the descriptor a function of the
+# **physics** — a band and a number of bands — rather than of the array length.
+# The fine spectrum is averaged onto a **fixed grid of 37 bands** whose edges are
+# exactly the bins a 1 024-sample window produces, and σ is expressed in envelope
+# bins. This section prototyped that change; it has since been adopted into the
+# shipped `morphology_features` under the gate that made it safe to take: the new
+# descriptor is **byte-identical** to the old one at 1 024 samples on real events,
+# so every published number is untouched. The prototype is gone from here — a
+# second copy of a shipped method is exactly the drift this notebook exists to
+# prevent — and the invariance is measured below on real event crops instead.
 
 # %%
 BAND_CENTRES, BAND_EDGES = spectrum_band_grid(sampling_frequency_hz=SAMPLING_HZ)
+widest = load_real_events(registry, window=4096)  # reused by the sweep and the control
+widths = {
+    window: int(morphology_features(
+        widest.cores[:256, (4096 - window) // 2 : (4096 + window) // 2]
+    ).shape[1])
+    for window in WINDOWS
+}
 print(f"fixed band grid: {BAND_CENTRES.size} bands from "
       f"{BAND_CENTRES[0] / 1000:.2f} to {BAND_CENTRES[-1] / 1000:.2f} kHz")
-
-# %% [markdown]
-# #### The descriptor no longer changes size with its window
-
-# %%
-real_key = "particles2snr-fbase-dual-clean-z8-events-3class-plus-unclear-development@v2"
-signal_key = "particles2snr-f-dual-clean-c1-yolo-4class@v2"
-real_root = dataset_root(real_key)
-signal_root = dataset_root(signal_key)
-
-all_rows = read_rows(real_root / "events.csv")
-if any(row["split"] == "test" for row in all_rows):
-    raise PermissionError("sealed test rows are forbidden")
-real_rows = [
-    row for row in all_rows
-    if row["class_name"] in CLASS_ORDER and row["split"] in {"train", "val"}
-]
-real_labels = np.asarray([row["class_name"] for row in real_rows])
-
-_probe = load_real_core(real_rows[:256], signal_root)
-identity_deviation = 0.0
-widths = {}
-for window in WINDOWS:
-    folded = _probe[:, : (_probe.shape[1] // window) * window]
-    sample = folded.reshape(len(_probe), -1, window)[:, 0, :] if window <= _probe.shape[1] else None
-    if sample is None:
-        continue
-    widths[window] = int(morphology_features(sample).shape[1])
-print("descriptor width by window:",
-      "  ".join(f"{w}: {d}-D" for w, d in widths.items()))
+print("descriptor width on real event crops:  "
+      + "  ".join(f"{window}: {width}-D" for window, width in widths.items()))
 assert len(set(widths.values())) == 1, "the descriptor still depends on its window"
-print(f"one descriptor at every window ({next(iter(widths.values()))}-D); the "
-      "adoption gate proved byte-identity at 1024 on real events")
 
 # %%
 draw_descriptor_widths(shipped_widths)
 
 # %% [markdown]
-# ### Sweeping the window
+# **The conclusion.** One descriptor at every window — 101 numbers whatever the
+# array length — and the adoption gate proves it is *the same* descriptor at
+# 1 024 as the one every published number was measured with. That is what
+# licenses reading the sweep below as a change of field of view rather than a
+# change of method. It settles nothing else: byte-identity holds at the reference
+# window only, and nothing here says a wider window describes reality better.
+# That is the next measurement.
 #
-# Now the question that matters: does a wider field of view describe reality
-# better? The protocol of the coverage chain is held fixed — one PCA(16) basis
-# fitted on all three generator conditions pooled, one balanced synthetic draw
-# shared across conditions (seed 20260809), a per-condition radius at the 80th
-# percentile of synthetic self-nearest-neighbour distance, euclidean in 16
-# dimensions. Only the window changes.
+# ### Step 2 · Sweeping the window
+#
+# **The problem.** Does a wider field of view describe reality better? The
+# protocol of the coverage chain is held fixed — one PCA(16) basis fitted on all
+# three generator conditions pooled, one balanced synthetic draw shared across
+# conditions (seed 20260809), a per-condition radius at the 80th percentile of
+# synthetic self-nearest-neighbour distance, euclidean in 16 dimensions. Only
+# the window changes, and the whole protocol comes from
+# `internship_workspace.chain_data`, the same helpers the reproduction test
+# pins against the published run.
 #
 # Three quantities are read together, and the second and third are there to
 # answer an objection rather than to decorate:
@@ -1846,124 +2293,28 @@ draw_descriptor_widths(shipped_widths)
 # rising *while* AUC falls is the signature of a genuinely better description.
 
 # %%
-CONDITIONS = [
-    ("white_noise_4d",
-     "particles2snr-fbase-z8-cholesky-physicalcorr-effective-snr-synthetic-events@v3"),
-    ("real_noise_4d",
-     "particles2snr-fbase-z8-cholesky-physicalcorr-effective-snr-synthetic-events@v4"),
-    ("asymmetry_5d",
-     "particles2snr-fbase-z8-cholesky-physicalcorr-effective-snr-synthetic-events@v5"),
-]
-SEED = 20260809
-QUANTILE = 0.80
-
-condition_roots = {}
-reference_rows = None
-for label, key in CONDITIONS:
-    root = dataset_root(key)
-    rows = read_rows(root / "events.csv")
-    if reference_rows is None:
-        reference_rows = rows
-    else:
-        validate_pair(reference_rows, rows)
-    condition_roots[label] = root
-synthetic_labels = np.asarray([row["class_name"] for row in reference_rows])
-sample = shared_class_sample(synthetic_labels, real_labels, seed=SEED)
-
-
-def batched(signals, descriptor, batch_size=256):
-    return np.concatenate(
-        [descriptor(np.asarray(signals[start : start + batch_size]))
-         for start in range(0, len(signals), batch_size)],
-        axis=0,
-    )
-
-
-def real_cores(window):
-    cache = {}
-    output = []
-    for row in real_rows:
-        relative = row["source_signal_relative_path"]
-        if relative not in cache:
-            cache[relative] = np.load(
-                signal_root / relative, allow_pickle=False
-            ).astype(np.float32, copy=False)
-        signal = cache[relative]
-        output.append(reflect_crop(signal, float(row["center_norm"]) * signal.size, window))
-    return np.stack(output)
-
-
 sweep = []
 for window in WINDOWS:
     started = time.time()
-    core = slice((4096 - window) // 2, (4096 + window) // 2)
-    real_features = batched(real_cores(window), morphology_features)
-    condition_features = {
-        label: batched(
-            np.asarray(
-                np.load(root / "signals_raw_4096.npy", mmap_mode="r",
-                        allow_pickle=False)[:, core]
-            ),
-            morphology_features,
-        )
-        for label, root in condition_roots.items()
-    }
-    fit_rows = np.concatenate(
-        [condition_features[label][np.concatenate(list(sample.values()))]
-         for label, _ in CONDITIONS],
-        axis=0,
-    )
-    scaler = StandardScaler().fit(fit_rows)
-    pca = PCA(n_components=16, svd_solver="full").fit(scaler.transform(fit_rows))
-    project = lambda values: pca.transform(scaler.transform(values))  # noqa: E731
-    real_scores = project(real_features)
-
-    terminal = project(condition_features["asymmetry_5d"])
-    coverage = support_coverage(
-        real_scores, terminal, real_labels, synthetic_labels,
-        sample=sample, quantile=QUANTILE,
-    )
+    real = widest if window == 4096 else load_real_events(registry, window=window)
+    conditions = load_conditions(registry, window=window)
+    basis = pooled_basis(conditions, real.labels, seed=SEED)
+    chain = coverage_chain(basis, real, conditions, quantile=QUANTILE)
     domain = domain_metrics(
-        real_scores, terminal, real_labels, synthetic_labels, seed=SEED
+        basis.project(real.features),
+        basis.project(conditions.features["asymmetry_5d"]),
+        real.labels, conditions.labels, seed=SEED,
     )
-    chain = {
-        label: support_coverage(
-            real_scores, project(condition_features[label]), real_labels,
-            synthetic_labels, sample=sample, quantile=QUANTILE,
-        )
-        for label, _ in CONDITIONS
-    }
-    sweep.append({
-        "window": window,
-        "descriptor_dimensions": int(real_features.shape[1]),
-        "explained_variance_16": float(pca.explained_variance_ratio_.sum()),
-        "coverage": {c: coverage[c]["real_within_radius_fraction"] for c in CLASS_ORDER},
-        "nn_median": {c: coverage[c]["real_to_synthetic_nn_median"] for c in CLASS_ORDER},
-        "radius": {c: coverage[c]["synthetic_self_nn_radius"] for c in CLASS_ORDER},
-        "domain_auc": {
-            c: float(domain[c]["domain_classifier_auc_mean"]) for c in CLASS_ORDER
-        },
-        "local_opposite_fraction": {
-            c: float(domain[c]["local_opposite_domain_fraction"]) for c in CLASS_ORDER
-        },
-        "chain": {
-            label: {c: chain[label][c]["real_within_radius_fraction"] for c in CLASS_ORDER}
-            for label, _ in CONDITIONS
-        },
-    })
-    print(f"window {window:5d}  {real_features.shape[1]:3d}-D  "
-          f"EV16 {pca.explained_variance_ratio_.sum():.4f}  "
-          f"coverage " + " ".join(
-              f"{c} {100 * coverage[c]['real_within_radius_fraction']:5.1f}%"
-              for c in CLASS_ORDER)
-          + f"   ({time.time() - started:.0f} s)")
+    sweep.append(window_sweep_row(window, real, basis, chain, domain, CLASS_ORDER))
+    print_sweep_line(sweep[-1], CLASS_ORDER, time.time() - started)
 
 # %% [markdown]
 # #### Reproduction check at the published window
 #
 # At 1 024 the invariant descriptor is the identity, so the whole chain must
-# return the published q80 numbers unchanged. This is what licenses reading the
-# other two windows as a change of window rather than a change of method.
+# return the published q80 numbers unchanged. A non-zero deviation here would
+# mean the sweep changed the method rather than the window, and nothing below
+# would be readable.
 
 # %%
 reference = published("particle-z8-v2-coverage-conditions-q80-r1")
@@ -1971,7 +2322,7 @@ baseline = next(row for row in sweep if row["window"] == REFERENCE_WINDOW)
 window_deviation = max(
     abs(baseline["chain"][label][class_name]
         - reference["conditions"][label]["classes"][class_name]["real_within_radius_fraction"])
-    for label, _ in CONDITIONS
+    for label in baseline["chain"]
     for class_name in CLASS_ORDER
 )
 assert window_deviation == 0.0, f"reproduction drifted by {window_deviation:.3e}"
@@ -1982,126 +2333,92 @@ print("at 1024 the swept chain reproduces "
 # %%
 draw_window_sweep(sweep, CLASS_ORDER, CLASS_COLOUR)
 
-# %% [markdown]
-# ### The sweep refutes the plan
-#
-# The alignment note expected a wider window to describe reality better. It does
-# the opposite, and both quantities agree, which is what makes the result hard to
-# dismiss: coverage **falls** from 93.6 % to 71.1 % at 2 µm as the window widens,
-# while the domain AUC **rises** from 0.66 to 0.75 — real and synthetic become
-# *easier* to tell apart, not harder.
-#
-# A story the numbers refute is itself the finding, so the recommendation in the
-# plan does not survive this section unchanged. But before reading the sweep as
-# "narrow is better", the objection raised above has to be settled properly.
-
 # %%
-print(f"{'window':>7} {'dims':>5} {'EV16':>7}   "
-      + "   ".join(f"{c:>18}" for c in CLASS_ORDER))
-for row in sweep:
-    cells = "   ".join(
-        f"{100 * row['coverage'][c]:5.1f}% / {row['domain_auc'][c]:.3f}" for c in CLASS_ORDER
-    )
-    print(f"{row['window']:>7} {row['descriptor_dimensions']:>5} "
-          f"{row['explained_variance_16']:>7.4f}   {cells}")
-print("\ncells are coverage / domain AUC; AUC nearer 0.5 means real and synthetic "
-      "are harder to tell apart")
+print_window_sweep(sweep, CLASS_ORDER)
 
 # %% [markdown]
-# #### Is the wider window merely adding silence the simulator gets wrong?
+# **The conclusion: the sweep refutes the plan.** The alignment note expected a
+# wider window to describe reality better. It does the opposite, and both
+# quantities agree, which is what makes the result hard to dismiss: coverage
+# **falls** from 93.6 % to 71.1 % at 2 µm as the window widens, while the domain
+# AUC **rises** from 0.66 to 0.75 — real and synthetic become *easier* to tell
+# apart, not harder. A story the numbers refute is itself the finding, so the
+# recommendation in the plan does not survive this section unchanged.
 #
-# The objection was that a wider window buys shared noise. The inverse objection
-# now matters more: perhaps the synthetic traces are simply *not realistic*
-# outside their central core — zero padding, an unmodelled edge, a noise carrier
-# injected only near the event — in which case widening the window would punish
-# the simulator for something trivial rather than measure it.
+# **What it leaves open.** Two readings are still on the table, and they differ
+# in what they would have the project do. Either the narrow window is genuinely
+# the better description of an event, or the synthetic traces are simply
+# unrealistic outside their central core and the wider window is punishing an
+# artefact. The next step separates them.
 #
-# That is testable in one figure: the energy profile of both populations across
-# the same 4 096 window.
-
-# %% [markdown]
-# The comparison has to be **class-matched**. A first attempt on the leading rows
-# of each table showed a 66 % amplitude gap in the event core, which dissolved
-# once classes were matched: the two tables are ordered differently by class, so
-# the gap was composition, not physics. Recording that here because it is the
-# trap this control exists to avoid.
+# ### Step 3 · Is the wider window punishing an artefact?
+#
+# **The problem.** If the generator zero-pads, flattens or otherwise abandons the
+# trace outside the event — an unmodelled edge, a noise carrier injected only
+# near the centre — then widening the window measures a packaging decision rather
+# than the simulator's physics, and the sweep says nothing about description
+# quality at all.
+#
+# **The process.** One figure settles it: the energy profile of both populations
+# across the same 4 096-sample window, in blocks of 512 samples. The comparison
+# has to be **class-matched**. A first attempt on the leading rows of each table
+# showed a 66 % amplitude gap in the event core, which dissolved once classes
+# were matched — the two tables are ordered differently by class, so the gap was
+# composition, not physics. Recording that here because it is the trap this
+# control exists to avoid.
 
 # %%
 BLOCK = 512
-CORE = slice(1536, 2560)
-_synthetic_rows = read_rows(condition_roots["asymmetry_5d"] / "events.csv")
-_synthetic_class = np.asarray([row["class_name"] for row in _synthetic_rows])
-_synthetic_raw = np.load(
-    condition_roots["asymmetry_5d"] / "signals_raw_4096.npy",
-    mmap_mode="r", allow_pickle=False,
-)
-_real_raw = real_cores(4096)
-_generator = np.random.default_rng(SEED)
+CORE = slice(1536, 2560)  # the 1024-sample window the descriptor reads
+terminal_root = conditions.roots["asymmetry_5d"]  # roots do not depend on the window
+terminal_raw = np.load(terminal_root / "signals_raw_4096.npy",
+                       mmap_mode="r", allow_pickle=False)
+terminal_labels = conditions.labels  # class_name is a paired field, so it is shared
+generator = np.random.default_rng(SEED)
 
-
-def block_rms(values):
-    blocks = np.asarray(values, dtype=np.float64).reshape(len(values), 4096 // BLOCK, BLOCK)
-    return np.median(np.sqrt(np.mean(np.square(blocks), axis=2)), axis=0)
-
-
-profiles = {}
-core_ratios = {}
+profiles, ratios, counts = {}, {}, {}
 for class_name in CLASS_ORDER:
-    real_slice = _real_raw[real_labels == class_name]
-    eligible = np.flatnonzero(_synthetic_class == class_name)
-    drawn = np.sort(_generator.choice(eligible, size=len(real_slice), replace=False))
-    synthetic_slice = np.asarray(_synthetic_raw[drawn])
-    profiles[class_name] = (block_rms(real_slice), block_rms(synthetic_slice))
-    core_ratios[class_name] = tuple(
-        float(np.median(
-            np.sqrt(np.mean(np.square(values[:, CORE].astype(np.float64)), axis=1))
-            / np.sqrt(np.mean(np.square(
-                np.concatenate([values[:, :1536], values[:, 2560:]], axis=1).astype(np.float64)
-            ), axis=1))
-        ))
-        for values in (real_slice, synthetic_slice)
-    )
+    real_slice = widest.by_class(widest.cores, class_name)
+    eligible = np.flatnonzero(terminal_labels == class_name)
+    drawn = np.sort(generator.choice(eligible, size=len(real_slice), replace=False))
+    synthetic_slice = np.asarray(terminal_raw[drawn])
+    profiles[class_name] = (block_energy_profile(real_slice, block=BLOCK),
+                            block_energy_profile(synthetic_slice, block=BLOCK))
+    ratios[class_name] = (core_context_ratio(real_slice, CORE),
+                          core_context_ratio(synthetic_slice, CORE))
+    counts[class_name] = int(len(real_slice))
 
-figure, axes = plt.subplots(1, 3, figsize=(13, 3.2), sharex=True)
-positions = np.arange(4096 // BLOCK) * BLOCK + BLOCK / 2
-for axis, class_name in zip(axes, CLASS_ORDER):
-    real_profile, synthetic_profile = profiles[class_name]
-    axis.plot(positions, real_profile, marker="o", color="#334155", label="real")
-    axis.plot(positions, synthetic_profile, marker="s", color=CLASS_COLOUR[class_name],
-              label="synthetic")
-    axis.axvspan(1536, 2560, color="#94a3b8", alpha=0.25)
-    axis.set(title=f"{class_name} · n = {int((real_labels == class_name).sum())}",
-             xlabel="sample within the 4096 window")
-    axis.spines[["top", "right"]].set_visible(False)
-axes[0].set_ylabel("median block RMS")
-axes[0].legend(frameon=False, fontsize=8)
-figure.suptitle("Shaded band is the 1024-sample window the descriptor reads", y=1.04,
-                fontsize=9)
-figure.tight_layout()
-
-print(f"{'class':>6} {'core/context real':>19} {'synthetic':>10}")
-for class_name in CLASS_ORDER:
-    real_ratio, synthetic_ratio = core_ratios[class_name]
-    print(f"{class_name:>6} {real_ratio:19.2f} {synthetic_ratio:10.2f}")
+draw_energy_profiles(profiles, counts, CLASS_ORDER, CLASS_COLOUR, block=BLOCK, core=CORE)
+print_core_context(ratios, CLASS_ORDER)
 
 # %% [markdown]
-# Class by class, the two populations carry the same energy in the same places:
-# the synthetic traces are not padded and not flat outside the core, so the wider
-# window is not punishing an artefact. The one visible discrepancy is at 10 µm,
-# where synthetic events stand out against their context more than real ones do
-# (a core-to-context ratio of 3.7 against 2.7) — a real mismatch, and one the
-# 1 024-sample window cannot see because at that width the window *is* the core.
+# **The conclusion.** Class by class, the two populations carry the same energy
+# in the same places: the synthetic traces are not padded and not flat outside
+# the core, so the wider window is not punishing an artefact and the sweep is
+# measuring the simulator. The one visible discrepancy is at 10 µm, where
+# synthetic events stand out against their context more than real ones do — a
+# core-to-context ratio of 3.7 against 2.7. That is a real mismatch, and one the
+# 1 024-sample window cannot see, because at that width the window *is* the core.
 #
-# #### What the window actually selects
+# **What it leaves open.** The control shows the context is modelled, not that it
+# is modelled *well*; the 10 µm gap is exactly the kind of thing a wider window
+# would start charging the generator for, and no run measures how much.
 #
-# Put the two measurements together. The 1 024-sample window covers the event's
-# high-energy core but clips the low-amplitude tails that the detector's support
-# includes, which is why 96.2 % of annotated supports are wider than it. Widening
-# to 4 096 admits those tails *and* several thousand samples of instrument
-# context that the generator never claimed to model.
+# ### Step 4 · What the window actually selects
 #
-# So the sweep is not ranking descriptions of the event. It is measuring **how
-# much of the recording you agree to be judged on**:
+# **The problem.** Two honest measurements now disagree, and a reader has to be
+# told which question each answers. Put the sweep beside the annotated supports:
+# the 1 024-sample window covers the event's high-energy core but clips the
+# low-amplitude tails the detector's support includes, while 4 096 admits those
+# tails *and* several thousand samples of instrument context the generator never
+# claimed to model.
+
+# %%
+print_support_containment(widest.support_widths, WINDOWS)
+
+# %% [markdown]
+# **The conclusion.** The sweep is not ranking descriptions of the event. It is
+# measuring **how much of the recording you agree to be judged on**:
 #
 # - at 1 024 the test asks "does the simulator reproduce the core of an event?"
 #   and the answer is yes, for 85–94 % of real events;
@@ -2109,30 +2426,17 @@ for class_name in CLASS_ORDER:
 #   surroundings*?" and the answer drops to 63–71 %.
 #
 # Neither number is wrong. The narrow one is the more flattering, and the deck
-# currently reports it without saying which question it answers. That is the
-# finding this section delivers, and it is an editorial decision as much as a
-# technical one.
-
-# %%
-support_widths = np.sort([
-    float(row["end_sample"]) - float(row["start_sample"]) for row in real_rows
-])
-print("fraction of annotated supports wider than the window")
-for window in WINDOWS:
-    print(f"  {window:5d} : {100 * np.mean(support_widths > window):5.1f} %")
-print(f"\nsupport width: median {np.median(support_widths):.0f}, "
-      f"p90 {np.percentile(support_widths, 90):.0f}, max {support_widths.max():.0f}")
-
-# %% [markdown]
+# reports it without saying which question it answers. That is the finding this
+# section delivers, and it is an editorial decision as much as a technical one.
+#
 # #### Recommendation
 #
-# **Keep the descriptor window-invariant, and do not adopt 4 096 for the
-# coverage claim on the strength of the original argument** — that argument was
-# that a wider window describes the event better, and it is refuted here.
+# **Keep the descriptor window-invariant, and do not adopt 4 096 for the coverage
+# claim on the strength of the original argument** — that argument was that a
+# wider window describes the event better, and it is refuted here. What the
+# numbers support instead:
 #
-# What the numbers support instead:
-#
-# 1. **Adopt the fixed 37-band grid and the bin-unit smoothing regardless.** They
+# 1. **Keep the fixed 37-band grid and the bin-unit smoothing regardless.** They
 #    are the identity at 1 024, so they cost nothing today, and they are what
 #    makes any future window change interpretable at all.
 # 2. **Report the window as part of the claim.** "85–94 % coverage of the event
@@ -2143,67 +2447,40 @@ print(f"\nsupport width: median {np.median(support_widths):.0f}, "
 #    is more convincing than either alone, and it pre-empts the exact objection a
 #    jury would raise.
 #
-# What this section does **not** settle: whether retrieval behaves the same way
-# under a wider window (it is measured on the encoder's own 512-point input, a
-# different path), and whether the MAD corpus — whose supports run to 4 000
-# samples — will shift the balance. Both belong to the redo.
+# **What this section does not settle.** Whether retrieval behaves the same way
+# under a wider window: it is measured on the encoder's own 512-point input, a
+# different path this sweep never touches. Whether the MAD corpus — whose
+# supports run to 4 000 samples — shifts the balance, since every number here is
+# measured on z8 detections. And whether the 10 µm context mismatch is worth
+# fixing in the generator, which needs a measurement no run currently owns. All
+# three belong to the redo.
 
 # %%
+metrics, provenance = window_evidence(
+    sweep,
+    windows=WINDOWS,
+    quantile=QUANTILE,
+    seed=SEED,
+    bands=BAND_CENTRES.size,
+    envelope_bins=ENVELOPE_BINS,
+    band_hz=BAND_HZ,
+    reproduction={
+        "run_id": "particle-z8-v2-coverage-conditions-q80-r1",
+        "max_deviation": window_deviation,
+    },
+    datasets=registry.provenance(),
+    inputs={"events_csv_sha256": notebook_evidence.sha256_file(widest.events_csv)},
+)
 try:
     emitted = notebook_evidence.emit_run(
         workspace,
         section="window-alignment-sweep",
-        metrics={
-            "schema_version": 1,
-            "analysis": "morphology-descriptor-window-sweep",
-            "windows": WINDOWS,
-            "quantile": QUANTILE,
-            "seed": SEED,
-            "descriptor": (
-                "window-invariant prototype: fixed 37-band grid on 7-80 kHz, "
-                "envelope smoothing in bin units; identity at 1024"
-            ),
-            "identity_deviation_at_reference_window": identity_deviation,
-            "reproduces": {
-                "run_id": "particle-z8-v2-coverage-conditions-q80-r1",
-                "max_deviation": window_deviation,
-            },
-            "sweep": sweep,
-        },
-        provenance={
-            "datasets": dataset_provenance(),
-            "inputs": {
-                "events_csv_sha256": notebook_evidence.sha256_file(
-                    real_root / "events.csv"
-                )
-            },
-            "parameters": {
-                "windows": list(WINDOWS),
-                "band_hz": list(BAND_HZ),
-                "spectral_bands": int(BAND_CENTRES.size),
-                "envelope_bins": ENVELOPE_BINS,
-                "components": 16,
-                "quantile": QUANTILE,
-                "seed": SEED,
-                "basis": "one PCA fitted on every condition pooled, per window",
-                "sample": "one balanced synthetic draw per class, shared by conditions",
-            },
-            "metric_definitions": {
-                "coverage": (
-                    "real fraction below that condition's synthetic self-nearest-"
-                    "neighbour 80th percentile"
-                ),
-                "domain_auc": (
-                    "five-fold cross-validated logistic separation of real from "
-                    "synthetic in the 16-component basis; 0.5 is indistinguishable"
-                ),
-                "nn_median": "median euclidean distance from a real event to its nearest synthetic",
-            },
-        },
+        metrics=metrics,
+        provenance=provenance,
         claim_boundary=(
             "Measures how the morphology descriptor's window changes coverage, "
             "domain separability and neighbour distance on the z8 development "
-            "events, using a window-invariant descriptor prototype that is the "
+            "events, with the shipped window-invariant descriptor that is the "
             "identity at 1024. It recommends a window; it does not adopt one, "
             "does not re-measure retrieval, and authorizes no dataset promotion."
         ),
@@ -2220,8 +2497,9 @@ except WorkspaceError as error:
 # has not adopted, and its conclusions are recommendations, not shipped
 # decisions.*
 #
-# The coverage claim of this work has the form *"n % of real events fall inside
-# the synthetic support"*. That sentence hides two dials the reader never sees:
+# **The problem.** The coverage claim of this work has the form *"n % of real
+# events fall inside the synthetic support"*. That sentence hides two dials the
+# reader never sees:
 #
 # - the **radius quantile** — "inside" means *within a distance r* of some
 #   synthetic event, and r is a quantile of the synthetic cloud's own
@@ -2246,139 +2524,98 @@ except WorkspaceError as error:
 # sentences does not survive at all.
 
 # %%
-from scipy.linalg import subspace_angles  # noqa: E402
-from scipy.spatial.distance import pdist  # noqa: E402
-from scipy.stats import pearsonr, spearmanr  # noqa: E402
-from sklearn.decomposition import PCA  # noqa: E402
-from sklearn.neighbors import NearestNeighbors  # noqa: E402
-from sklearn.preprocessing import StandardScaler  # noqa: E402
-
-from internship_workspace.z8_coverage import (  # noqa: E402
-    batched_features,
-    load_real_core,
-    read_rows,
-    shared_class_sample,
-    support_coverage,
-    validate_pair,
+from internship_workspace.chain_data import (  # noqa: E402
+    Registry,
+    coverage_chain,
+    load_conditions,
+    load_real_events,
+    pooled_basis,
 )
+from internship_workspace.z8_coverage import support_coverage  # noqa: E402
 from internship_workspace.z8_domain_pca import (  # noqa: E402
     balanced_class_indices,
     domain_metrics,
     fit_synthetic_pca,
 )
+from scipy.linalg import subspace_angles  # noqa: E402
+from scipy.stats import pearsonr, spearmanr  # noqa: E402
+from sklearn.decomposition import PCA  # noqa: E402
+from sklearn.neighbors import NearestNeighbors  # noqa: E402
+from sklearn.preprocessing import StandardScaler  # noqa: E402
 
-CONDITIONS = (
-    ("white_noise_4d",
-     "particles2snr-fbase-z8-cholesky-physicalcorr-effective-snr-synthetic-events@v3"),
-    ("real_noise_4d",
-     "particles2snr-fbase-z8-cholesky-physicalcorr-effective-snr-synthetic-events@v4"),
-    ("asymmetry_5d",
-     "particles2snr-fbase-z8-cholesky-physicalcorr-effective-snr-synthetic-events@v5"),
-)
-CONDITION_LABELS = [label for label, _ in CONDITIONS]
 CHAIN_SEED = 20260809
-REAL_KEY = "particles2snr-fbase-dual-clean-z8-events-3class-plus-unclear-development@v2"
-SIGNAL_KEY = "particles2snr-f-dual-clean-c1-yolo-4class@v2"
-
 started = time.time()
-real_root = dataset_root(REAL_KEY)
-signal_root = dataset_root(SIGNAL_KEY)
-all_rows = read_rows(real_root / "events.csv")
-if any(row["split"] == "test" for row in all_rows):
-    raise PermissionError("sealed test rows are forbidden")
-real_rows = [
-    row for row in all_rows
-    if row["class_name"] in CLASS_ORDER and row["split"] in {"train", "val"}
-]
-real_labels = np.asarray([row["class_name"] for row in real_rows])
-real_features = batched_features(load_real_core(real_rows, signal_root))
+registry = Registry(workspace)
+real = load_real_events(registry)
+conditions = load_conditions(registry)
+basis = pooled_basis(conditions, real.labels, seed=CHAIN_SEED)
 
-condition_features = {}
-reference_rows = None
-for label, key in CONDITIONS:
-    root = dataset_root(key)
-    rows = read_rows(root / "events.csv")
-    if reference_rows is None:
-        reference_rows = rows
-    else:
-        validate_pair(reference_rows, rows)
-    condition_features[label] = batched_features(
-        np.asarray(
-            np.load(root / "signals_raw_4096.npy", mmap_mode="r",
-                    allow_pickle=False)[:, 1536:2560]
-        )
-    )
-synthetic_labels = np.asarray([row["class_name"] for row in reference_rows])
-chain_sample = shared_class_sample(synthetic_labels, real_labels, seed=CHAIN_SEED)
-
-fit_rows = np.concatenate(
-    [condition_features[label][np.concatenate(list(chain_sample.values()))]
-     for label in CONDITION_LABELS],
-    axis=0,
-)
-chain_scaler = StandardScaler().fit(fit_rows)
-chain_pca = PCA(n_components=16, svd_solver="full").fit(chain_scaler.transform(fit_rows))
-chain_project = lambda values: chain_pca.transform(chain_scaler.transform(values))  # noqa: E731
-chain_real = np.asarray(chain_project(real_features), dtype=np.float64)
+chain_real = np.asarray(basis.project(real.features), dtype=np.float64)
 chain_synthetic = {
-    label: np.asarray(chain_project(condition_features[label]), dtype=np.float64)
-    for label in CONDITION_LABELS
+    label: np.asarray(basis.project(conditions.features[label]), dtype=np.float64)
+    for label in conditions.order
 }
-print(f"{len(real_rows)} real train/val events, {len(reference_rows)} synthetic per "
-      f"condition, descriptor {real_features.shape[1]}-D  ({time.time() - started:.0f} s)")
+print(f"{len(real.rows)} real train/val events, {len(conditions.labels)} synthetic per "
+      f"condition, descriptor {real.features.shape[1]}-D  ({time.time() - started:.0f} s)")
+
+
+def coverage_at(label, quantile, dimensions=16):
+    """The shipped coverage protocol, at one condition and one radius quantile.
+
+    Everything except the quantile is held fixed: the pooled PCA(16) basis, the
+    balanced synthetic draw the radius is taken over (seed 20260809), and the
+    full synthetic class population a real event is measured against.
+    """
+    return support_coverage(
+        chain_real, chain_synthetic[label], real.labels, conditions.labels,
+        sample=basis.sample, quantile=quantile, dimensions=dimensions,
+    )
+
 
 # %% [markdown]
 # ### Reproducing the published q80 chain
 #
 # Nothing below is readable unless this notebook computes the same chain the deck
-# quotes. The protocol is the shipped one: one PCA(16) fitted on the three
-# generator conditions pooled, one balanced synthetic draw shared across
-# conditions (seed 20260809), a radius recomputed per condition, euclidean
-# distance in 16 dimensions, real events cropped to 1 024 samples and synthetic
-# events sliced from the same 1 024 samples of their 4 096-sample core.
+# quotes. The protocol is the shipped one, loaded through
+# `internship_workspace.chain_data`: one PCA(16) fitted on the three generator
+# conditions pooled, one balanced synthetic draw shared across conditions, a
+# radius recomputed per condition, euclidean distance in 16 dimensions, real
+# events cropped to 1 024 samples and synthetic events sliced from the same
+# 1 024 samples of their 4 096-sample core.
 
 # %%
-chain = {
-    label: support_coverage(
-        chain_real, chain_synthetic[label], real_labels, synthetic_labels,
-        sample=chain_sample, quantile=0.80,
-    )
-    for label in CONDITION_LABELS
-}
+chain = coverage_chain(basis, real, conditions, quantile=0.80)
 reference = published("particle-z8-v2-coverage-conditions-q80-r1")
-chain_deviation = max(
-    abs(chain[label][class_name]["real_within_radius_fraction"]
-        - reference["conditions"][label]["classes"][class_name]["real_within_radius_fraction"])
-    for label in CONDITION_LABELS for class_name in CLASS_ORDER
-)
-radius_deviation = max(
-    abs(chain[label][class_name]["synthetic_self_nn_radius"]
-        - reference["conditions"][label]["classes"][class_name]["synthetic_self_nn_radius"])
-    for label in CONDITION_LABELS for class_name in CLASS_ORDER
-)
+deviation = {
+    field: max(abs(chain[label][class_name][field]
+                   - reference["conditions"][label]["classes"][class_name][field])
+               for label in conditions.order for class_name in CLASS_ORDER)
+    for field in ("real_within_radius_fraction", "synthetic_self_nn_radius")
+}
+chain_deviation = deviation["real_within_radius_fraction"]
+radius_deviation = deviation["synthetic_self_nn_radius"]
 assert chain_deviation == 0.0, f"reproduction drifted by {chain_deviation:.3e}"
 assert radius_deviation == 0.0, f"radius drifted by {radius_deviation:.3e}"
 for class_name in CLASS_ORDER:
-    values = [chain[label][class_name]["real_within_radius_fraction"]
-              for label in CONDITION_LABELS]
-    print(f"{class_name:>5}  " + " → ".join(f"{value:.6f}" for value in values))
+    print(f"{class_name:>5}  " + " → ".join(
+        f"{chain[label][class_name]['real_within_radius_fraction']:.6f}"
+        for label in conditions.order))
 print("\nreproduces particle-z8-v2-coverage-conditions-q80-r1 exactly "
       f"(coverage and radius, max deviation {chain_deviation:.1e})")
 
 # %% [markdown]
 # ### Part 1 · What the quantile decides
 #
-# Four runs exist on this identical pipeline, differing only by `--quantile`:
-# q95 (the tool's default, and the deck's original choice), q90, q85 and q80.
-# They are the cleanest controlled experiment available on this question, because
-# the basis, the sample, the seed and the data are byte-identical across them —
-# only the tick on the ruler moves.
-#
-# The first question is whether the quantile **fabricates** the story or merely
-# **amplifies** it. Those are different failures. Amplification is a presentation
-# problem: the ranking is real and the reader is being shown its most flattering
-# scale. Fabrication would be a scientific problem: the ranking itself would
-# depend on an arbitrary choice.
+# **The problem.** Four runs exist on this identical pipeline, differing only by
+# `--quantile`: q95 (the tool's default, and the deck's original choice), q90,
+# q85 and q80. They are the cleanest controlled experiment available on this
+# question, because the basis, the sample, the seed and the data are
+# byte-identical across them — only the tick on the ruler moves. What has never
+# been asked is whether the quantile **fabricates** the story or merely
+# **amplifies** it. Those are different failures: amplification is a presentation
+# problem, where the ranking is real and the reader is shown its most flattering
+# scale; fabrication would be a scientific problem, where the ranking itself
+# depends on an arbitrary choice.
 
 # %%
 PUBLISHED_QUANTILES = (0.80, 0.85, 0.90, 0.95)
@@ -2392,24 +2629,17 @@ for quantile, payload in published_runs.items():
     assert payload["configuration"]["quantile"] == quantile
     assert payload["pca"]["explained_variance_16"] == \
         published_runs[0.95]["pca"]["explained_variance_16"]
-print("the four runs share one basis "
-      f"(explained variance over 16 components "
+print("the four runs share one basis (explained variance over 16 components "
       f"{published_runs[0.95]['pca']['explained_variance_16']:.6f}); "
       "only the quantile differs\n")
-print(f"{'step':>34} " + "  ".join(f"{c:>16}" for c in CLASS_ORDER))
-for step in ("white_noise_4d -> real_noise_4d", "real_noise_4d -> asymmetry_5d"):
-    for quantile in PUBLISHED_QUANTILES:
-        gains = published_runs[quantile]["gains_percentage_points"][step]
-        print(f"{step + f'  q{quantile:.2f}':>34} "
-              + "  ".join(f"{gains[c]:+15.2f}pp" for c in CLASS_ORDER))
-    print()
+print_published_gains(published_runs, PUBLISHED_QUANTILES, CLASS_ORDER)
 
 # %% [markdown]
-# The gains move a great deal. The first generator step — replacing white noise
-# with measured instrument noise — is worth **+14.3 points** at 2 µm when scored
-# at q95 and **+31.0 points** at q80: the headline more than doubles. The second
-# step — the paired asymmetry — is worth **+3.1 points** at 4 µm under q95 and
-# **+9.8** under q80: it triples.
+# **The conclusion so far.** The gains move a great deal. The first generator
+# step — replacing white noise with measured instrument noise — is worth
+# **+14.3 points** at 2 µm when scored at q95 and **+31.0 points** at q80: the
+# headline more than doubles. The second step — the paired asymmetry — is worth
+# **+3.1 points** at 4 µm under q95 and **+9.8** under q80: it triples.
 #
 # Both movements have the same cause, and it is not rhetorical. At q95 the radius
 # is generous enough that the middle condition already covers 98.0 % of the 2 µm
@@ -2418,30 +2648,18 @@ for step in ("white_noise_4d -> real_noise_4d", "real_noise_4d -> asymmetry_5d")
 # measurement, which is a legitimate reason to prefer q80 and a better one than
 # "q80 is stricter, therefore more honest".
 #
-# That still leaves the fabrication question open. Answering it needs the sweep
-# to go where no run has been — below 0.80 — because a story that only holds on
-# the four quantiles someone chose to publish is not a story.
+# **What it leaves open.** The fabrication question. A story that only holds on
+# the four quantiles someone chose to publish is not a story, so the sweep has to
+# go where no run has been — below 0.80.
 
 # %%
 QUANTILE_GRID = tuple(round(float(value), 2) for value in np.arange(0.10, 0.96, 0.05))
 started = time.time()
-quantile_sweep = {}
-for quantile in QUANTILE_GRID:
-    quantile_sweep[quantile] = {
-        label: {
-            class_name: {
-                "coverage": measured[class_name]["real_within_radius_fraction"],
-                "radius": measured[class_name]["synthetic_self_nn_radius"],
-            }
-            for class_name in CLASS_ORDER
-        }
-        for label, measured in (
-            (label, support_coverage(
-                chain_real, chain_synthetic[label], real_labels, synthetic_labels,
-                sample=chain_sample, quantile=quantile))
-            for label in CONDITION_LABELS
-        )
-    }
+quantile_sweep = {
+    quantile: {label: coverage_row(coverage_at(label, quantile), CLASS_ORDER)
+               for label in conditions.order}
+    for quantile in QUANTILE_GRID
+}
 violations = [
     (quantile, class_name)
     for quantile in QUANTILE_GRID for class_name in CLASS_ORDER
@@ -2454,7 +2672,7 @@ grid_deviation = max(
         - published_runs[quantile]["conditions"][label]["classes"][class_name][
             "real_within_radius_fraction"])
     for quantile in PUBLISHED_QUANTILES
-    for label in CONDITION_LABELS for class_name in CLASS_ORDER
+    for label in conditions.order for class_name in CLASS_ORDER
 )
 assert grid_deviation == 0.0, f"the swept grid drifted by {grid_deviation:.3e}"
 print(f"swept {len(QUANTILE_GRID)} quantiles from {min(QUANTILE_GRID):.2f} to "
@@ -2464,17 +2682,18 @@ print(f"orderings white < real-noise < asymmetry violated: "
       f"{len(violations)} of {len(QUANTILE_GRID) * len(CLASS_ORDER)}")
 
 # %%
-draw_quantile_curve(quantile_sweep, QUANTILE_GRID, CONDITION_LABELS, CLASS_ORDER,
+draw_quantile_curve(quantile_sweep, QUANTILE_GRID, list(conditions.order), CLASS_ORDER,
                     CLASS_COLOUR, PUBLISHED_QUANTILES)
 
 # %% [markdown]
-# **The quantile amplifies; it does not fabricate.** Across 0.10 to 0.95 — a range
-# far wider than anyone would defend — the three conditions never change places,
-# in any class: 54 orderings, 0 violations. The chain's conclusion, that measured
-# noise buys most of the coverage and asymmetry finishes it, is a property of the
-# generator changes and not of the ruler.
+# **The conclusion: the quantile amplifies; it does not fabricate.** Across 0.10
+# to 0.95 — a range far wider than anyone would defend — the three conditions
+# never change places, in any class: 54 orderings, 0 violations. The chain's
+# conclusion, that measured noise buys most of the coverage and asymmetry
+# finishes it, is a property of the generator changes and not of the ruler.
 #
-# What *is* a property of the ruler is every absolute number the deck prints.
+# **What it leaves open.** Every *absolute* number the deck prints is still a
+# property of the ruler, and one sentence in particular is built on one.
 
 # %%
 draw_gain_amplification(published_runs, PUBLISHED_QUANTILES, CLASS_ORDER, CLASS_COLOUR)
@@ -2482,106 +2701,86 @@ draw_gain_amplification(published_runs, PUBLISHED_QUANTILES, CLASS_ORDER, CLASS_
 # %% [markdown]
 # #### Where the argument breaks
 #
-# The deck's closing sentence on the chain is that **every class ends above the
-# 80 % line**. At q80 that reads as a coincidence worth exploiting: 80 % of the
-# synthetic reference events lie within the radius of another synthetic event, so
-# a coverage above 80 % looks like "real events are covered better than the
-# synthetic cloud covers itself".
-#
-# Two things have to be checked before that sentence can be used. First, where it
-# stops being arithmetically true. Second — and this is the sharper objection —
-# whether the two numbers being compared are measurements of the same thing.
+# **The problem.** The deck's closing sentence on the chain is that **every class
+# ends above the 80 % line**. At q80 that reads as a coincidence worth exploiting:
+# 80 % of the synthetic reference events lie within the radius of another
+# synthetic event, so a coverage above 80 % looks like "real events are covered
+# better than the synthetic cloud covers itself". Two things have to be checked
+# before that sentence can be used — where it stops being arithmetically true,
+# and whether the two numbers being compared are measurements of the same thing.
 
 # %%
 CROSSING_GRID = tuple(round(float(value), 2) for value in np.arange(0.60, 0.96, 0.01))
-crossing = {}
-for quantile in CROSSING_GRID:
-    measured = support_coverage(
-        chain_real, chain_synthetic["asymmetry_5d"], real_labels, synthetic_labels,
-        sample=chain_sample, quantile=quantile,
-    )
-    crossing[quantile] = {c: measured[c]["real_within_radius_fraction"] for c in CLASS_ORDER}
-above_bar = min(q for q in CROSSING_GRID
-                if all(crossing[q][c] >= 0.80 for c in CLASS_ORDER))
-above_self = max(q for q in CROSSING_GRID
-                 if all(crossing[q][c] >= q for c in CLASS_ORDER))
-print("terminal condition · margin of coverage over the quantile itself")
-print(f"{'q':>6} " + "  ".join(f"{c:>16}" for c in CLASS_ORDER))
-for quantile in PUBLISHED_QUANTILES[::-1]:
-    row = published_runs[quantile]["conditions"]["asymmetry_5d"]["classes"]
-    print(f"{quantile:>6.2f} " + "  ".join(
-        f"{100 * row[c]['real_within_radius_fraction']:6.2f}% "
-        f"({100 * (row[c]['real_within_radius_fraction'] - quantile):+5.1f})"
-        for c in CLASS_ORDER))
-print(f"\nevery class stays above 80 % for q >= {above_bar:.2f}; at q = "
-      f"{round(above_bar - 0.01, 2):.2f} the 4 µm class falls to "
-      f"{100 * crossing[round(above_bar - 0.01, 2)]['4um']:.1f} %")
-print(f"every class stays above its own quantile for q <= {above_self:.2f}; at q = "
-      f"{round(above_self + 0.01, 2):.2f} the 10 µm class falls "
-      f"{100 * (round(above_self + 0.01, 2) - crossing[round(above_self + 0.01, 2)]['10um']):.1f} "
-      "points short of the bar")
-print(f"the sentence therefore holds only for {above_bar:.2f} <= q <= {above_self:.2f}")
+crossing = {
+    quantile: {c: coverage_at("asymmetry_5d", quantile)[c]["real_within_radius_fraction"]
+               for c in CLASS_ORDER}
+    for quantile in CROSSING_GRID
+}
+above_bar = min(q for q in CROSSING_GRID if all(crossing[q][c] >= 0.80 for c in CLASS_ORDER))
+above_self = max(q for q in CROSSING_GRID if all(crossing[q][c] >= q for c in CLASS_ORDER))
+print_crossing(published_runs, PUBLISHED_QUANTILES, crossing, above_bar, above_self,
+               CLASS_ORDER)
 
 # %% [markdown]
-# Arithmetically the sentence lives in a corridor, **0.72 ≤ q ≤ 0.91**, and the
-# deck's previous choice was outside it. At q95 the sentence is simply false:
-# 10 µm covers 93.5 % against a 95 % bar, a margin of −1.5 points, and 4 µm
-# clears its own bar by 0.2. Below q = 0.72 it fails at the other end, the 4 µm
-# class dropping under 80 %. So the move to q80 did not merely make the claim
-# stronger — at q95 there was no claim to make. That is worth saying plainly,
-# because it is the one place where a quantile change repaired something rather
-# than flattering it.
-#
-# It also means the sentence is true only over a nineteen-point window of an
-# arbitrary parameter, which is thin support for a closing line.
+# **The conclusion, first half.** Arithmetically the sentence lives in a corridor,
+# **0.72 ≤ q ≤ 0.91**, and the deck's previous choice was outside it. At q95 the
+# sentence is simply false: 10 µm covers 93.5 % against a 95 % bar, a margin of
+# −1.5 points, and 4 µm clears its own bar by 0.2. Below q = 0.72 it fails at the
+# other end, the 4 µm class dropping under 80 %. So the move to q80 did not merely
+# make the claim stronger — at q95 there was no claim to make. That is worth
+# saying plainly, because it is the one place where a quantile change repaired
+# something rather than flattering it. It also means the sentence is true only
+# over a nineteen-point window of an arbitrary parameter, which is thin support
+# for a closing line.
 #
 # #### The sharpest objection: the two numbers are not measured the same way
 #
-# The radius is the 80th percentile of nearest-neighbour distances **inside a
-# thinned reference draw** — one synthetic event per real event of that class,
-# because that is what makes the conditions comparable. But a real event's
-# distance is measured to the **whole** synthetic class population. The two sides
-# of the comparison therefore search reference sets of very different densities.
+# **The problem.** The radius is the 80th percentile of nearest-neighbour
+# distances **inside a thinned reference draw** — one synthetic event per real
+# event of that class, because that is what makes the conditions comparable. But a
+# real event's distance is measured to the **whole** synthetic class population.
+# The two sides of the comparison therefore search reference sets of very
+# different densities.
 
 # %%
-density = {
-    class_name: {
-        "synthetic_population": int((synthetic_labels == class_name).sum()),
-        "reference_draw": int(chain_sample[class_name].size),
-        "real": int((real_labels == class_name).sum()),
-    }
-    for class_name in CLASS_ORDER
-}
-print(f"{'class':>6} {'synthetic cloud':>16} {'reference draw':>15} "
-      f"{'real events':>12} {'density ratio':>14}")
+density = {}
 for class_name in CLASS_ORDER:
-    row = density[class_name]
-    row["density_ratio"] = row["synthetic_population"] / row["reference_draw"]
-    print(f"{class_name:>6} {row['synthetic_population']:>16d} "
-          f"{row['reference_draw']:>15d} {row['real']:>12d} {row['density_ratio']:>13.1f}×")
+    population = int((conditions.labels == class_name).sum())
+    drawn = int(basis.sample[class_name].size)
+    density[class_name] = {
+        "synthetic_population": population,
+        "reference_draw": drawn,
+        "real": int((real.labels == class_name).sum()),
+        "density_ratio": population / drawn,
+    }
+print_reference_density(density, CLASS_ORDER)
 
 # %% [markdown]
 # A real event queries a cloud sixteen to twenty-five times denser than the one
 # whose spacing set the radius. Nearest-neighbour distance falls with density, so
 # real events are being scored on an easier test than the 80 % they are compared
-# against. The control is to score the synthetic events the same way: take the
-# events *not* in the reference draw and measure each one's distance to its
-# nearest **other** synthetic event of the same class in the full cloud — the
-# exact query a real event gets — against the exact same radius.
+# against.
+#
+# **The process.** Score the synthetic events the same way real ones are scored:
+# take the events *not* in the reference draw and measure each one's distance to
+# its nearest **other** synthetic event of the same class in the full cloud — the
+# exact query a real event gets — against the exact same radius. And score the
+# real events the other way round, against the thinned draw, so both populations
+# are compared at one density in both directions.
 
 # %%
 control = {}
 for class_name in CLASS_ORDER:
     scores = chain_synthetic["asymmetry_5d"][:, :16]
-    class_index = np.flatnonzero(synthetic_labels == class_name)
-    reference_cloud = scores[chain_sample[class_name]]
+    class_index = np.flatnonzero(conditions.labels == class_name)
+    reference_cloud = scores[basis.sample[class_name]]
     self_distance = NearestNeighbors(n_neighbors=2).fit(reference_cloud).kneighbors(
         reference_cloud, return_distance=True)[0][:, 1]
     radius = float(np.quantile(self_distance, 0.80))
-    held_out = np.setdiff1d(class_index, chain_sample[class_name])
+    held_out = np.setdiff1d(class_index, basis.sample[class_name])
     synthetic_distance = NearestNeighbors(n_neighbors=2).fit(scores[class_index]).kneighbors(
         scores[held_out], return_distance=True)[0][:, 1]
-    real_slice = chain_real[real_labels == class_name][:, :16]
+    real_slice = chain_real[real.labels == class_name][:, :16]
     real_full = NearestNeighbors(n_neighbors=1).fit(scores[class_index]).kneighbors(
         real_slice, return_distance=True)[0][:, 0]
     real_matched = NearestNeighbors(n_neighbors=1).fit(reference_cloud).kneighbors(
@@ -2602,33 +2801,36 @@ for class_name in CLASS_ORDER:
 draw_density_control(control, CLASS_ORDER, CLASS_COLOUR)
 
 # %% [markdown]
-# The sentence does not survive. Measured the way real events are measured, the
-# synthetic cloud covers **itself** at 99.4 / 97.9 / 99.2 %, against 93.6 / 85.2 /
-# 87.9 % for the real events. Real events are covered *worse* than the synthetic
-# cloud covers itself, by 6 to 13 points — the opposite of what the deck asserts.
-# Measured the other way round, with both populations querying the same thinned
-# cloud, real coverage falls to 56.8 / 68.3 / 70.1 % against the 80 % the
-# reference draw achieves by construction. Either fair comparison inverts the
-# claim; only the unmatched one supports it.
+# **The conclusion: the sentence does not survive.** Measured the way real events
+# are measured, the synthetic cloud covers **itself** at 99.4 / 97.9 / 99.2 %,
+# against 93.6 / 85.2 / 87.9 % for the real events. Real events are covered
+# *worse* than the synthetic cloud covers itself, by 6 to 13 points — the opposite
+# of what the deck asserts. Measured the other way round, with both populations
+# querying the same thinned cloud, real coverage falls to 56.8 / 68.3 / 70.1 %
+# against the 80 % the reference draw achieves by construction. Either fair
+# comparison inverts the claim; only the unmatched one supports it.
 #
 # **What this does and does not damage.** It does not touch the chain's ranking:
-# the density ratio is identical across the three conditions, so it cancels out
-# of every gain the chain reports, which is exactly the quantity the tool was
-# built to measure and the only quantity its claim boundary asserts. What it
-# damages is the *absolute* reading, and specifically the one rhetorical sentence
-# that turns a coverage percentage into a statement about the cloud's own
-# coherence. The 85–94 % is a real measurement of a real question — "how far is a
-# real event from the nearest of ~16 000 synthetic events, compared with a radius
-# derived from a much sparser draw" — but it is not the question the sentence
-# claims it answers.
+# the density ratio is identical across the three conditions, so it cancels out of
+# every gain the chain reports, which is exactly the quantity the tool was built
+# to measure and the only quantity its claim boundary asserts. What it damages is
+# the *absolute* reading, and specifically the one rhetorical sentence that turns
+# a coverage percentage into a statement about the cloud's own coherence. The
+# 85–94 % is a real measurement of a real question — "how far is a real event from
+# the nearest of ~16 000 synthetic events, compared with a radius derived from a
+# much sparser draw" — but it is not the question the sentence claims it answers.
 #
 # **Recommendation.** Keep q80 and keep the chain. Drop the self-coverage
 # sentence, or replace it with the matched-density number, which is defensible,
 # unflattering and reported here for the first time. And report the quantile in
 # the claim, since the same data yields 60.8 % or 83.7 % for white noise at 2 µm
 # depending only on it.
-
-# %% [markdown]
+#
+# **What this does not settle.** Which of the two fair protocols the redo should
+# adopt: the leave-one-out reading and the matched-draw reading disagree by thirty
+# points and answer different questions, and choosing between them is a decision
+# no measurement here makes.
+#
 # #### The inconsistency the plan names, and what it costs
 #
 # A7 also observes that `internship_workspace.z8_domain_pca.domain_metrics`
@@ -2646,70 +2848,72 @@ draw_density_control(control, CLASS_ORDER, CLASS_COLOUR)
 # %% [markdown]
 # ### Part 2 · What the basis decides
 #
-# The chain fits one PCA(16) on all three conditions pooled with a shared
-# balanced draw. The two-space introduction figures — the slides that teach the
-# reader what "an event is a point" means — instead reuse the **stored scores** of
-# `particle-z8-v2-paired-asymmetry-pca-r2`, a basis fitted on the v4 and v5 arms
-# only, with a different draw and a different seed. The run is honest about it:
-# its own metrics carry `"not_commensurable_with": "particle-z8-v2-coverage-
-# conditions-r1"`. The two nonetheless sit on neighbouring slides.
+# **The problem.** The chain fits one PCA(16) on all three conditions pooled with
+# a shared balanced draw. The two-space introduction figures — the slides that
+# teach the reader what "an event is a point" means — instead reuse the **stored
+# scores** of `particle-z8-v2-paired-asymmetry-pca-r2`, a basis fitted on the v4
+# and v5 arms only, with a different draw and a different seed. The run is honest
+# about it: its own metrics carry `"not_commensurable_with":
+# "particle-z8-v2-coverage-conditions-r1"`. The two nonetheless sit on
+# neighbouring slides. "Not commensurable" is a statement about licence, not about
+# magnitude, and the reader deserves the magnitude.
 #
-# A7 asked how much the quantile is worth. A8 deserves the same treatment: how
-# much is the basis worth? "Not commensurable" is a statement about licence, not
-# about magnitude, and the reader deserves the magnitude.
-#
-# The intro basis is reproduced here from the registry, and checked against the
-# stored scores it is supposed to be.
+# **The process.** The intro basis is refitted here from the registry and checked
+# against the stored scores it is supposed to be, so that the comparison below is
+# between two bases rather than between a basis and a memory.
 
 # %%
-intro_scores = np.load(
-    run_dir("particle-z8-v2-paired-asymmetry-pca-r2") / "pca_scores.npz",
-    allow_pickle=True,
-)
 INTRO_SEED = 20260803
+intro_scores = np.load(
+    run_dir("particle-z8-v2-paired-asymmetry-pca-r2") / "pca_scores.npz", allow_pickle=True
+)
 intro_fit_indices = balanced_class_indices(
-    synthetic_labels, per_class=int(intro_scores["fit_indices"].size // len(CLASS_ORDER)),
+    conditions.labels, per_class=int(intro_scores["fit_indices"].size // len(CLASS_ORDER)),
     seed=INTRO_SEED,
 )
 assert np.array_equal(intro_fit_indices, intro_scores["fit_indices"]), "draw differs"
 intro_pool = np.concatenate(
-    (condition_features["real_noise_4d"][intro_fit_indices],
-     condition_features["asymmetry_5d"][intro_fit_indices]),
+    (conditions.features["real_noise_4d"][intro_fit_indices],
+     conditions.features["asymmetry_5d"][intro_fit_indices]),
     axis=0,
 )
 intro_scaler = StandardScaler().fit(intro_pool)
 intro_pca = PCA(n_components=16, svd_solver="full").fit(intro_scaler.transform(intro_pool))
-intro_project = lambda values: intro_pca.transform(intro_scaler.transform(values))  # noqa: E731
+
+
+def intro_project(values):
+    return intro_pca.transform(intro_scaler.transform(values))
+
+
 intro_deviation = float(np.abs(
-    intro_project(condition_features["asymmetry_5d"])
+    intro_project(conditions.features["asymmetry_5d"])
     - np.asarray(intro_scores["candidate"], dtype=np.float64)
 ).max())
 assert intro_deviation < 1.0e-9, f"reproduction drifted by {intro_deviation:.3e}"
 print("the balanced draw and the 16 stored score columns of "
       f"particle-z8-v2-paired-asymmetry-pca-r2 are reproduced from the registry "
       f"(max deviation {intro_deviation:.1e}, float32 storage)")
-print(f"\n{'basis':>34} {'16 axes':>10} {'PC1-PC2':>9}")
+
 variance_table = {
-    "chain · three conditions pooled": (
-        float(chain_pca.explained_variance_ratio_.sum()),
-        float(chain_pca.explained_variance_ratio_[:2].sum())),
-    "intro · v4+v5 paired arms": (
-        float(intro_pca.explained_variance_ratio_.sum()),
-        float(intro_pca.explained_variance_ratio_[:2].sum())),
+    "chain · three conditions pooled": (basis.explained_variance,
+                                        basis.explained_variance_pc1_pc2),
+    "intro · v4+v5 paired arms": (float(intro_pca.explained_variance_ratio_.sum()),
+                                  float(intro_pca.explained_variance_ratio_[:2].sum())),
 }
+print(f"\n{'basis':>34} {'16 axes':>10} {'PC1-PC2':>9}")
 for name, (sixteen, plane) in variance_table.items():
     print(f"{name:>34} {100 * sixteen:9.2f}% {100 * plane:8.2f}%")
 
 # %% [markdown]
 # #### How different is "close"?
 #
-# Two 16-dimensional subspaces of the same 101-dimensional descriptor space can
-# be compared exactly, by their **principal angles** — the sequence of angles
-# between the closest pair of directions, then the closest pair orthogonal to
-# those, and so on. Zero everywhere means the same subspace; 90° means a
-# direction one basis reads and the other is blind to. The scaling step belongs
-# to the projection, so the directions compared are the rows of the components
-# divided by each basis's own standard deviations.
+# Two 16-dimensional subspaces of the same 101-dimensional descriptor space can be
+# compared exactly, by their **principal angles** — the sequence of angles between
+# the closest pair of directions, then the closest pair orthogonal to those, and
+# so on. Zero everywhere means the same subspace; 90° means a direction one basis
+# reads and the other is blind to. The scaling step belongs to the projection, so
+# the directions compared are the rows of the components divided by each basis's
+# own standard deviations.
 
 # %%
 def read_directions(scaler, pca):
@@ -2718,7 +2922,7 @@ def read_directions(scaler, pca):
 
 
 principal_angles = np.degrees(
-    subspace_angles(read_directions(chain_scaler, chain_pca),
+    subspace_angles(read_directions(basis.scaler, basis.pca),
                     read_directions(intro_scaler, intro_pca))
 )
 print("principal angles between the chain basis and the intro basis, degrees:")
@@ -2728,14 +2932,14 @@ print(f"\nmedian {np.median(principal_angles):.1f}°, mean {principal_angles.mea
       f"{np.mean(np.cos(np.radians(principal_angles)) ** 2):.4f}")
 
 # %%
-intro_real = np.asarray(intro_project(real_features), dtype=np.float64)
+intro_real = np.asarray(intro_project(real.features), dtype=np.float64)
 intro_terminal = np.asarray(
-    intro_project(condition_features["asymmetry_5d"]), dtype=np.float64
+    intro_project(conditions.features["asymmetry_5d"]), dtype=np.float64
 )
 neighbour = {}
 for class_name in CLASS_ORDER:
-    real_index = np.flatnonzero(real_labels == class_name)
-    synthetic_index = np.flatnonzero(synthetic_labels == class_name)
+    real_index = np.flatnonzero(real.labels == class_name)
+    synthetic_index = np.flatnonzero(conditions.labels == class_name)
     chain_distance, chain_neighbour = NearestNeighbors(n_neighbors=1).fit(
         chain_synthetic["asymmetry_5d"][synthetic_index][:, :16]
     ).kneighbors(chain_real[real_index][:, :16])
@@ -2758,8 +2962,8 @@ for class_name in CLASS_ORDER:
 draw_basis_divergence(principal_angles, neighbour, CLASS_ORDER, CLASS_COLOUR)
 
 # %% [markdown]
-# The answer is precise and two-sided. Fifteen of the sixteen directions agree to
-# within 23°, and the sixteenth is 72.5° apart: the two bases share a
+# **The conclusion is precise and two-sided.** Fifteen of the sixteen directions
+# agree to within 23°, and the sixteenth is 72.5° apart: the two bases share a
 # 15-dimensional core and disagree almost completely about one direction. That is
 # enough for the *magnitudes* to transfer — real-to-synthetic distances correlate
 # at 0.92 to 0.98 across the bases — and not nearly enough for the *identities* to
@@ -2771,8 +2975,8 @@ draw_basis_divergence(principal_angles, neighbour, CLASS_ORDER, CLASS_COLOUR)
 # cell shows the headline coverage moving by at most 2.6 points. The intro figure
 # consumes an *identity* — it draws a real event beside "its nearest synthetic
 # neighbour" and asks the audience to read the pair as a like-for-like comparison.
-# About half the time, the chain would have drawn a different partner. The
-# slide's pedagogical claim is the fragile one, not the chain's number.
+# About half the time, the chain would have drawn a different partner. The slide's
+# pedagogical claim is the fragile one, not the chain's number.
 
 # %%
 basis_coverage = {}
@@ -2780,8 +2984,8 @@ for name, (real_scores, synthetic_scores) in (
     ("chain · pooled", (chain_real, chain_synthetic["asymmetry_5d"])),
     ("intro · paired arms", (intro_real, intro_terminal)),
 ):
-    measured = support_coverage(real_scores, synthetic_scores, real_labels,
-                                synthetic_labels, sample=chain_sample, quantile=0.80)
+    measured = support_coverage(real_scores, synthetic_scores, real.labels,
+                                conditions.labels, sample=basis.sample, quantile=0.80)
     basis_coverage[name] = {
         c: measured[c]["real_within_radius_fraction"] for c in CLASS_ORDER
     }
@@ -2802,8 +3006,8 @@ print("\nbasis-induced shift in the headline coverage, percentage points: "
 
 # %%
 chain_run = published("particle-z8-v2-coverage-conditions-r1")
-sweep_run = published("particle-z8-v2-real-synthetic-pca-r2")
-sweep_variance = sweep_run["variants"]["Morphology · primary"]["explained_variance_ratio"]
+sweep_variance = published("particle-z8-v2-real-synthetic-pca-r2")[
+    "variants"]["Morphology · primary"]["explained_variance_ratio"]
 paired_variance = published("particle-z8-v2-paired-asymmetry-pca-r2")["explained_variance_ratio"]
 quoted = {"16 axes": 60.9, "PC1-PC2": 21.1}
 bases = {
@@ -2821,19 +3025,20 @@ for name, (sixteen, plane) in bases.items():
           f"{sixteen - quoted['16 axes']:+6.2f} / {plane - quoted['PC1-PC2']:+5.2f} pp")
 intro_metrics = published("ssl-v18-two-space-intro-r2")
 print(f"\nthe intro figure reports coverage {100 * intro_metrics['coverage_fraction']:.2f} % "
-      f"at 2 µm, against the chain's {100 * chain['asymmetry_5d']['2um']['real_within_radius_fraction']:.2f} % "
+      f"at 2 µm, against the chain's "
+      f"{100 * chain['asymmetry_5d']['2um']['real_within_radius_fraction']:.2f} % "
       "— same class, same condition, same quantile, different basis and different draw")
 print(f"its radius is stored under the key 'radius_p95' with the value "
       f"{intro_metrics['radius_p95']:.6f}, produced by --quantile 0.80")
 
 # %% [markdown]
-# Three bases are in play on adjoining slides, and each has a different variance
-# profile. The quoted 60.9 / 21.1 belongs to the chain's pooled basis; the plane
-# actually drawn on that slide belongs to the paired-arms basis and holds
-# **23.4 %**, not 21.1 %, with 16 axes holding **63.2 %**, not 60.9 %. The figure
-# tool hard-codes the wrong one into its own axis label. The error is small —
-# 2.3 percentage points — and the defect is not: a caption that describes a
-# different picture from the one above it is unfalsifiable by the reader.
+# **The conclusion.** Three bases are in play on adjoining slides, and each has a
+# different variance profile. The quoted 60.9 / 21.1 belongs to the chain's pooled
+# basis; the plane actually drawn on that slide belongs to the paired-arms basis
+# and holds **23.4 %**, not 21.1 %, with 16 axes holding **63.2 %**, not 60.9 %.
+# The figure tool hard-codes the wrong one into its own axis label. The error is
+# small — 2.3 percentage points — and the defect is not: a caption that describes
+# a different picture from the one above it is unfalsifiable by the reader.
 #
 # The naming defect A7 flags is confirmed in the same file. The tool writes its
 # radius under the key **`radius_p95`** whatever `--quantile` was passed, and r2
@@ -2843,22 +3048,28 @@ print(f"its radius is stored under the key 'radius_p95' with the value "
 # **Recommendation.** A8 as written — one basis per campaign, serialised once and
 # reloaded — is the right decision, and this measurement says *why*: not because
 # the coverage number would change much (it moves by at most 2.6 points) but
-# because example selection, twin display and any "nearest neighbour" claim are
-# a coin flip between the two bases. Serialising the basis is what makes an
+# because example selection, twin display and any "nearest neighbour" claim are a
+# coin flip between the two bases. Serialising the basis is what makes an
 # illustration and a measurement talk about the same object.
+#
+# **What this does not settle.** Which basis to serialise. The pooled one is the
+# chain's, but the intro slides were drawn in the paired one, and nothing measured
+# here says the pooled basis is the better *illustration* — only that one of them
+# has to win.
 
 # %% [markdown]
 # ### Part 3 · Why sixteen components
 #
-# Sixteen is not derived from anything. The variance spectrum has no elbow after
-# PC2, so the choice is a frozen analysis constant, and the published argument for
-# it is a sweep: `particle-z8-morphology-dimension-sweep-r2` truncates the stored
-# scores to d = 2…16 and reports coverage, **domain AUC** (the cross-validated
-# area under the ROC curve of a logistic classifier trying to tell real from
-# synthetic; 0.5 means indistinguishable) and the **distance contrast** — the
-# ratio std/mean of pairwise distances, the quantity that collapses when
-# high-dimensional distances concentrate and nearest-neighbour queries stop
-# discriminating. The claimed conclusion is a plateau over d ∈ [12, 16].
+# **The problem.** Sixteen is not derived from anything. The variance spectrum has
+# no elbow after PC2, so the choice is a frozen analysis constant, and the
+# published argument for it is a sweep: `particle-z8-morphology-dimension-sweep-r2`
+# truncates the stored scores to d = 2…16 and reports coverage, **domain AUC**
+# (the cross-validated area under the ROC curve of a logistic classifier trying to
+# tell real from synthetic; 0.5 means indistinguishable) and the **distance
+# contrast** — the ratio std/mean of pairwise distances, the quantity that
+# collapses when high-dimensional distances concentrate and nearest-neighbour
+# queries stop discriminating. The claimed conclusion is a plateau over
+# d ∈ [12, 16].
 #
 # It belongs in this section because it is a basis question, and because it is the
 # analysis that inherits the hard-coded q95 named in Part 1. Two caveats travel
@@ -2868,6 +3079,7 @@ print(f"its radius is stored under the key 'radius_p95' with the value "
 # the sweep structurally cannot see past the number it is meant to justify.
 
 # %%
+SWEEP_SEED = 20260724
 sweep_scores = np.load(
     run_dir("particle-z8-v2-real-synthetic-pca-r2") / "pca_scores.npz", allow_pickle=True
 )
@@ -2875,7 +3087,6 @@ sweep_real = np.asarray(sweep_scores["real_morphology"], dtype=np.float64)
 sweep_synthetic = np.asarray(sweep_scores["synthetic_morphology"], dtype=np.float64)
 sweep_real_labels = sweep_scores["real_class"].astype(str)
 sweep_synthetic_labels = sweep_scores["synthetic_class"].astype(str)
-SWEEP_SEED = 20260724
 dimension_run = published("particle-z8-morphology-dimension-sweep-r2")
 DIMENSIONS = [entry["dimensions"] for entry in dimension_run["sweep"]]
 
@@ -2900,35 +3111,16 @@ print("reproduces particle-z8-morphology-dimension-sweep-r2 exactly "
 # %% [markdown]
 # #### Putting the sweep on the chain's quantile
 #
-# `domain_metrics` cannot be asked for another quantile — 0.95 is written into
-# it. `support_coverage` can, but it takes the reference cloud as an argument,
-# and `domain_metrics` draws its own internally. Rebuilding **that draw** (not the
-# method) is what lets the shipped coverage function score the same cloud at
-# another quantile. The gate is that at 0.95 it must return the published numbers
-# exactly; otherwise it is scoring something else.
+# **The process.** `domain_metrics` cannot be asked for another quantile — 0.95 is
+# written into it. `support_coverage` can, but it takes the reference cloud as an
+# argument, and `domain_metrics` draws its own internally. Rebuilding **that draw**
+# (not the method) is what lets the shipped coverage function score the same cloud
+# at another quantile. The gate is that at 0.95 it must return the published
+# numbers exactly; otherwise it is scoring something else.
 
 # %%
-def domain_reference_draw(real_labels_, synthetic_labels_, *, seed):
-    """The synthetic reference `domain_metrics` samples internally, rebuilt.
-
-    Only the draw is reproduced, so that `support_coverage` can be handed the
-    same cloud at a different quantile. The real draw is consumed but discarded
-    because it only advances the generator.
-    """
-    real_values = np.asarray(real_labels_).astype(str)
-    synthetic_values = np.asarray(synthetic_labels_).astype(str)
-    draw = {}
-    for class_name in CLASS_ORDER:
-        real_index = np.flatnonzero(real_values == class_name)
-        synthetic_index = np.flatnonzero(synthetic_values == class_name)
-        count = min(real_index.size, synthetic_index.size)
-        generator = np.random.default_rng(seed + CLASS_ORDER.index(class_name))
-        generator.choice(real_index, size=count, replace=False)
-        draw[class_name] = generator.choice(synthetic_index, size=count, replace=False)
-    return draw
-
-
-sweep_draw = domain_reference_draw(sweep_real_labels, sweep_synthetic_labels, seed=SWEEP_SEED)
+sweep_draw = domain_reference_draw(sweep_real_labels, sweep_synthetic_labels,
+                                   seed=SWEEP_SEED, class_order=CLASS_ORDER)
 gate = max(
     abs(support_coverage(sweep_real, sweep_synthetic, sweep_real_labels,
                          sweep_synthetic_labels, sample=sweep_draw, quantile=0.95,
@@ -2948,26 +3140,17 @@ for dimensions in DIMENSIONS:
     sweep_at_q80[dimensions] = {
         c: measured[c]["real_within_radius_fraction"] for c in CLASS_ORDER
     }
-print(f"{'d':>3} " + "  ".join(f"{c + ' q95':>12}" for c in CLASS_ORDER)
-      + "  " + "  ".join(f"{c + ' q80':>12}" for c in CLASS_ORDER) + "     gap (pp)")
-for entry in dimension_run["sweep"]:
-    dimensions = entry["dimensions"]
-    print(f"{dimensions:>3} "
-          + "  ".join(f"{100 * entry['coverage'][c]:11.1f}%" for c in CLASS_ORDER)
-          + "  " + "  ".join(f"{100 * sweep_at_q80[dimensions][c]:11.1f}%" for c in CLASS_ORDER)
-          + "   " + " ".join(
-              f"{100 * (entry['coverage'][c] - sweep_at_q80[dimensions][c]):5.1f}"
-              for c in CLASS_ORDER))
+print_dimension_quantiles(dimension_run["sweep"], sweep_at_q80, CLASS_ORDER)
 print("\nchain, white-noise condition at q80 (the condition this basis was fitted on): "
       + "  ".join(
           f"{c} {100 * quantile_sweep[0.80]['white_noise_4d'][c]['coverage']:.1f}%"
           for c in CLASS_ORDER))
 
 # %% [markdown]
-# At the published d = 16 the quantile alone is worth **21.1 / 16.1 / 27.3
-# percentage points**. That is the size of the incommensurability the deck
-# carries between two adjoining slides, and it dwarfs everything else in this
-# section.
+# **The conclusion.** At the published d = 16 the quantile alone is worth
+# **21.1 / 16.1 / 27.3 percentage points**. That is the size of the
+# incommensurability the deck carries between two adjoining slides, and it dwarfs
+# everything else in this section.
 #
 # The rest of the comparison is reassuring, and worth stating because it settles
 # the relative weight of A7 and A8. Once the sweep is put on q80 it reads
@@ -2976,31 +3159,32 @@ print("\nchain, white-noise condition at q80 (the condition this basis was fitte
 # within 4.4 / 0.9 / 1.7 points. **The quantile was the whole incommensurability;
 # the basis contributes a few points.** A7 is the urgent fix, A8 the structural
 # one.
-
-# %% [markdown]
+#
 # #### Is there actually a plateau?
 #
-# The published claim is that past d ≈ 12 nothing moves. That holds for the AUC —
-# the change from 12 to 16 is under 0.001 in every class — and the figure's title
-# generalises it to the solid coverage curve as well. Coverage does not cooperate:
-# at 4 µm it climbs 9.5 points between d = 12 and d = 16 at q95, and 8.0 points at
-# q80. And because the stored scores stop at 16, the sweep cannot ask the obvious
-# next question, which is whether anything settles after 16 either.
+# **The problem.** The published claim is that past d ≈ 12 nothing moves. That
+# holds for the AUC — the change from 12 to 16 is under 0.001 in every class — and
+# the figure's title generalises it to the solid coverage curve as well. Coverage
+# does not cooperate: at 4 µm it climbs 9.5 points between d = 12 and d = 16 at
+# q95, and 8.0 points at q80. And because the stored scores stop at 16, the sweep
+# cannot ask the obvious next question, which is whether anything settles after 16
+# either.
 #
-# It can be asked here. The basis is refitted from the registry with 32
-# components instead of 16 — the same standardisation, the same balanced draw,
-# the same seed — so the first sixteen columns are the published ones and the
-# extension is a strict continuation rather than a new experiment.
+# **The process.** It can be asked here. The basis is refitted from the registry
+# with the full 101 components instead of 16 — the same standardisation, the same
+# balanced draw, the same seed — so the first sixteen columns are the published
+# ones and the extension is a strict continuation rather than a new experiment.
 
 # %%
-sweep_per_class = min(int((synthetic_labels == c).sum()) for c in CLASS_ORDER)
+EXTENDED = (12, 14, 16, 20, 24, 28, 32)
+sweep_per_class = min(int((conditions.labels == c).sum()) for c in CLASS_ORDER)
 wide_scaler, wide_pca, wide_indices = fit_synthetic_pca(
-    condition_features["white_noise_4d"], synthetic_labels,
+    conditions.features["white_noise_4d"], conditions.labels,
     per_class=sweep_per_class, seed=SWEEP_SEED, components=101,
 )
 wide_synthetic = wide_pca.transform(wide_scaler.transform(
-    condition_features["white_noise_4d"]))
-wide_real = wide_pca.transform(wide_scaler.transform(real_features))
+    conditions.features["white_noise_4d"]))
+wide_real = wide_pca.transform(wide_scaler.transform(real.features))
 prefix_deviation = float(np.abs(wide_synthetic[:, :16] - sweep_synthetic).max())
 print(f"refitted basis reproduces the stored 16 columns to {prefix_deviation:.1e} "
       "(float32 storage)")
@@ -3008,13 +3192,13 @@ print("explained variance: "
       + "   ".join(f"{d} axes {100 * wide_pca.explained_variance_ratio_[:d].sum():.1f}%"
                    for d in (16, 24, 32, 101)))
 
-EXTENDED = (12, 14, 16, 20, 24, 28, 32)
-wide_draw = domain_reference_draw(real_labels, synthetic_labels, seed=SWEEP_SEED)
+wide_draw = domain_reference_draw(real.labels, conditions.labels, seed=SWEEP_SEED,
+                                  class_order=CLASS_ORDER)
 extended = {}
 for dimensions in EXTENDED:
-    coverage = support_coverage(wide_real, wide_synthetic, real_labels, synthetic_labels,
+    coverage = support_coverage(wide_real, wide_synthetic, real.labels, conditions.labels,
                                 sample=wide_draw, quantile=0.80, dimensions=dimensions)
-    separability = domain_metrics(wide_real, wide_synthetic, real_labels, synthetic_labels,
+    separability = domain_metrics(wide_real, wide_synthetic, real.labels, conditions.labels,
                                   seed=SWEEP_SEED, dimensions=dimensions)
     extended[dimensions] = {
         "coverage": {c: coverage[c]["real_within_radius_fraction"] for c in CLASS_ORDER},
@@ -3029,11 +3213,12 @@ for dimensions in EXTENDED:
 draw_dimension_quantiles(dimension_run, sweep_at_q80, extended, CLASS_ORDER, CLASS_COLOUR)
 
 # %% [markdown]
-# The plateau is local, not terminal. Past sixteen both quantities resume moving:
-# 4 µm coverage climbs from 57.4 % to 66.8 % between d = 16 and d = 32, and the
-# domain AUC — which the plateau argument rests on — rises from 0.963 to 0.974 at
-# 4 µm, 0.929 to 0.944 at 2 µm and 0.859 to 0.901 at 10 µm. Sixteen sits on a flat
-# stretch of the curve; it is not where the curve stops.
+# **The conclusion: the plateau is local, not terminal.** Past sixteen both
+# quantities resume moving: 4 µm coverage climbs from 57.4 % to 66.8 % between
+# d = 16 and d = 32, and the domain AUC — which the plateau argument rests on —
+# rises from 0.963 to 0.974 at 4 µm, 0.929 to 0.944 at 2 µm and 0.859 to 0.901 at
+# 10 µm. Sixteen sits on a flat stretch of the curve; it is not where the curve
+# stops.
 #
 # Two cautions on reading that panel. The 10 µm coverage wobbles by several points
 # from one d to the next because only 231 real events carry it, so its trend is
@@ -3042,38 +3227,27 @@ draw_dimension_quantiles(dimension_run, sweep_at_q80, extended, CLASS_ORDER, CLA
 # above the 0.66–0.75 the window section reports, because this basis and this
 # condition are the white-noise ones — the least realistic arm of the chain.
 # Domain AUC is no more commensurable across runs than coverage is.
-
-# %% [markdown]
+#
 # #### The concentration that does not arrive
 #
-# The appendix's third argument is the strongest-sounding one: distance contrast
-# falls from 0.60 at d = 2 to 0.29 at d = 16, and a √d extrapolation puts the raw
-# 101-dimensional descriptor near 0.11, where "nearest-neighbour queries stop
-# discriminating". That extrapolation is stated in the run's own metrics as
-# "measured, not fitted" — but the quantity extrapolated *to* was never measured,
-# because the stored scores stop at 16.
+# **The problem.** The appendix's third argument is the strongest-sounding one:
+# distance contrast falls from 0.60 at d = 2 to 0.29 at d = 16, and a √d
+# extrapolation puts the raw 101-dimensional descriptor near 0.11, where
+# "nearest-neighbour queries stop discriminating". That extrapolation is stated in
+# the run's own metrics as "measured, not fitted" — but the quantity extrapolated
+# *to* was never measured, because the stored scores stop at 16.
 #
-# PCA is an orthonormal rotation, so keeping all 101 components preserves every
-# distance of the standardised descriptor exactly. The endpoint is therefore not
-# an extrapolation at all: it can simply be computed.
+# **The process.** PCA is an orthonormal rotation, so keeping all 101 components
+# preserves every distance of the standardised descriptor exactly. The endpoint is
+# therefore not an extrapolation at all: it can simply be computed, on the same
+# refitted basis, with the published contrast definition gated against the
+# published sweep first.
 
 # %%
-def distance_contrast(scores, labels, *, dimensions, sample=2000, seed=SWEEP_SEED):
-    """std/mean of pairwise distances, the published contrast definition."""
-    output = {}
-    for class_name in CLASS_ORDER:
-        rows = scores[labels == class_name][:, :dimensions]
-        generator = np.random.default_rng(seed + CLASS_ORDER.index(class_name))
-        if rows.shape[0] > sample:
-            rows = rows[generator.choice(rows.shape[0], size=sample, replace=False)]
-        distances = pdist(rows)
-        output[class_name] = float(distances.std() / distances.mean())
-    return output
-
-
+CONTRAST_GRID = (2, 4, 8, 12, 16, 24, 32, 48, 64, 101)
 contrast_deviation = max(
-    abs(distance_contrast(wide_synthetic, synthetic_labels,
-                          dimensions=entry["dimensions"])[class_name]
+    abs(distance_contrast(wide_synthetic, conditions.labels, dimensions=entry["dimensions"],
+                          class_order=CLASS_ORDER, seed=SWEEP_SEED)[class_name]
         - entry["contrast"][class_name])
     for entry in dimension_run["sweep"] for class_name in CLASS_ORDER
 )
@@ -3081,9 +3255,9 @@ assert contrast_deviation == 0.0, f"contrast drifted by {contrast_deviation:.3e}
 print(f"the contrast definition reproduces the published sweep exactly "
       f"(max deviation {contrast_deviation:.1e})\n")
 
-CONTRAST_GRID = (2, 4, 8, 12, 16, 24, 32, 48, 64, 101)
 contrast_curve = {
-    dimensions: distance_contrast(wide_synthetic, synthetic_labels, dimensions=dimensions)
+    dimensions: distance_contrast(wide_synthetic, conditions.labels, dimensions=dimensions,
+                                  class_order=CLASS_ORDER, seed=SWEEP_SEED)
     for dimensions in CONTRAST_GRID
 }
 measured_contrast = [float(np.mean(list(contrast_curve[d].values()))) for d in CONTRAST_GRID]
@@ -3105,15 +3279,15 @@ print(f"the decay exponent between d = 16 and d = 101 is {exponent:.3f}, "
 draw_contrast(CONTRAST_GRID, measured_contrast, predicted_contrast, published_extrapolation)
 
 # %% [markdown]
-# The contrast does not collapse. It falls quickly to about d = 12 and then
-# flattens, reaching **0.21** at the full 101 dimensions where the appendix
-# predicts 0.11 — the √d law is a bad model of this descriptor, whose measured
-# decay exponent is 0.157. The raw descriptor is in essentially the same
+# **The conclusion: the contrast does not collapse.** It falls quickly to about
+# d = 12 and then flattens, reaching **0.21** at the full 101 dimensions where the
+# appendix predicts 0.11 — the √d law is a bad model of this descriptor, whose
+# measured decay exponent is 0.157. The raw descriptor is in essentially the same
 # discrimination regime as the 16-axis ruler.
 #
 # So the honest answer to "why sixteen" is not the one on the slide. Each of the
-# three published arguments weakens under measurement: coverage is still moving
-# at 16, the AUC plateau is a local flat spot that ends by d = 20, and the
+# three published arguments weakens under measurement: coverage is still moving at
+# 16, the AUC plateau is a local flat spot that ends by d = 20, and the
 # concentration that was supposed to forbid larger d never arrives. What survives
 # is weaker and defensible: **any d in [12, 16] gives the same verdict, the space
 # is nowhere near the concentration regime, and 16 is a convention.** It must be
@@ -3154,102 +3328,54 @@ draw_contrast(CONTRAST_GRID, measured_contrast, predicted_contrast, published_ex
 # than reading a stored one, which is a strict continuation but not a published
 # run. The fairness control uses the terminal condition only; the same control on
 # v3 and v4 gives the same verdict but is not plotted, to keep one figure to one
-# idea. Everything here is development data — the sealed test split is never
-# read, and no result below authorises a validation claim, a dataset promotion or
-# a change to a shipped tool.
+# idea. Everything here is development data — the sealed test split is never read,
+# and no result below authorises a validation claim, a dataset promotion or a
+# change to a shipped tool.
 
 # %%
-evidence_metrics = {
-    "schema_version": 1,
-    "analysis": "z8-coverage-quantile-and-basis-alignment",
-    "reproduces": {
+metrics, provenance = quantile_basis_evidence(
+    reproduces={
         "particle-z8-v2-coverage-conditions-q80-r1": chain_deviation,
         "particle-z8-v2-paired-asymmetry-pca-r2": intro_deviation,
         "particle-z8-morphology-dimension-sweep-r2": sweep_deviation,
     },
-    "quantile_sweep": {
-        f"{quantile:.2f}": {
-            label: {c: quantile_sweep[quantile][label][c] for c in CLASS_ORDER}
-            for label in CONDITION_LABELS
-        }
-        for quantile in QUANTILE_GRID
-    },
-    "condition_ordering_violations": len(violations),
-    "self_coverage_sentence_holds_between": [above_bar, above_self],
-    "reference_density": density,
-    "self_coverage_control_q80_asymmetry_5d": control,
-    "basis_divergence": {
-        "principal_angles_degrees": np.sort(principal_angles).tolist(),
-        "mean_squared_cosine": float(np.mean(np.cos(np.radians(principal_angles)) ** 2)),
-        "explained_variance": {
-            name: {"sixteen": sixteen, "pc1_pc2": plane}
-            for name, (sixteen, plane) in variance_table.items()
-        },
-        "nearest_neighbour": {
-            c: {k: v for k, v in neighbour[c].items() if not isinstance(v, np.ndarray)}
-            for c in CLASS_ORDER
-        },
-        "coverage_q80_per_basis": basis_coverage,
-    },
-    "dimension_sweep_at_q80": {str(d): sweep_at_q80[d] for d in DIMENSIONS},
-    "dimension_sweep_extended": {str(d): extended[d] for d in EXTENDED},
-    "distance_contrast": {
-        "per_dimension": {str(d): contrast_curve[d] for d in CONTRAST_GRID},
-        "class_mean_at_101": measured_contrast[-1],
-        "published_sqrt_d_extrapolation": published_extrapolation,
-        "measured_decay_exponent_16_to_101": float(exponent),
-    },
-}
-evidence_provenance = {
-    "datasets": dataset_provenance(),
-    "inputs": {
-        "real_events_sha256": notebook_evidence.sha256_file(real_root / "events.csv"),
+    quantile_sweep=quantile_sweep,
+    quantile_grid=QUANTILE_GRID,
+    conditions=conditions.order,
+    class_order=CLASS_ORDER,
+    violations=violations,
+    sentence_holds=(above_bar, above_self),
+    density=density,
+    control=control,
+    angles=principal_angles,
+    variance=variance_table,
+    neighbour=neighbour,
+    basis_coverage=basis_coverage,
+    sweep_at_q80=sweep_at_q80,
+    extended=extended,
+    contrast_curve=contrast_curve,
+    contrast_grid=CONTRAST_GRID,
+    contrast_measured=measured_contrast,
+    published_extrapolation=published_extrapolation,
+    exponent=exponent,
+    seeds={"chain": CHAIN_SEED, "intro": INTRO_SEED, "sweep": SWEEP_SEED},
+    datasets=registry.provenance(),
+    inputs={
+        "real_events_sha256": notebook_evidence.sha256_file(real.events_csv),
         "paired_asymmetry_scores_sha256": notebook_evidence.sha256_file(
             run_dir("particle-z8-v2-paired-asymmetry-pca-r2") / "pca_scores.npz"),
         "real_synthetic_scores_sha256": notebook_evidence.sha256_file(
             run_dir("particle-z8-v2-real-synthetic-pca-r2") / "pca_scores.npz"),
     },
-    "parameters": {
-        "quantile_grid": list(QUANTILE_GRID),
-        "crossing_grid": [min(CROSSING_GRID), max(CROSSING_GRID), 0.01],
-        "chain_seed": CHAIN_SEED,
-        "intro_seed": INTRO_SEED,
-        "dimension_sweep_seed": SWEEP_SEED,
-        "window": 1024,
-        "synthetic_core_slice": [1536, 2560],
-        "components": {"chain": 16, "intro": 16, "extended": 101},
-        "real_population": "development train+val, sealed test never read",
-    },
-    "metric_definitions": {
-        "coverage": (
-            "fraction of real events whose nearest synthetic neighbour in the full "
-            "synthetic class population lies within that condition's synthetic "
-            "self-nearest-neighbour quantile radius, the radius being taken over a "
-            "reference draw of one synthetic event per real event"),
-        "self_coverage_control": (
-            "the same radius applied to synthetic events held out of the reference "
-            "draw, each scored against its nearest other synthetic event of the same "
-            "class in the full population, and to real events scored against the "
-            "thinned reference draw instead of the full cloud"),
-        "principal_angles": (
-            "angles between the 16-dimensional descriptor subspaces the two "
-            "projections read, standardisation included"),
-        "same_nearest_fraction": (
-            "fraction of real events whose nearest synthetic event is the same event "
-            "in both bases"),
-        "distance_contrast": (
-            "std/mean of pairwise synthetic distances at d components, the published "
-            "definition, extended to the full 101-component rotation"),
-    },
-}
-print(f"evidence payload serialises, {len(json.dumps(evidence_metrics))} bytes of metrics")
+)
+print(f"evidence payload serialises, {len(json.dumps(metrics))} bytes of metrics")
 
 try:
     emitted = notebook_evidence.emit_run(
         workspace,
         section="quantile-basis-alignment",
-        metrics=evidence_metrics,
-        provenance=evidence_provenance,
+        metrics=metrics,
+        provenance=provenance,
         claim_boundary=(
             "Measures how the radius quantile, the PCA basis and the retained "
             "dimension change the z8 morphology coverage claim on development "
