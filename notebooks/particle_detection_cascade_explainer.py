@@ -49,6 +49,7 @@ from internship_workspace.particle_detection_cascade_figures import (
     final_arm_results,
     grid_responsibility,
     inspect_detector_shapes,
+    inspect_swin_stage_shapes,
     oracle_crop_facts,
     plot_b1_r1_design,
     plot_cascade_validation_cases,
@@ -252,6 +253,20 @@ plt.show()
 # The baseline reached **42.3% mAP@0.5**, but AP 10 µm was only **12.2%**, far
 # below AP 2 µm and AP 4 µm. The rest of the notebook explains this specific
 # failure, then rebuilds the system on the corrected MAD v2.1 reference.
+#
+# The same short names are used from this point onward:
+#
+# | Name | Component | What it provides |
+# |---|---|---|
+# | Historical detector | Original multiclass Swin–YOLO trained on MAD v1 | starting reference |
+# | **B0** | Multiclass Swin–YOLO retrained on MAD v2.1 | boxes, objectness, native classes |
+# | **B1** | B0 proposals after objectness-ranked, class-agnostic NMS | fixed B0 boxes and native classes |
+# | **R1** | First ROI classifier applied to B1 proposals | replacement class probabilities |
+# | **L1** | Class-agnostic Swin–YOLO localiser | boxes and objectness |
+# | **R2** | Proposal-aware ROI event validator and classifier | event and class probabilities |
+#
+# A combination names its two roles: `B1 + R1` uses B1 boxes with R1 classes;
+# `L1 + R2` uses L1 boxes with R2 event and class scores.
 
 # %% [markdown]
 # ## Resolution in one page
@@ -272,13 +287,16 @@ plt.show()
 #
 # | Stage | Question | Conclusion |
 # |---|---|---|
-# | B0/B1/R1 | Does an event-covering ROI improve classification? | Yes, but R1 does not reject background well enough. |
-# | L1/R2 | Should localisation and classification be separated? | Yes: class-agnostic localisation plus proposal-aware ROI. |
+# | B0 → B1 + R1 | Does an event-covering ROI improve classification? | Yes, but R1 does not reject background well enough. |
+# | L1 + R2 | Should localisation and classification be separated? | Yes: class-agnostic localisation plus proposal-aware ROI. |
 # | Backbones | Is the conclusion specific to Swin? | Class-agnostic localisation is robust; the ROI gain is most convincing with Swin. |
-# | False-positive rate (FPR) | Which system should operate in practice? | `L + R2`, at threshold `0.3991`. |
+# | False-positive rate (FPR) | Which system should operate in practice? | `L1 + R2`, at threshold `0.3991`. |
 #
 # This summary replaces a chronology of jobs. The following sections retain
 # only the experiments needed to understand each transition.
+# In the later multi-backbone robustness check, the shorter labels `L` and `M`
+# mean class-agnostic and multiclass localisation respectively; the Swin `L`
+# model is the `L1` model developed here.
 
 # %% [markdown]
 # ### C · Separate ranking performance from the operating point
@@ -292,7 +310,7 @@ plt.show()
 # five-fold cross-validation under a primary budget of 10% activation on
 # MAD-empty traces. The decision order was fixed before reading the result:
 # macro-F1, precision, AP 10 µm, then the highest threshold. It selects
-# `L + R2`.
+# `L1 + R2`.
 #
 # ```text
 # Four folds: choose a threshold under the 10% budget
@@ -320,7 +338,7 @@ plt.show()
 # %% [markdown]
 # ### D · Operating conclusion and boundary
 #
-# | Cross-fit measurement | `L + R2` |
+# | Cross-fit measurement | `L1 + R2` |
 # |---|---:|
 # | MAD-empty activation | **8.1%** |
 # | Macro-F1 | **62.1%** |
@@ -336,7 +354,8 @@ plt.show()
 #
 # **Conclusion.** The results support a cascade: Swin localises without imposing
 # a class, then R2 rejects background and predicts size from the complete
-# support. `L + R2` favours macro-F1 balance and precision; `M + R2` retains
+# support. `L1 + R2` favours macro-F1 balance and precision; multiclass
+# localisation plus R2 retains
 # more recall and mAP, but gives a less balanced operating classification.
 #
 # Here, “FPR” means activation of traces without MAD v2.1 pseudo-GT, not a rate
@@ -423,22 +442,105 @@ plt.show()
 # %% tags=["hide-input"] jupyter={"source_hidden": true}
 detector = rebuild_model(historical).cpu()
 shape_contract = inspect_detector_shapes(detector, input_length=historical["input_length"])
+swin_contract = inspect_swin_stage_shapes(
+    detector.backbone, input_length=historical["input_length"]
+)
 assert shape_contract.total_parameters == historical["total_params"]
 assert shape_contract.output_shape[1] == 1 + historical["num_classes"] + 2
+assert swin_contract.input_shape == shape_contract.input_shape
+assert swin_contract.projection3_shape == shape_contract.head_cell_input_shape
 
-backbone_text = " → ".join(
-    f"{shape[-1]} cells × {shape[-2]} channels"
-    for shape in shape_contract.backbone_shapes
+patch = detector.backbone.patch_embed
+merge1 = detector.backbone.merge1.reduction
+projection1 = detector.backbone.projections[0]
+window_size = detector.backbone.stage1[0].window
+
+def channels_length(shape):
+    return f"({shape[1]:,}, {shape[2]:,})"
+
+display(Markdown(
+    f"Measured input: `{shape_contract.input_shape}` in "
+    "`(batch, channel, length)` order."
+))
+
+stage_table = [
+    "| Step | Operation read from the model | Output `(channels, length)` |",
+    "|---|---|---:|",
+    f"| Patch embed | `Conv1d(1, {patch.out_channels}, kernel={patch.kernel_size[0]}, "
+    f"stride={patch.stride[0]})` + LayerNorm | `{channels_length(swin_contract.patch_embed_shape)}` |",
+    f"| Stage 1 | `{len(detector.backbone.stage1)}` Swin blocks, window `{window_size}` | "
+    f"`{channels_length(swin_contract.stage1_shape)}` |",
+    f"| Patch merge 1 | concatenate token pairs → `Linear({merge1.in_features}→{merge1.out_features})` "
+    f"+ LayerNorm | `{channels_length(swin_contract.merge1_shape)}` |",
+    f"| Pyramid projection P1 | `Conv1d({projection1[0].in_channels}, "
+    f"{projection1[0].out_channels}, kernel=1)` + `GroupNorm({projection1[1].num_groups})` | "
+    f"`{channels_length(swin_contract.projection1_shape)}` |",
+]
+display(Markdown("\n".join(stage_table)))
+
+# %% [markdown]
+# P1 is a lateral projection, not a top-down FPN fusion: the transformer trunk
+# continues from the unprojected 128-channel tokens. Two further stages repeat
+# the same pattern and form the measured three-level pyramid:
+
+# %% tags=["hide-input"] jupyter={"source_hidden": true}
+pyramid_rows = (
+    ("P1", swin_contract.merge1_shape, swin_contract.projection1_shape, shape_contract.strides[0]),
+    ("P2", swin_contract.merge2_shape, swin_contract.projection2_shape, shape_contract.strides[1]),
+    ("P3", swin_contract.merge3_shape, swin_contract.projection3_shape, shape_contract.strides[2]),
 )
-display(Markdown("\n".join([
-    "| Measured quantity | Value |",
-    "|---|---:|",
-    f"| Input | `{shape_contract.input_shape}` |",
-    f"| Swin1D pyramid | `{backbone_text}` |",
-    f"| Deepest feature entering the YOLO head | `{shape_contract.head_cell_input_shape}` |",
-    f"| YOLO output | `{shape_contract.output_shape}` |",
-    f"| Trainable parameters | `{shape_contract.trainable_parameters:,}` |",
-])))
+pyramid_table = [
+    "| Level | Raw Swin feature | Projected feature | Input stride | Used by this YOLO head? |",
+    "|---|---:|---:|---:|---|",
+]
+for level, raw_shape, projected_shape, stride in pyramid_rows:
+    pyramid_table.append(
+        f"| {level} | `{channels_length(raw_shape)}` | "
+        f"`{channels_length(projected_shape)}` | `{stride}` | "
+        f"{'**yes**' if level == 'P3' else 'no'} |"
+    )
+display(Markdown("\n".join(pyramid_table)))
+
+# %% [markdown]
+# ### How the one-scale YOLO head uses its 512 slots
+#
+# This is the historical, backward-compatible **anchor-free, single-scale**
+# head. It deliberately consumes only P3. Its complete measured output contract
+# is displayed before the meaning of each value.
+
+# %% tags=["hide-input"] jupyter={"source_hidden": true}
+head_conv = detector.head.head
+display(Markdown(
+    f"`Conv1d({head_conv.in_channels}, {head_conv.out_channels}, kernel="
+    f"{head_conv.kernel_size[0]})` produces `{shape_contract.output_shape}`: "
+    f"{head_conv.out_channels} values at each of {shape_contract.output_shape[-1]} slots. "
+    f"The detector has `{shape_contract.trainable_parameters:,}` trainable parameters."
+))
+
+head_table = [
+    "| Per-slot output | Activation | Role | Supervision |",
+    "|---|---|---|---|",
+    "| 1 objectness logit | sigmoid | is an event centred in this slot? | every valid slot |",
+    "| 3 class logits | softmax | probability of 2, 4, or 10 µm | positive slot only |",
+    "| 1 centre-offset logit | sigmoid | centre position inside the slot | positive slot only |",
+    "| 1 log-width | exponential at decoding | event width in input samples | positive slot only |",
+]
+display(Markdown("\n".join(head_table)))
+
+# %% [markdown]
+# The assignment and decoding are simple:
+#
+# 1. a labelled event is assigned to the stride-32 slot containing its centre;
+# 2. that slot learns objectness, class, centre offset, and width, while the
+#    other slots learn background objectness;
+# 3. if two labels share a slot, the smaller event is retained deterministically;
+# 4. at inference, each slot decodes one box and receives the native score
+#    `objectness × highest class probability`;
+# 5. thresholding and class-agnostic 1-D NMS remove weak and overlapping boxes.
+#
+# This version was chosen to reproduce the historical detector. The important
+# consequence is visible below: an event may cover many slots, but only its
+# centre slot owns the target, and the head never pools the predicted interval.
 
 # %%
 responsibility = grid_responsibility(6200, 10200, stride=shape_contract.strides[-1])
@@ -456,14 +558,6 @@ plt.show()
 
 # %% [markdown]
 # ## 3 · Why a crop classifier was not enough
-#
-# The experiment names are deliberately compact:
-#
-# - **B0:** the joint Swin–YOLO detector retrained on MAD v2.1;
-# - **B1:** B0 proposals after class-agnostic non-maximum suppression (NMS),
-#   which removes strongly overlapping boxes, retaining native class scores;
-# - **R1:** the same B1 boxes, reclassified from a region-of-interest (ROI)
-#   crop without changing their geometry.
 #
 # Three intermediate observations narrowed the problem:
 #
@@ -483,6 +577,7 @@ preprocessing_summary = json.loads(
     (preprocessing_root / "summary.json").read_text(encoding="utf-8")
 )
 representations = preprocessing_results(preprocessing_summary)
+baseline_preprocessing = representations[0]
 best_preprocessing = max(representations[1:], key=lambda row: row.macro_f1_delta)
 
 ceiling_root = workspace.artifacts_root / "cross-project/particle-classification-ceiling-method-analysis-r2"
@@ -499,10 +594,22 @@ intermediate_summary = json.loads(
     (intermediate_root / "metrics/summary.json").read_text(encoding="utf-8")
 )
 r1_result = r1_intermediate_facts(intermediate_summary)
+bridge = intermediate_summary["historical_checkpoint_bridge"]
+bridge_effects = intermediate_summary["historical_bridge_decomposition"]
+b0_ranking = intermediate_summary["arms"]["B0"]["unthresholded"]
 
 assert best_preprocessing.macro_f1_delta < 0.07
 assert crop_facts.support_coverage_6144 == 1.0
 assert r1_result.map_ci95_low < 0.0 < r1_result.map_ci95_high
+assert np.isclose(
+    bridge_effects["source_correction_effect"]["mAP@0.5"],
+    bridge["v2.1_signals_v1_labels"]["mAP@0.5"]
+    - bridge["v1_signals_v1_labels"]["mAP@0.5"],
+)
+assert np.isclose(
+    bridge_effects["retraining_effect"]["mAP@0.5"],
+    b0_ranking["mAP@0.5"] - bridge["v2.1_signals_v2.1_labels"]["mAP@0.5"],
+)
 
 figure, axis = plt.subplots(figsize=(11.5, 4.0), constrained_layout=True)
 plot_b1_r1_design(ax=axis)
@@ -512,7 +619,17 @@ plt.show()
 diagnostic_table = [
     "| Observation | Frozen result | Practical meaning |",
     "|---|---:|---|",
-    f"| Best preprocessing change | `{best_preprocessing.macro_f1_delta:+.1%}` macro-F1 | useful, but below the `+7 pt` gate |",
+    f"| Best crop preprocessing | `{baseline_preprocessing.macro_f1:.1%} → "
+    f"{best_preprocessing.macro_f1:.1%}` macro-F1 "
+    f"(`{100 * best_preprocessing.macro_f1_delta:+.1f}` points) | useful, but below the `+7 point` gate; this is **not detector mAP** |",
+    f"| Saturation/source correction, same checkpoint and v1 labels | "
+    f"`{100 * bridge_effects['source_correction_effect']['mAP@0.5']:+.1f}` mAP@0.5 points | a small detector gain |",
+    f"| Switch from v1 to v2.1 labels on corrected signals | "
+    f"`{100 * bridge_effects['reference_change_effect']['mAP@0.5']:+.1f}` mAP@0.5 points | the reference change removes that aggregate gain |",
+    f"| B0 retraining on v2.1 | "
+    f"`{bridge['v2.1_signals_v2.1_labels']['mAP@0.5']:.1%} → {b0_ranking['mAP@0.5']:.1%}` mAP@0.5; "
+    f"AP 10 µm `{bridge['v2.1_signals_v2.1_labels']['per_class_AP@0.5']['10um']:.1%} → "
+    f"{b0_ranking['per_class_AP@0.5']['10um']:.1%}` | 10 µm improves, but end-to-end mAP does not |",
     f"| Full support inside a 6,144 crop | `{crop_facts.support_coverage_6144:.0%}` | the oracle supplies localisation |",
     f"| B1 → R1 class-aware mAP | `{r1_result.b1_map:.1%} → {r1_result.r1_map:.1%}` | ROI aggregation helps class ranking |",
     f"| B1 / R1 Event AP | `{r1_result.common_event_ap:.1%}` for both | the boxes and objectness are unchanged |",
@@ -637,7 +754,7 @@ plt.show()
 # classifier within the final experimental framework. This historically
 # consumed test split checks whether the validation conclusion remains
 # descriptively coherent; it does not select a second system or replace the
-# validation-calibrated `L + R2` operating point reported above.
+# validation-calibrated `L1 + R2` operating point reported above.
 
 # %%
 results = final_arm_results(final_summary)
